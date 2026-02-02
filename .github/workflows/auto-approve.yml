@@ -1,0 +1,50 @@
+# Reusable workflow for auto-approving PRs
+# This workflow is called by other repositories to approve PRs when CI passes
+# Only approves when ALL required checks have passed
+
+name: Auto Approve PR
+
+on:
+  workflow_call:
+    inputs:
+      approve_message:
+        description: 'Message to include in the approval'
+        required: false
+        type: string
+        default: 'Auto-approved by NeuralTrust Bot ✅ All CI checks passed.'
+      timeout_seconds:
+        description: 'Timeout in seconds to wait for all checks'
+        required: false
+        type: number
+        default: 900  # 15 minutes
+    secrets:
+      GH_TOKEN:
+        required: true
+        description: 'GitHub token with repo permissions for approving PRs'
+
+jobs:
+  auto-approve:
+    name: Auto Approve
+    runs-on: ubuntu-latest
+    
+    # Only run on PRs (not pushes)
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: Wait for all CI checks to complete
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          repo-token: ${{ secrets.GH_TOKEN }}
+          wait-interval: 15  # Check every 15 seconds
+          running-workflow-name: 'Auto Approve'  # Exclude this workflow from the check
+          allowed-conclusions: success  # Only proceed if all checks succeed
+
+      - name: Approve PR
+        uses: hmarr/auto-approve-action@v4
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+          review-message: ${{ inputs.approve_message }}
+
+      - name: Log approval
+        run: echo "✅ PR approved - All CI checks passed (tests, linter, security, etc.)"

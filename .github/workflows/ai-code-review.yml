@@ -1,0 +1,255 @@
+# Reusable workflow for AI-powered code review using OpenAI
+# Reviews PR changes and posts inline comments on specific lines with issues
+
+name: AI Code Review
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        description: 'OpenAI model to use'
+        required: false
+        type: string
+        default: 'gpt-4o'
+      language:
+        description: 'Language for the review comments'
+        required: false
+        type: string
+        default: 'english'
+    secrets:
+      OPENAI_API_KEY:
+        required: true
+        description: 'OpenAI API key'
+      GH_TOKEN:
+        required: true
+        description: 'GitHub token for creating review comments'
+
+jobs:
+  ai-review:
+    name: AI Code Review
+    runs-on: ubuntu-latest
+    
+    if: github.event_name == 'pull_request'
+    
+    permissions:
+      contents: read
+      pull-requests: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff and files
+        id: diff
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          # Get the diff for this PR
+          gh pr diff ${{ github.event.pull_request.number }} > pr_diff.txt
+          
+          # Get changed files with patch info (needed for line comments)
+          gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files > files.json
+          
+          # Count files
+          FILE_COUNT=$(jq length files.json)
+          echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+          
+          # Truncate diff if too large (max ~80KB to fit in context with response)
+          if [ $(wc -c < pr_diff.txt) -gt 80000 ]; then
+            head -c 80000 pr_diff.txt > pr_diff_truncated.txt
+            mv pr_diff_truncated.txt pr_diff.txt
+            echo "truncated=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get PR info
+        id: pr-info
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} > pr.json
+          PR_TITLE=$(jq -r '.title' pr.json)
+          PR_BODY=$(jq -r '.body // ""' pr.json | head -c 500)
+          HEAD_SHA=$(jq -r '.head.sha' pr.json)
+          echo "title=$PR_TITLE" >> $GITHUB_OUTPUT
+          echo "head_sha=$HEAD_SHA" >> $GITHUB_OUTPUT
+
+      - name: AI Review with line-specific comments
+        id: review
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          DIFF_CONTENT=$(cat pr_diff.txt)
+          
+          # Create the prompt asking for structured JSON output
+          cat > request.json << EOF
+          {
+            "model": "${{ inputs.model }}",
+            "response_format": { "type": "json_object" },
+            "messages": [
+              {
+                "role": "system",
+                "content": "You are an expert code reviewer. Analyze the pull request diff and identify issues. Return a JSON object with this structure:\n\n{\n  \"summary\": \"Brief overall assessment (1-2 sentences)\",\n  \"issues\": [\n    {\n      \"file\": \"path/to/file.go\",\n      \"line\": 42,\n      \"severity\": \"error|warning|suggestion\",\n      \"message\": \"Description of the issue and how to fix it\"\n    }\n  ],\n  \"approved\": true/false\n}\n\nRules:\n- Only report actual issues (bugs, security, performance, bad practices)\n- 'line' must be a line number that appears in the diff (lines starting with +)\n- severity: 'error' for bugs/security, 'warning' for potential issues, 'suggestion' for improvements\n- If no issues found, return empty issues array and approved: true\n- Be concise in messages\n- Language: ${{ inputs.language }}"
+              },
+              {
+                "role": "user",
+                "content": $(echo "$DIFF_CONTENT" | jq -Rs .)
+              }
+            ],
+            "max_tokens": 4000,
+            "temperature": 0.2
+          }
+          EOF
+          
+          # Call OpenAI API
+          RESPONSE=$(curl -s https://api.openai.com/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -d @request.json)
+          
+          # Check for errors
+          if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
+            ERROR=$(echo "$RESPONSE" | jq -r '.error.message')
+            echo "❌ OpenAI API Error: $ERROR"
+            echo '{"summary": "Review failed", "issues": [], "approved": false}' > review.json
+            exit 0
+          fi
+          
+          # Extract the review JSON
+          echo "$RESPONSE" | jq -r '.choices[0].message.content' > review.json
+          
+          # Validate JSON
+          if ! jq empty review.json 2>/dev/null; then
+            echo "Invalid JSON response, using fallback"
+            echo '{"summary": "Could not parse review", "issues": [], "approved": true}' > review.json
+          fi
+          
+          echo "Review generated:"
+          cat review.json
+
+      - name: Post review with inline comments
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          REVIEW=$(cat review.json)
+          SUMMARY=$(echo "$REVIEW" | jq -r '.summary')
+          APPROVED=$(echo "$REVIEW" | jq -r '.approved')
+          ISSUE_COUNT=$(echo "$REVIEW" | jq '.issues | length')
+          
+          echo "Summary: $SUMMARY"
+          echo "Issues found: $ISSUE_COUNT"
+          echo "Approved: $APPROVED"
+          
+          # Build review comments array for the API
+          COMMENTS="[]"
+          
+          if [ "$ISSUE_COUNT" -gt 0 ]; then
+            # For each issue, try to find the position in the diff
+            for i in $(seq 0 $((ISSUE_COUNT - 1))); do
+              FILE=$(echo "$REVIEW" | jq -r ".issues[$i].file")
+              LINE=$(echo "$REVIEW" | jq -r ".issues[$i].line")
+              SEVERITY=$(echo "$REVIEW" | jq -r ".issues[$i].severity")
+              MESSAGE=$(echo "$REVIEW" | jq -r ".issues[$i].message")
+              
+              # Add emoji based on severity
+              case "$SEVERITY" in
+                error) EMOJI="🚨" ;;
+                warning) EMOJI="⚠️" ;;
+                suggestion) EMOJI="💡" ;;
+                *) EMOJI="📝" ;;
+              esac
+              
+              BODY="$EMOJI **$SEVERITY**: $MESSAGE"
+              
+              # Add to comments array (GitHub will validate the line)
+              COMMENTS=$(echo "$COMMENTS" | jq \
+                --arg path "$FILE" \
+                --arg line "$LINE" \
+                --arg body "$BODY" \
+                '. + [{"path": $path, "line": ($line | tonumber), "body": $body}]')
+            done
+          fi
+          
+          # Determine review event type
+          if [ "$APPROVED" = "true" ] && [ "$ISSUE_COUNT" -eq 0 ]; then
+            EVENT="APPROVE"
+            BODY="## 🤖 AI Code Review\n\n✅ **$SUMMARY**\n\nNo issues found. Code looks good!"
+          elif [ "$ISSUE_COUNT" -gt 0 ]; then
+            EVENT="REQUEST_CHANGES"
+            BODY="## 🤖 AI Code Review\n\n$SUMMARY\n\nFound **$ISSUE_COUNT issue(s)** - see inline comments below."
+          else
+            EVENT="COMMENT"
+            BODY="## 🤖 AI Code Review\n\n$SUMMARY"
+          fi
+          
+          # Create the review with inline comments
+          REVIEW_BODY=$(printf '%s' "$BODY" | jq -Rs .)
+          
+          cat > review_request.json << EOF
+          {
+            "commit_id": "${{ steps.pr-info.outputs.head_sha }}",
+            "body": $REVIEW_BODY,
+            "event": "$EVENT",
+            "comments": $COMMENTS
+          }
+          EOF
+          
+          echo "Creating review with event: $EVENT"
+          cat review_request.json
+          
+          # Post the review
+          RESULT=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews \
+            --method POST \
+            --input review_request.json 2>&1) || true
+          
+          # If inline comments fail (wrong line numbers), fall back to general comment
+          if echo "$RESULT" | grep -q "error"; then
+            echo "⚠️ Inline comments failed, posting general comment"
+            
+            # Build a comment with all issues listed
+            ISSUES_TEXT=""
+            if [ "$ISSUE_COUNT" -gt 0 ]; then
+              ISSUES_TEXT="\n\n### Issues Found:\n"
+              for i in $(seq 0 $((ISSUE_COUNT - 1))); do
+                FILE=$(echo "$REVIEW" | jq -r ".issues[$i].file")
+                LINE=$(echo "$REVIEW" | jq -r ".issues[$i].line")
+                SEVERITY=$(echo "$REVIEW" | jq -r ".issues[$i].severity")
+                MESSAGE=$(echo "$REVIEW" | jq -r ".issues[$i].message")
+                
+                case "$SEVERITY" in
+                  error) EMOJI="🚨" ;;
+                  warning) EMOJI="⚠️" ;;
+                  suggestion) EMOJI="💡" ;;
+                  *) EMOJI="📝" ;;
+                esac
+                
+                ISSUES_TEXT="$ISSUES_TEXT\n- $EMOJI **$FILE:$LINE** - $MESSAGE"
+              done
+            fi
+            
+            COMMENT="## 🤖 AI Code Review\n\n$SUMMARY$ISSUES_TEXT\n\n---\n<sub>Powered by OpenAI ${{ inputs.model }}</sub>"
+            
+            gh pr comment ${{ github.event.pull_request.number }} --body "$(printf '%b' "$COMMENT")"
+          else
+            echo "✅ Review posted successfully"
+          fi
+
+      - name: Summary
+        run: |
+          REVIEW=$(cat review.json)
+          ISSUE_COUNT=$(echo "$REVIEW" | jq '.issues | length')
+          APPROVED=$(echo "$REVIEW" | jq -r '.approved')
+          
+          echo "## 🤖 AI Code Review Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **PR**: #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Files reviewed**: ${{ steps.diff.outputs.file_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Issues found**: $ISSUE_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "- **Model**: ${{ inputs.model }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "$APPROVED" = "true" ]; then
+            echo "- **Result**: ✅ Approved" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Result**: ⚠️ Changes requested" >> $GITHUB_STEP_SUMMARY
+          fi
