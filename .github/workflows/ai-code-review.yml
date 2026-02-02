@@ -160,7 +160,7 @@ jobs:
                 *) EMOJI="📝" ;;
               esac
               
-              BODY="$EMOJI **$SEVERITY**: $MESSAGE"
+              BODY="$EMOJI $SEVERITY: $MESSAGE"
               
               # Add to comments array (GitHub will validate the line)
               COMMENTS=$(echo "$COMMENTS" | jq \
@@ -174,13 +174,13 @@ jobs:
           # Determine review event type
           if [ "$APPROVED" = "true" ] && [ "$ISSUE_COUNT" -eq 0 ]; then
             EVENT="APPROVE"
-            BODY="## 🤖 AI Code Review\n\n✅ **$SUMMARY**\n\nNo issues found. Code looks good!"
+            BODY="🤖 AI Review: ✅ $SUMMARY"
           elif [ "$ISSUE_COUNT" -gt 0 ]; then
             EVENT="REQUEST_CHANGES"
-            BODY="## 🤖 AI Code Review\n\n$SUMMARY\n\nFound **$ISSUE_COUNT issue(s)** - see inline comments below."
+            BODY="🤖 AI Review: $SUMMARY — Found $ISSUE_COUNT issue(s), see inline comments."
           else
             EVENT="COMMENT"
-            BODY="## 🤖 AI Code Review\n\n$SUMMARY"
+            BODY="🤖 AI Review: $SUMMARY"
           fi
           
           # Create the review with inline comments
@@ -210,7 +210,7 @@ jobs:
             # Build a comment with all issues listed
             ISSUES_TEXT=""
             if [ "$ISSUE_COUNT" -gt 0 ]; then
-              ISSUES_TEXT="\n\n### Issues Found:\n"
+              ISSUES_TEXT="\n\nIssues:\n"
               for i in $(seq 0 $((ISSUE_COUNT - 1))); do
                 FILE=$(echo "$REVIEW" | jq -r ".issues[$i].file")
                 LINE=$(echo "$REVIEW" | jq -r ".issues[$i].line")
@@ -224,11 +224,11 @@ jobs:
                   *) EMOJI="📝" ;;
                 esac
                 
-                ISSUES_TEXT="$ISSUES_TEXT\n- $EMOJI **$FILE:$LINE** - $MESSAGE"
+                ISSUES_TEXT="$ISSUES_TEXT\n- $EMOJI $FILE:$LINE — $MESSAGE"
               done
             fi
             
-            COMMENT="## 🤖 AI Code Review\n\n$SUMMARY$ISSUES_TEXT\n\n---\n<sub>Powered by OpenAI ${{ inputs.model }}</sub>"
+            COMMENT="🤖 AI Review: $SUMMARY$ISSUES_TEXT"
             
             gh pr comment ${{ github.event.pull_request.number }} --body "$(printf '%b' "$COMMENT")"
           else
