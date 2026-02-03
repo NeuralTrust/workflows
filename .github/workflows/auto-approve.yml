@@ -11,12 +11,17 @@ on:
         description: 'Message to include in the approval'
         required: false
         type: string
-        default: 'Auto-approved by NeuralTrust Bot ✅ All CI checks passed.'
-      timeout_seconds:
-        description: 'Timeout in seconds to wait for all checks'
+        default: 'Auto-approved ✅ All CI checks passed.'
+      timeout_minutes:
+        description: 'Timeout in minutes to wait for all checks'
         required: false
         type: number
-        default: 900  # 15 minutes
+        default: 15
+      poll_interval:
+        description: 'Seconds between status checks'
+        required: false
+        type: number
+        default: 30
     secrets:
       GH_TOKEN:
         required: true
@@ -26,25 +31,62 @@ jobs:
   auto-approve:
     name: Auto Approve
     runs-on: ubuntu-latest
-    
-    # Only run on PRs (not pushes)
     if: github.event_name == 'pull_request'
     
     steps:
-      - name: Wait for all CI checks to complete
-        uses: lewagon/wait-on-check-action@v1.3.4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          repo-token: ${{ secrets.GH_TOKEN }}
-          wait-interval: 15  # Check every 15 seconds
-          running-workflow-name: 'Auto Approve'  # Exclude this workflow from the check
-          allowed-conclusions: success  # Only proceed if all checks succeed
-
-      - name: Approve PR
-        uses: hmarr/auto-approve-action@v4
-        with:
-          github-token: ${{ secrets.GH_TOKEN }}
-          review-message: ${{ inputs.approve_message }}
-
-      - name: Log approval
-        run: echo "✅ PR approved - All CI checks passed (tests, linter, security, etc.)"
+      - name: Wait for CI and approve
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+          POLL_INTERVAL: ${{ inputs.poll_interval }}
+          APPROVE_MESSAGE: ${{ inputs.approve_message }}
+        run: |
+          echo "⏳ Waiting for CI checks to complete..."
+          
+          TIMEOUT=$((TIMEOUT_MINUTES * 60))
+          ELAPSED=0
+          
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            # Get all check runs for the PR (excluding this workflow)
+            CHECKS=$(gh pr checks $PR_NUMBER --repo $REPO --json name,state,conclusion 2>/dev/null || echo "[]")
+            
+            if [ "$CHECKS" = "[]" ]; then
+              echo "No checks found yet, waiting..."
+              sleep $POLL_INTERVAL
+              ELAPSED=$((ELAPSED + POLL_INTERVAL))
+              continue
+            fi
+            
+            # Count checks by state (exclude PR Automation workflows)
+            PENDING=$(echo "$CHECKS" | jq '[.[] | select(.name != "Auto Approve" and .name != "AI Code Review" and .name != "PR Automation" and .state != "SUCCESS" and .state != "FAILURE" and .state != "CANCELLED")] | length')
+            FAILED=$(echo "$CHECKS" | jq '[.[] | select(.name != "Auto Approve" and .name != "AI Code Review" and .name != "PR Automation" and (.state == "FAILURE" or .conclusion == "failure"))] | length')
+            TOTAL=$(echo "$CHECKS" | jq '[.[] | select(.name != "Auto Approve" and .name != "AI Code Review" and .name != "PR Automation")] | length')
+            
+            echo "Status: $TOTAL checks - $PENDING pending, $FAILED failed (elapsed: ${ELAPSED}s)"
+            
+            # If any check failed, exit without approving
+            if [ "$FAILED" -gt 0 ]; then
+              echo "❌ Some checks failed. Not approving."
+              FAILED_NAMES=$(echo "$CHECKS" | jq -r '[.[] | select(.state == "FAILURE" or .conclusion == "failure")] | .[].name' | tr '\n' ', ')
+              echo "Failed checks: $FAILED_NAMES"
+              exit 0
+            fi
+            
+            # If all checks passed, approve
+            if [ "$PENDING" -eq 0 ] && [ "$TOTAL" -gt 0 ]; then
+              echo "✅ All $TOTAL CI checks passed!"
+              
+              # Approve the PR
+              gh pr review $PR_NUMBER --repo $REPO --approve --body "$APPROVE_MESSAGE"
+              echo "✅ PR approved!"
+              exit 0
+            fi
+            
+            sleep $POLL_INTERVAL
+            ELAPSED=$((ELAPSED + POLL_INTERVAL))
+          done
+          
+          echo "⏰ Timeout reached. CI checks did not complete in time."
+          exit 0
