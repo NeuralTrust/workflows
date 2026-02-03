@@ -79,9 +79,13 @@ jobs:
               exit 0
             fi
             
-            # If all checks completed successfully
-            if [ "$PENDING" -eq 0 ] && [ "$TOTAL" -gt 0 ]; then
-              echo "✅ All $TOTAL CI checks passed!"
+            # If all checks completed successfully (or no CI checks exist)
+            if [ "$PENDING" -eq 0 ]; then
+              if [ "$TOTAL" -gt 0 ]; then
+                echo "✅ All $TOTAL CI checks passed!"
+              else
+                echo "✅ No CI checks to wait for."
+              fi
               echo "result=success" >> $GITHUB_OUTPUT
               exit 0
             fi
