@@ -39,6 +39,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha }}
           TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
           POLL_INTERVAL: ${{ inputs.poll_interval }}
           APPROVE_MESSAGE: ${{ inputs.approve_message }}
@@ -49,32 +50,35 @@ jobs:
           ELAPSED=0
           
           while [ $ELAPSED -lt $TIMEOUT ]; do
-            # Get all check runs for the PR (excluding this workflow)
-            CHECKS=$(gh pr checks $PR_NUMBER --repo $REPO --json name,state,conclusion 2>/dev/null || echo "[]")
+            # Get check runs using the API directly
+            CHECKS=$(gh api repos/$REPO/commits/$SHA/check-runs --jq '.check_runs' 2>/dev/null || echo "[]")
             
-            if [ "$CHECKS" = "[]" ]; then
+            if [ "$CHECKS" = "[]" ] || [ -z "$CHECKS" ]; then
               echo "No checks found yet, waiting..."
               sleep $POLL_INTERVAL
               ELAPSED=$((ELAPSED + POLL_INTERVAL))
               continue
             fi
             
-            # Count checks by state (exclude PR Automation workflows)
-            PENDING=$(echo "$CHECKS" | jq '[.[] | select(.name != "Auto Approve" and .name != "AI Code Review" and .name != "PR Automation" and .state != "SUCCESS" and .state != "FAILURE" and .state != "CANCELLED")] | length')
-            FAILED=$(echo "$CHECKS" | jq '[.[] | select(.name != "Auto Approve" and .name != "AI Code Review" and .name != "PR Automation" and (.state == "FAILURE" or .conclusion == "failure"))] | length')
-            TOTAL=$(echo "$CHECKS" | jq '[.[] | select(.name != "Auto Approve" and .name != "AI Code Review" and .name != "PR Automation")] | length')
+            # Filter out our own workflows and count by status
+            # status: queued, in_progress, completed
+            # conclusion: success, failure, cancelled, skipped, etc.
+            PENDING=$(echo "$CHECKS" | jq '[.[] | select(.name | test("Auto Approve|AI Code Review|PR Automation") | not) | select(.status != "completed")] | length')
+            FAILED=$(echo "$CHECKS" | jq '[.[] | select(.name | test("Auto Approve|AI Code Review|PR Automation") | not) | select(.status == "completed" and .conclusion == "failure")] | length')
+            SUCCESS=$(echo "$CHECKS" | jq '[.[] | select(.name | test("Auto Approve|AI Code Review|PR Automation") | not) | select(.status == "completed" and .conclusion == "success")] | length')
+            TOTAL=$(echo "$CHECKS" | jq '[.[] | select(.name | test("Auto Approve|AI Code Review|PR Automation") | not)] | length')
             
-            echo "Status: $TOTAL checks - $PENDING pending, $FAILED failed (elapsed: ${ELAPSED}s)"
+            echo "Status: $TOTAL checks ($SUCCESS passed, $PENDING pending, $FAILED failed) - elapsed: ${ELAPSED}s"
             
             # If any check failed, exit without approving
             if [ "$FAILED" -gt 0 ]; then
               echo "❌ Some checks failed. Not approving."
-              FAILED_NAMES=$(echo "$CHECKS" | jq -r '[.[] | select(.state == "FAILURE" or .conclusion == "failure")] | .[].name' | tr '\n' ', ')
+              FAILED_NAMES=$(echo "$CHECKS" | jq -r '[.[] | select(.conclusion == "failure")] | .[].name' | tr '\n' ', ')
               echo "Failed checks: $FAILED_NAMES"
               exit 0
             fi
             
-            # If all checks passed, approve
+            # If all checks completed successfully, approve
             if [ "$PENDING" -eq 0 ] && [ "$TOTAL" -gt 0 ]; then
               echo "✅ All $TOTAL CI checks passed!"
               
