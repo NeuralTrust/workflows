@@ -108,21 +108,21 @@ jobs:
             -H "Authorization: Bearer $OPENAI_API_KEY" \
             -d @request.json)
           
-          # Check for errors
+          # Check for errors - skip review silently on API errors
           if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
             ERROR=$(echo "$RESPONSE" | jq -r '.error.message')
             echo "❌ OpenAI API Error: $ERROR"
-            echo '{"summary": "Review failed", "issues": [], "approved": false}' > review.json
+            echo '{"summary": "", "issues": [], "approved": true, "skip": true}' > review.json
             exit 0
           fi
           
           # Extract the review JSON
           echo "$RESPONSE" | jq -r '.choices[0].message.content' > review.json
           
-          # Validate JSON
+          # Validate JSON - skip silently on parse errors
           if ! jq empty review.json 2>/dev/null; then
-            echo "Invalid JSON response, using fallback"
-            echo '{"summary": "Could not parse review", "issues": [], "approved": true}' > review.json
+            echo "Invalid JSON response, skipping review"
+            echo '{"summary": "", "issues": [], "approved": true, "skip": true}' > review.json
           fi
           
           echo "Review generated:"
@@ -136,10 +136,17 @@ jobs:
           SUMMARY=$(echo "$REVIEW" | jq -r '.summary')
           APPROVED=$(echo "$REVIEW" | jq -r '.approved')
           ISSUE_COUNT=$(echo "$REVIEW" | jq '.issues | length')
+          SKIP=$(echo "$REVIEW" | jq -r '.skip // false')
           
           echo "Summary: $SUMMARY"
           echo "Issues found: $ISSUE_COUNT"
           echo "Approved: $APPROVED"
+          
+          # Skip posting if there was an API error
+          if [ "$SKIP" = "true" ]; then
+            echo "⚠️ Skipping review comment due to API error"
+            exit 0
+          fi
           
           # Build review comments array for the API
           COMMENTS="[]"

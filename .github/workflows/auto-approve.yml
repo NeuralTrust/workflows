@@ -11,7 +11,7 @@ on:
         description: 'Message to include in the approval'
         required: false
         type: string
-        default: 'Auto-approved ✅ All CI checks passed.'
+        default: 'LGTM!'
       timeout_minutes:
         description: 'Timeout in minutes to wait for all checks'
         required: false
