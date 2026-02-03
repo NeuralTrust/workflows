@@ -10,7 +10,7 @@ on:
         description: 'OpenAI model to use'
         required: false
         type: string
-        default: 'gpt-4o'
+        default: 'gpt-4o-mini'
       language:
         description: 'Language for the review comments'
         required: false
