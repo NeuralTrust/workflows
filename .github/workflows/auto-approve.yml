@@ -33,16 +33,20 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: read
+    
     steps:
-      - name: Wait for CI and approve
+      - name: Wait for CI checks
+        id: wait
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.event.pull_request.head.sha }}
           TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
           POLL_INTERVAL: ${{ inputs.poll_interval }}
-          APPROVE_MESSAGE: ${{ inputs.approve_message }}
         run: |
           echo "⏳ Waiting for CI checks to complete..."
           
@@ -50,7 +54,7 @@ jobs:
           ELAPSED=0
           
           while [ $ELAPSED -lt $TIMEOUT ]; do
-            # Get check runs using the API directly
+            # Get check runs using the API
             CHECKS=$(gh api repos/$REPO/commits/$SHA/check-runs --jq '.check_runs' 2>/dev/null || echo "[]")
             
             if [ "$CHECKS" = "[]" ] || [ -z "$CHECKS" ]; then
@@ -61,8 +65,6 @@ jobs:
             fi
             
             # Filter out our own workflows and count by status
-            # status: queued, in_progress, completed
-            # conclusion: success, failure, cancelled, skipped, etc.
             PENDING=$(echo "$CHECKS" | jq '[.[] | select(.name | test("Auto Approve|AI Code Review|PR Automation") | not) | select(.status != "completed")] | length')
             FAILED=$(echo "$CHECKS" | jq '[.[] | select(.name | test("Auto Approve|AI Code Review|PR Automation") | not) | select(.status == "completed" and .conclusion == "failure")] | length')
             SUCCESS=$(echo "$CHECKS" | jq '[.[] | select(.name | test("Auto Approve|AI Code Review|PR Automation") | not) | select(.status == "completed" and .conclusion == "success")] | length')
@@ -73,18 +75,14 @@ jobs:
             # If any check failed, exit without approving
             if [ "$FAILED" -gt 0 ]; then
               echo "❌ Some checks failed. Not approving."
-              FAILED_NAMES=$(echo "$CHECKS" | jq -r '[.[] | select(.conclusion == "failure")] | .[].name' | tr '\n' ', ')
-              echo "Failed checks: $FAILED_NAMES"
+              echo "result=failed" >> $GITHUB_OUTPUT
               exit 0
             fi
             
-            # If all checks completed successfully, approve
+            # If all checks completed successfully
             if [ "$PENDING" -eq 0 ] && [ "$TOTAL" -gt 0 ]; then
               echo "✅ All $TOTAL CI checks passed!"
-              
-              # Approve the PR
-              gh pr review $PR_NUMBER --repo $REPO --approve --body "$APPROVE_MESSAGE"
-              echo "✅ PR approved!"
+              echo "result=success" >> $GITHUB_OUTPUT
               exit 0
             fi
             
@@ -92,5 +90,16 @@ jobs:
             ELAPSED=$((ELAPSED + POLL_INTERVAL))
           done
           
-          echo "⏰ Timeout reached. CI checks did not complete in time."
-          exit 0
+          echo "⏰ Timeout reached."
+          echo "result=timeout" >> $GITHUB_OUTPUT
+
+      - name: Approve PR
+        if: steps.wait.outputs.result == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          APPROVE_MESSAGE: ${{ inputs.approve_message }}
+        run: |
+          gh pr review $PR_NUMBER --repo $REPO --approve --body "$APPROVE_MESSAGE"
+          echo "✅ PR approved!"
