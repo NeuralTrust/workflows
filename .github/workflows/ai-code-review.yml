@@ -260,3 +260,15 @@ jobs:
           else
             echo "- **Result**: ⚠️ Changes requested" >> $GITHUB_STEP_SUMMARY
           fi
+
+      - name: Fail if critical issues found
+        run: |
+          REVIEW=$(cat review.json)
+          ERROR_COUNT=$(echo "$REVIEW" | jq '[.issues[] | select(.severity == "error")] | length')
+          
+          if [ "$ERROR_COUNT" -gt 0 ]; then
+            echo "❌ Found $ERROR_COUNT critical issue(s). Blocking auto-approve."
+            exit 1
+          fi
+          
+          echo "✅ No critical issues found."
