@@ -1,0 +1,392 @@
+# ==============================================================================
+# Reusable Workflow: Multi-Image Build & Deploy
+# ==============================================================================
+# Builds multiple Docker images in parallel using a matrix strategy, then
+# updates kustomization.yaml with COMMIT_SHA tags.
+#
+# Use this for services that produce multiple images (multi-target Dockerfiles,
+# separate backend/frontend, image variants, etc.).
+#
+# The `images` input is a JSON array where each object configures one build:
+#   - name (required): Docker image name in the registry
+#   - target:          Docker build target for multi-stage builds
+#   - context:         Docker build context path (default: '.')
+#   - dockerfile:      Dockerfile path relative to context (default: 'Dockerfile')
+#   - build_args:      Extra build args (newline-separated KEY=VALUE)
+#   - tag_prefix:      Prefix for image tags (e.g., 'gpu-')
+#   - tag_suffix:      Suffix for image tags (e.g., '-with-models')
+#
+# Usage:
+#   jobs:
+#     deploy:
+#       uses: NeuralTrust/workflows/.github/workflows/multi-image-deploy.yml@main
+#       with:
+#         images: '[{"name":"api","target":"api"},{"name":"worker","target":"worker"}]'
+#         kustomize_images: '[{"kustomize_name":"api","image_name":"api"},{"kustomize_name":"worker","image_name":"worker"}]'
+#         gcp_project_id: ${{ vars.GCP_PROJECT_ID }}
+#       secrets: inherit
+# ==============================================================================
+
+name: Multi-Image Build & Deploy
+
+on:
+  workflow_call:
+    inputs:
+      images:
+        description: 'JSON array of image build configs (see header for schema)'
+        required: true
+        type: string
+      kustomize_images:
+        description: 'JSON array for kustomization: [{"kustomize_name":"X","image_name":"Y"}]'
+        required: true
+        type: string
+      gcp_project_id:
+        description: 'GCP Project ID that owns the Artifact Registry'
+        required: true
+        type: string
+      registry:
+        description: 'Artifact Registry host'
+        required: false
+        type: string
+        default: 'europe-west1-docker.pkg.dev'
+      repository:
+        description: 'Artifact Registry repository name'
+        required: false
+        type: string
+        default: 'nt-docker'
+      overlay_dev_path:
+        description: 'Path to dev kustomize overlay'
+        required: false
+        type: string
+        default: 'k8s/overlays/dev'
+      overlay_prod_path:
+        description: 'Path to prod kustomize overlay'
+        required: false
+        type: string
+        default: 'k8s/overlays/prod'
+      commit_message_prefix:
+        description: 'Prefix for the kustomization commit message'
+        required: false
+        type: string
+        default: ''
+      free_disk_space:
+        description: 'Free disk space before build (needed for large images like pytorch/cuda)'
+        required: false
+        type: boolean
+        default: false
+      runner:
+        description: 'GitHub Actions runner label'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+    secrets:
+      WIF_PROVIDER:
+        required: true
+      WIF_SERVICE_ACCOUNT:
+        required: true
+      BUILD_SECRETS:
+        required: false
+      GH_TOKEN:
+        required: true
+      SLACK_WEBHOOK_URL:
+        required: false
+        description: 'Slack Incoming Webhook URL for deploy notifications'
+      DOCKER_SECRETS:
+        required: false
+        description: 'Newline-separated Docker build secrets (e.g. for mount-type secrets in Dockerfile)'
+
+jobs:
+  # ============================================================================
+  # Job 1: Build all images in parallel (matrix)
+  # ============================================================================
+  build:
+    name: Build ${{ matrix.image.name }}
+    runs-on: ${{ inputs.runner }}
+
+    strategy:
+      matrix:
+        image: ${{ fromJson(inputs.images) }}
+      fail-fast: false
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Free disk space
+        if: inputs.free_disk_space
+        run: |
+          echo "==> Disk before cleanup:"
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost \
+            /usr/share/swift /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/graalvm \
+            /usr/local/share/chromium /usr/local/lib/node_modules
+          sudo docker image prune --all --force || true
+          echo "==> Disk after cleanup:"
+          df -h /
+
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Compute image metadata
+        id: meta
+        run: |
+          IMAGE_BASE="${{ inputs.registry }}/${{ inputs.gcp_project_id }}/${{ inputs.repository }}/${{ matrix.image.name }}"
+          SHA="${{ github.sha }}"
+          P="${{ matrix.image.tag_prefix }}"
+          S="${{ matrix.image.tag_suffix }}"
+
+          IMAGE_TAG="${P}${SHA}${S}"
+
+          TAGS="${IMAGE_BASE}:${IMAGE_TAG}"
+          TAGS="${TAGS},${IMAGE_BASE}:${P}latest${S}"
+          TAGS="${TAGS},${IMAGE_BASE}:${P}cache${S}"
+
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "cache_ref=${IMAGE_BASE}:${P}cache${S}" >> "$GITHUB_OUTPUT"
+          echo "latest_ref=${IMAGE_BASE}:${P}latest${S}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Login to Artifact Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.registry }}
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Prepare build args
+        id: build-args
+        run: |
+          APP_VERSION="${{ github.sha }}"
+          ARGS="APP_VERSION=${APP_VERSION}"
+
+          if [ -n "$IMAGE_ARGS" ]; then
+            ARGS="${ARGS}"$'\n'"${IMAGE_ARGS}"
+          fi
+
+          if [ -n "$SECRET_ARGS" ]; then
+            ARGS="${ARGS}"$'\n'"${SECRET_ARGS}"
+          fi
+
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "args<<${EOF}" >> "$GITHUB_OUTPUT"
+          echo "${ARGS}" >> "$GITHUB_OUTPUT"
+          echo "${EOF}" >> "$GITHUB_OUTPUT"
+        env:
+          IMAGE_ARGS: ${{ matrix.image.build_args }}
+          SECRET_ARGS: ${{ secrets.BUILD_SECRETS }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.image.context || '.' }}
+          file: ${{ matrix.image.context || '.' }}/${{ matrix.image.dockerfile || 'Dockerfile' }}
+          target: ${{ matrix.image.target || '' }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: ${{ steps.build-args.outputs.args }}
+          cache-from: |
+            type=registry,ref=${{ steps.meta.outputs.cache_ref }}
+            type=registry,ref=${{ steps.meta.outputs.latest_ref }}
+          secrets: ${{ secrets.DOCKER_SECRETS }}
+          cache-to: type=inline
+          provenance: false
+
+  # ============================================================================
+  # Job 2: Update Kustomization (only on develop/main branch pushes)
+  # ============================================================================
+  update-kustomization:
+    name: Update Kustomization
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'branch' && (github.ref_name == 'develop' || github.ref_name == 'main')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Determine overlay directory
+        id: overlay
+        run: |
+          case "${{ github.ref_name }}" in
+            develop)
+              echo "dir=${{ inputs.overlay_dev_path }}" >> "$GITHUB_OUTPUT"
+              ;;
+            main)
+              echo "dir=${{ inputs.overlay_prod_path }}" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Update kustomization.yaml
+        run: |
+          OVERLAY_DIR="${{ steps.overlay.outputs.dir }}"
+          KUSTOMIZATION_FILE="${OVERLAY_DIR}/kustomization.yaml"
+
+          if [ ! -f "$KUSTOMIZATION_FILE" ]; then
+            echo "::warning::${KUSTOMIZATION_FILE} not found. Skipping."
+            exit 0
+          fi
+
+          IMAGE_TAG="${{ github.sha }}"
+          REGISTRY="${{ inputs.registry }}"
+          PROJECT="${{ inputs.gcp_project_id }}"
+          REPO="${{ inputs.repository }}"
+
+          echo "Updating images in ${KUSTOMIZATION_FILE}:"
+          echo '${{ inputs.kustomize_images }}' | jq -c '.[]' | while IFS= read -r img; do
+            KUSTOMIZE_NAME=$(echo "$img" | jq -r '.kustomize_name')
+            IMAGE_NAME=$(echo "$img" | jq -r '.image_name')
+            TAG_OVERRIDE=$(echo "$img" | jq -r '.tag_override // empty')
+            EFFECTIVE_TAG="${TAG_OVERRIDE:-$IMAGE_TAG}"
+            NEW_NAME="${REGISTRY}/${PROJECT}/${REPO}/${IMAGE_NAME}"
+
+            echo "  ${KUSTOMIZE_NAME} -> ${NEW_NAME}:${EFFECTIVE_TAG}"
+
+            sed -i "/name: ${KUSTOMIZE_NAME}/,/newTag:/ s|newTag:.*|newTag: ${EFFECTIVE_TAG}|" "$KUSTOMIZATION_FILE"
+            sed -i "/name: ${KUSTOMIZE_NAME}/,/newName:/ s|newName:.*|newName: ${NEW_NAME}|" "$KUSTOMIZATION_FILE"
+          done
+
+          echo ""
+          echo "Updated ${KUSTOMIZATION_FILE}:"
+          cat "$KUSTOMIZATION_FILE"
+
+      - name: Update APPLICATION_VERSION in config.env
+        run: |
+          OVERLAY_DIR="${{ steps.overlay.outputs.dir }}"
+          CONFIG_FILE="${OVERLAY_DIR}/config.env"
+          IMAGE_TAG="${{ github.sha }}"
+
+          if [ ! -f "$CONFIG_FILE" ]; then
+            echo "::warning::${CONFIG_FILE} not found. Skipping APPLICATION_VERSION update."
+            exit 0
+          fi
+
+          # Ensure file ends with a newline before modifying
+          [ -s "$CONFIG_FILE" ] && [ "$(tail -c1 "$CONFIG_FILE")" != "" ] && echo "" >> "$CONFIG_FILE"
+
+          if grep -q '^APPLICATION_VERSION=' "$CONFIG_FILE"; then
+            sed -i "s|^APPLICATION_VERSION=.*|APPLICATION_VERSION=${IMAGE_TAG}|" "$CONFIG_FILE"
+          else
+            echo "APPLICATION_VERSION=${IMAGE_TAG}" >> "$CONFIG_FILE"
+          fi
+
+      - name: Commit and push changes
+        run: |
+          OVERLAY_DIR="${{ steps.overlay.outputs.dir }}"
+          IMAGE_TAG="${{ github.sha }}"
+          SHORT_SHA="${IMAGE_TAG:0:12}"
+          PREFIX="${{ inputs.commit_message_prefix }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add "${OVERLAY_DIR}/kustomization.yaml" "${OVERLAY_DIR}/config.env"
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          if [ -n "$PREFIX" ]; then
+            COMMIT_MSG="[skip ci] update ${PREFIX} image tag to ${SHORT_SHA} in ${OVERLAY_DIR}"
+          else
+            COMMIT_MSG="[skip ci] update image tag to ${SHORT_SHA} in ${OVERLAY_DIR}"
+          fi
+
+          git commit -m "$COMMIT_MSG"
+          git push origin HEAD:${{ github.ref_name }}
+
+          echo "## Deployment Updated" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Overlay:** \`${OVERLAY_DIR}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tag:** \`${IMAGE_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Branch:** \`${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
+  # Job 3: Slack Notification
+  # ============================================================================
+  notify:
+    name: Slack Notification
+    needs: [build, update-kustomization]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Send Slack notification
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "No Slack webhook configured, skipping"
+            exit 0
+          fi
+
+          BUILD="${{ needs.build.result }}"
+          KUSTOMIZE="${{ needs.update-kustomization.result }}"
+
+          if [ "$BUILD" = "success" ] && ([ "$KUSTOMIZE" = "success" ] || [ "$KUSTOMIZE" = "skipped" ]); then
+            COLOR="#36a64f"
+            STATUS="Deployed"
+            EMOJI=":white_check_mark:"
+          else
+            COLOR="#dc3545"
+            STATUS="Failed"
+            EMOJI=":x:"
+          fi
+
+          PREFIX="${{ inputs.commit_message_prefix }}"
+          IMAGES_LABEL="${PREFIX:-multi-image}"
+
+          curl -sf "$SLACK_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n \
+              --arg color "$COLOR" \
+              --arg status "$STATUS" \
+              --arg emoji "$EMOJI" \
+              --arg repo "${{ github.repository }}" \
+              --arg images "$IMAGES_LABEL" \
+              --arg tag "${{ github.sha }}" \
+              --arg branch "${{ github.ref_name }}" \
+              --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+              --arg actor "${{ github.actor }}" \
+              '{
+                "attachments": [{
+                  "color": $color,
+                  "blocks": [
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": ($emoji + " *" + $status + "* | `" + $repo + "`")
+                      }
+                    },
+                    {
+                      "type": "section",
+                      "fields": [
+                        {"type": "mrkdwn", "text": ("*Images:*\n`" + $images + "`")},
+                        {"type": "mrkdwn", "text": ("*Tag:*\n`" + ($tag | .[0:12]) + "`")},
+                        {"type": "mrkdwn", "text": ("*Branch:*\n`" + $branch + "`")},
+                        {"type": "mrkdwn", "text": ("*Workflow:*\n<" + $url + "|View Run>")}
+                      ]
+                    }
+                  ]
+                }]
+              }'
+            )" || echo "::warning::Slack notification failed"

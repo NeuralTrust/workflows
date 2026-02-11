@@ -1,0 +1,701 @@
+# ==============================================================================
+# Reusable Workflow: Tests & Linting
+# ==============================================================================
+# Generic test runner supporting Go, Python, Node, and Rust.
+# Optional service containers: PostgreSQL, ClickHouse, Redis, Kafka.
+#
+# Usage (minimal):
+#   jobs:
+#     test:
+#       uses: NeuralTrust/workflows/.github/workflows/tests.yml@main
+#       with:
+#         language: go
+#         language_version: '1.25.1'
+#
+# Usage (with services):
+#   jobs:
+#     test:
+#       uses: NeuralTrust/workflows/.github/workflows/tests.yml@main
+#       with:
+#         language: go
+#         language_version: '1.25.1'
+#         postgres_enabled: true
+#         postgres_db: my_app
+#         redis_enabled: true
+#         test_command: |
+#           go test -v -race -coverprofile=coverage.txt ./pkg/...
+#           go test -v -race ./tests/functional
+#         coverage_enabled: true
+#       secrets:
+#         GH_TOKEN: ${{ secrets.GH_TOKEN }}
+#         TEST_SECRETS: |
+#           OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+#           AWS_ACCESS_KEY=${{ secrets.AWS_ACCESS_KEY }}
+#
+# Usage (with Kreuzberg FFI — Go CGO):
+#   jobs:
+#     test:
+#       uses: NeuralTrust/workflows/.github/workflows/tests.yml@main
+#       with:
+#         language: go
+#         language_version: '1.25.1'
+#         kreuzberg_enabled: true
+#         kreuzberg_version: 'v4.1.0'
+# ==============================================================================
+
+name: Tests
+
+on:
+  workflow_call:
+    inputs:
+      # ======================================================================
+      # Language
+      # ======================================================================
+      language:
+        description: 'Programming language: go, python, node, rust'
+        required: true
+        type: string
+      language_version:
+        description: 'Language version (e.g., 1.25.1, 3.12, 20, 1.78)'
+        required: true
+        type: string
+
+      # ======================================================================
+      # Testing
+      # ======================================================================
+      test_enabled:
+        description: 'Enable test execution'
+        required: false
+        type: boolean
+        default: true
+      test_command:
+        description: 'Custom test command (auto-detected per language if empty)'
+        required: false
+        type: string
+        default: ''
+      working_directory:
+        description: 'Working directory for all commands'
+        required: false
+        type: string
+        default: '.'
+      setup_commands:
+        description: 'Commands to run before tests (e.g., copy env files, install system deps)'
+        required: false
+        type: string
+        default: ''
+
+      # ======================================================================
+      # Linting
+      # ======================================================================
+      lint_enabled:
+        description: 'Enable linting'
+        required: false
+        type: boolean
+        default: true
+      lint_command:
+        description: 'Custom lint command (auto-detected per language if empty)'
+        required: false
+        type: string
+        default: ''
+
+      # ======================================================================
+      # Coverage
+      # ======================================================================
+      coverage_enabled:
+        description: 'Generate and display coverage report in job summary'
+        required: false
+        type: boolean
+        default: false
+      coverage_file:
+        description: 'Path to coverage file (relative to working_directory)'
+        required: false
+        type: string
+        default: 'coverage.txt'
+
+      # ======================================================================
+      # Go-specific
+      # ======================================================================
+      go_private_modules:
+        description: 'Enable private Go module access for github.com/NeuralTrust/*'
+        required: false
+        type: boolean
+        default: false
+
+      # ======================================================================
+      # Kreuzberg FFI + Tesseract (Go CGO)
+      # ======================================================================
+      kreuzberg_enabled:
+        description: 'Install Kreuzberg FFI + Tesseract OCR before tests (for Go CGO builds)'
+        required: false
+        type: boolean
+        default: false
+      kreuzberg_version:
+        description: 'Kreuzberg FFI release version'
+        required: false
+        type: string
+        default: 'v4.1.0'
+
+      # ======================================================================
+      # Services: PostgreSQL
+      # ======================================================================
+      postgres_enabled:
+        description: 'Start PostgreSQL service container'
+        required: false
+        type: boolean
+        default: false
+      postgres_version:
+        description: 'PostgreSQL Docker image version'
+        required: false
+        type: string
+        default: '16'
+      postgres_db:
+        description: 'PostgreSQL database name'
+        required: false
+        type: string
+        default: 'testdb'
+      postgres_user:
+        description: 'PostgreSQL user'
+        required: false
+        type: string
+        default: 'postgres'
+      postgres_password:
+        description: 'PostgreSQL password'
+        required: false
+        type: string
+        default: 'postgres'
+
+      # ======================================================================
+      # Services: ClickHouse
+      # ======================================================================
+      clickhouse_enabled:
+        description: 'Start ClickHouse service container'
+        required: false
+        type: boolean
+        default: false
+      clickhouse_version:
+        description: 'ClickHouse Docker image version'
+        required: false
+        type: string
+        default: '24'
+
+      # ======================================================================
+      # Services: Redis
+      # ======================================================================
+      redis_enabled:
+        description: 'Start Redis service container'
+        required: false
+        type: boolean
+        default: false
+      redis_version:
+        description: 'Redis Docker image version'
+        required: false
+        type: string
+        default: '7'
+
+      # ======================================================================
+      # Services: Kafka (KRaft mode, no Zookeeper)
+      # ======================================================================
+      kafka_enabled:
+        description: 'Start Kafka service container (KRaft mode)'
+        required: false
+        type: boolean
+        default: false
+      kafka_version:
+        description: 'Confluent Kafka Docker image version'
+        required: false
+        type: string
+        default: '7.6.0'
+
+    secrets:
+      GH_TOKEN:
+        required: false
+        description: 'GitHub token for private module/repo access'
+      TEST_SECRETS:
+        required: false
+        description: 'Additional secrets as KEY=VALUE pairs (one per line), exported as env vars'
+
+jobs:
+  # ============================================================================
+  # Lint
+  # ============================================================================
+  lint:
+    name: Lint (${{ inputs.language }})
+    runs-on: ubuntu-latest
+    if: inputs.lint_enabled
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GH_TOKEN || github.token }}
+
+      # ---- Go ----
+      - name: Set up Go
+        if: inputs.language == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.language_version }}
+          cache: true
+
+      - name: Configure private Go modules
+        if: inputs.language == 'go' && inputs.go_private_modules
+        env:
+          TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          echo "GOPRIVATE=github.com/NeuralTrust/*" >> $GITHUB_ENV
+          echo "GONOPROXY=github.com/NeuralTrust/*" >> $GITHUB_ENV
+          echo "GONOSUMDB=github.com/NeuralTrust/*" >> $GITHUB_ENV
+          echo "GIT_TERMINAL_PROMPT=0" >> $GITHUB_ENV
+          git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global credential.helper store
+          echo "https://${TOKEN}@github.com" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+          echo "machine github.com login ${TOKEN} password x-oauth-basic" > ~/.netrc
+          chmod 600 ~/.netrc
+
+      - name: Install Go dependencies
+        if: inputs.language == 'go'
+        working-directory: ${{ inputs.working_directory }}
+        run: go mod download
+
+      # ---- Kreuzberg FFI + Tesseract (lint needs CGO for compilation) ----
+      - name: Setup Kreuzberg FFI and Tesseract
+        if: inputs.language == 'go' && inputs.kreuzberg_enabled
+        uses: NeuralTrust/workflows/.github/actions/setup-kreuzberg@main
+        with:
+          version: ${{ inputs.kreuzberg_version }}
+
+      - name: Run Go lint (default)
+        if: inputs.language == 'go' && inputs.lint_command == ''
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.7.0
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+          golangci-lint run --timeout=10m ./...
+
+      # ---- Python ----
+      - name: Set up Python
+        if: inputs.language == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.language_version }}
+
+      - name: Install Python dependencies
+        if: inputs.language == 'python'
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          pip install --upgrade pip
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f pyproject.toml ]; then pip install -e ".[dev]" 2>/dev/null || pip install -e . 2>/dev/null || true; fi
+
+      - name: Run Python lint (default)
+        if: inputs.language == 'python' && inputs.lint_command == ''
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          pip install ruff
+          ruff check .
+
+      # ---- Node ----
+      - name: Set up Node
+        if: inputs.language == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.language_version }}
+          cache: 'npm'
+
+      - name: Install Node dependencies
+        if: inputs.language == 'node'
+        working-directory: ${{ inputs.working_directory }}
+        run: npm ci
+
+      - name: Run Node lint (default)
+        if: inputs.language == 'node' && inputs.lint_command == ''
+        working-directory: ${{ inputs.working_directory }}
+        run: npx eslint .
+
+      # ---- Rust ----
+      - name: Set up Rust
+        if: inputs.language == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.language_version }}
+          components: clippy, rustfmt
+
+      - name: Cache Rust dependencies
+        if: inputs.language == 'rust'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-lint-
+
+      - name: Run Rust lint (default)
+        if: inputs.language == 'rust' && inputs.lint_command == ''
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          cargo fmt --check
+          cargo clippy -- -D warnings
+
+      # ---- Custom lint command ----
+      - name: Run custom lint
+        if: inputs.lint_command != ''
+        working-directory: ${{ inputs.working_directory }}
+        run: ${{ inputs.lint_command }}
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Lint (${{ inputs.language }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Language:** ${{ inputs.language }} ${{ inputs.language_version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Custom command:** ${{ inputs.lint_command != '' && 'Yes' || 'Default' }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
+  # Test
+  # ============================================================================
+  test:
+    name: Test (${{ inputs.language }})
+    runs-on: ubuntu-latest
+    if: inputs.test_enabled
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GH_TOKEN || github.token }}
+
+      # ================================================================
+      # Start service containers
+      # ================================================================
+      - name: Start PostgreSQL
+        if: inputs.postgres_enabled
+        run: |
+          docker run -d --name postgres \
+            -p 5432:5432 \
+            -e POSTGRES_PASSWORD=${{ inputs.postgres_password }} \
+            -e POSTGRES_USER=${{ inputs.postgres_user }} \
+            -e POSTGRES_DB=${{ inputs.postgres_db }} \
+            --health-cmd "pg_isready -U ${{ inputs.postgres_user }}" \
+            --health-interval 5s \
+            --health-timeout 3s \
+            --health-retries 10 \
+            postgres:${{ inputs.postgres_version }}
+
+      - name: Start ClickHouse
+        if: inputs.clickhouse_enabled
+        run: |
+          docker run -d --name clickhouse \
+            -p 8123:8123 \
+            -p 9000:9000 \
+            --ulimit nofile=262144:262144 \
+            clickhouse/clickhouse-server:${{ inputs.clickhouse_version }}
+
+      - name: Start Redis
+        if: inputs.redis_enabled
+        run: |
+          docker run -d --name redis \
+            -p 6379:6379 \
+            redis:${{ inputs.redis_version }}
+
+      - name: Start Kafka (KRaft)
+        if: inputs.kafka_enabled
+        run: |
+          docker run -d --name kafka \
+            -p 9092:9092 \
+            -p 9093:9093 \
+            -e KAFKA_NODE_ID=1 \
+            -e KAFKA_PROCESS_ROLES=controller,broker \
+            -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+            -e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093 \
+            -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+            -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@127.0.0.1:9093 \
+            -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
+            -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://127.0.0.1:9092 \
+            -e KAFKA_CLUSTER_ID=MkU3OEVBNTcwNTJENDM2Qk \
+            -e CLUSTER_ID=MkU3OEVBNTcwNTJENDM2Qk \
+            -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+            -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 \
+            -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
+            -e KAFKA_NUM_PARTITIONS=1 \
+            -e KAFKA_LOG_DIRS=/tmp/kraft-combined-logs \
+            -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=true \
+            confluentinc/cp-kafka:${{ inputs.kafka_version }}
+
+      - name: Wait for services
+        if: inputs.postgres_enabled || inputs.clickhouse_enabled || inputs.redis_enabled || inputs.kafka_enabled
+        run: |
+          wait_for() {
+            local name="$1" cmd="$2" max="$3"
+            echo "Waiting for ${name}..."
+            for i in $(seq 1 "$max"); do
+              if eval "$cmd" > /dev/null 2>&1; then
+                echo "${name} is ready!"
+                return 0
+              fi
+              [ "$i" -eq "$max" ] && echo "${name} failed to start after ${max}s" && exit 1
+              sleep 1
+            done
+          }
+
+          if [ "${{ inputs.postgres_enabled }}" = "true" ]; then
+            wait_for "PostgreSQL" "docker exec postgres pg_isready -U ${{ inputs.postgres_user }}" 60
+          fi
+
+          if [ "${{ inputs.clickhouse_enabled }}" = "true" ]; then
+            wait_for "ClickHouse" "curl -sf http://localhost:8123/ping" 60
+          fi
+
+          if [ "${{ inputs.redis_enabled }}" = "true" ]; then
+            wait_for "Redis" "docker exec redis redis-cli ping" 30
+          fi
+
+          if [ "${{ inputs.kafka_enabled }}" = "true" ]; then
+            wait_for "Kafka" "docker exec kafka bash -c 'echo > /dev/tcp/127.0.0.1/9092'" 90
+          fi
+
+          echo "All services ready!"
+
+      - name: Export service environment variables
+        if: inputs.postgres_enabled || inputs.clickhouse_enabled || inputs.redis_enabled || inputs.kafka_enabled
+        run: |
+          if [ "${{ inputs.postgres_enabled }}" = "true" ]; then
+            echo "POSTGRES_HOST=localhost" >> $GITHUB_ENV
+            echo "POSTGRES_PORT=5432" >> $GITHUB_ENV
+            echo "POSTGRES_USER=${{ inputs.postgres_user }}" >> $GITHUB_ENV
+            echo "POSTGRES_PASSWORD=${{ inputs.postgres_password }}" >> $GITHUB_ENV
+            echo "POSTGRES_DB=${{ inputs.postgres_db }}" >> $GITHUB_ENV
+            echo "DATABASE_URL=postgres://${{ inputs.postgres_user }}:${{ inputs.postgres_password }}@localhost:5432/${{ inputs.postgres_db }}?sslmode=disable" >> $GITHUB_ENV
+          fi
+
+          if [ "${{ inputs.clickhouse_enabled }}" = "true" ]; then
+            echo "CLICKHOUSE_HOST=localhost" >> $GITHUB_ENV
+            echo "CLICKHOUSE_PORT=9000" >> $GITHUB_ENV
+            echo "CLICKHOUSE_HTTP_PORT=8123" >> $GITHUB_ENV
+            echo "CLICKHOUSE_URL=http://localhost:8123" >> $GITHUB_ENV
+          fi
+
+          if [ "${{ inputs.redis_enabled }}" = "true" ]; then
+            echo "REDIS_HOST=localhost" >> $GITHUB_ENV
+            echo "REDIS_PORT=6379" >> $GITHUB_ENV
+            echo "REDIS_URL=redis://localhost:6379" >> $GITHUB_ENV
+          fi
+
+          if [ "${{ inputs.kafka_enabled }}" = "true" ]; then
+            echo "KAFKA_SERVER=localhost:9092" >> $GITHUB_ENV
+            echo "KAFKA_BOOTSTRAP_SERVERS=localhost:9092" >> $GITHUB_ENV
+          fi
+
+      # ================================================================
+      # Language setup
+      # ================================================================
+
+      # ---- Go ----
+      - name: Set up Go
+        if: inputs.language == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.language_version }}
+          cache: true
+
+      - name: Configure private Go modules
+        if: inputs.language == 'go' && inputs.go_private_modules
+        env:
+          TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          echo "GOPRIVATE=github.com/NeuralTrust/*" >> $GITHUB_ENV
+          echo "GONOPROXY=github.com/NeuralTrust/*" >> $GITHUB_ENV
+          echo "GONOSUMDB=github.com/NeuralTrust/*" >> $GITHUB_ENV
+          echo "GIT_TERMINAL_PROMPT=0" >> $GITHUB_ENV
+          git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global credential.helper store
+          echo "https://${TOKEN}@github.com" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+          echo "machine github.com login ${TOKEN} password x-oauth-basic" > ~/.netrc
+          chmod 600 ~/.netrc
+
+      - name: Install Go dependencies
+        if: inputs.language == 'go'
+        working-directory: ${{ inputs.working_directory }}
+        run: go mod download
+
+      # ---- Kreuzberg FFI + Tesseract ----
+      - name: Setup Kreuzberg FFI and Tesseract
+        if: inputs.language == 'go' && inputs.kreuzberg_enabled
+        uses: NeuralTrust/workflows/.github/actions/setup-kreuzberg@main
+        with:
+          version: ${{ inputs.kreuzberg_version }}
+
+      # ---- Python ----
+      - name: Set up Python
+        if: inputs.language == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.language_version }}
+
+      - name: Install Python dependencies
+        if: inputs.language == 'python'
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          pip install --upgrade pip
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f pyproject.toml ]; then pip install -e ".[dev]" 2>/dev/null || pip install -e . 2>/dev/null || true; fi
+
+      # ---- Node ----
+      - name: Set up Node
+        if: inputs.language == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.language_version }}
+          cache: 'npm'
+
+      - name: Install Node dependencies
+        if: inputs.language == 'node'
+        working-directory: ${{ inputs.working_directory }}
+        run: npm ci
+
+      # ---- Rust ----
+      - name: Set up Rust
+        if: inputs.language == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.language_version }}
+
+      - name: Cache Rust dependencies
+        if: inputs.language == 'rust'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-
+
+      # ================================================================
+      # Pre-test setup
+      # ================================================================
+      - name: Export test secrets
+        env:
+          SECRETS_PAYLOAD: ${{ secrets.TEST_SECRETS }}
+        run: |
+          if [ -n "$SECRETS_PAYLOAD" ]; then
+            echo "Exporting test secrets..."
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+              echo "$line" >> $GITHUB_ENV
+            done <<< "$SECRETS_PAYLOAD"
+            echo "Test secrets exported"
+          fi
+
+      - name: Run setup commands
+        if: inputs.setup_commands != ''
+        working-directory: ${{ inputs.working_directory }}
+        run: ${{ inputs.setup_commands }}
+
+      # ================================================================
+      # Run tests
+      # ================================================================
+
+      # ---- Default test commands per language ----
+      - name: Run Go tests (default)
+        if: inputs.language == 'go' && inputs.test_command == ''
+        working-directory: ${{ inputs.working_directory }}
+        run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+
+      - name: Run Python tests (default)
+        if: inputs.language == 'python' && inputs.test_command == ''
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          pip install pytest pytest-cov
+          python -m pytest -v --cov --cov-report=xml:coverage.xml
+
+      - name: Run Node tests (default)
+        if: inputs.language == 'node' && inputs.test_command == ''
+        working-directory: ${{ inputs.working_directory }}
+        run: npm test
+
+      - name: Run Rust tests (default)
+        if: inputs.language == 'rust' && inputs.test_command == ''
+        working-directory: ${{ inputs.working_directory }}
+        run: cargo test --verbose
+
+      # ---- Custom test command ----
+      - name: Run tests (custom)
+        if: inputs.test_command != ''
+        working-directory: ${{ inputs.working_directory }}
+        run: ${{ inputs.test_command }}
+
+      # ================================================================
+      # Coverage
+      # ================================================================
+      - name: Coverage summary
+        if: inputs.coverage_enabled && always()
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          COV_FILE="${{ inputs.coverage_file }}"
+          if [ ! -f "$COV_FILE" ]; then
+            echo "::warning::Coverage file $COV_FILE not found. Skipping."
+            exit 0
+          fi
+
+          echo "## Coverage Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # Go coverage (.txt format from -coverprofile)
+          if [[ "$COV_FILE" == *.txt ]]; then
+            TOTAL=$(go tool cover -func="$COV_FILE" | grep '^total:' | awk '{print $NF}')
+            echo "**Total coverage: ${TOTAL}**" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "<details><summary>Per-function breakdown</summary>" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            go tool cover -func="$COV_FILE" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Python/XML coverage (from pytest-cov --cov-report=xml)
+          if [[ "$COV_FILE" == *.xml ]]; then
+            TOTAL=$(python3 -c "
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('$COV_FILE')
+          rate = float(tree.getroot().attrib.get('line-rate', 0)) * 100
+          print(f'{rate:.1f}%')
+          " 2>/dev/null || echo "N/A")
+            echo "**Total coverage: ${TOTAL}**" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload coverage artifact
+        if: inputs.coverage_enabled && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: ${{ inputs.working_directory }}/${{ inputs.coverage_file }}
+          retention-days: 14
+
+      # ================================================================
+      # Cleanup
+      # ================================================================
+      - name: Stop service containers
+        if: always() && (inputs.postgres_enabled || inputs.clickhouse_enabled || inputs.redis_enabled || inputs.kafka_enabled)
+        run: |
+          docker rm -f postgres clickhouse redis kafka 2>/dev/null || true
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Test (${{ inputs.language }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Language:** ${{ inputs.language }} ${{ inputs.language_version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Custom command:** ${{ inputs.test_command != '' && 'Yes' || 'Default' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Services:**" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - PostgreSQL: ${{ inputs.postgres_enabled && format('{0} (v{1})', '✓', inputs.postgres_version) || '—' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - ClickHouse: ${{ inputs.clickhouse_enabled && format('{0} (v{1})', '✓', inputs.clickhouse_version) || '—' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - Redis: ${{ inputs.redis_enabled && format('{0} (v{1})', '✓', inputs.redis_version) || '—' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - Kafka: ${{ inputs.kafka_enabled && format('{0} (v{1})', '✓', inputs.kafka_version) || '—' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Coverage:** ${{ inputs.coverage_enabled && '✓' || '—' }}" >> "$GITHUB_STEP_SUMMARY"

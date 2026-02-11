@@ -1,0 +1,184 @@
+# ==============================================================================
+# Reusable Workflow: Update Kustomization and Push
+# ==============================================================================
+# Updates image tags in kustomization.yaml based on branch (develop→dev, main→prod),
+# then commits and pushes the changes with [skip ci] to prevent re-triggering.
+#
+# Supports updating multiple images in a single kustomization.yaml file.
+#
+# Usage:
+#   jobs:
+#     deploy:
+#       uses: NeuralTrust/workflows/.github/workflows/update-kustomization.yml@main
+#       with:
+#         images: '[{"kustomize_name":"my-app","image_name":"my-app"}]'
+#         image_tag: ${{ needs.build.outputs.image_tag }}
+#         gcp_project_id: my-gcp-project
+#       secrets:
+#         GH_TOKEN: ${{ secrets.GH_TOKEN }}
+# ==============================================================================
+
+name: Update Kustomization
+
+on:
+  workflow_call:
+    inputs:
+      images:
+        description: >
+          JSON array of image configs to update in kustomization.yaml.
+          Each object: {"kustomize_name": "name-in-kustomize", "image_name": "name-in-registry"}
+          Example: [{"kustomize_name":"app","image_name":"app"}]
+        required: true
+        type: string
+      image_tag:
+        description: 'Image tag to set (typically the commit SHA)'
+        required: true
+        type: string
+      gcp_project_id:
+        description: 'GCP Project ID for image registry reference'
+        required: true
+        type: string
+      registry:
+        description: 'Docker registry host'
+        required: false
+        type: string
+        default: 'europe-west1-docker.pkg.dev'
+      repository:
+        description: 'Artifact Registry repository name'
+        required: false
+        type: string
+        default: 'nt-docker'
+      overlay_dev_path:
+        description: 'Path to dev overlay directory'
+        required: false
+        type: string
+        default: 'k8s/overlays/dev'
+      overlay_prod_path:
+        description: 'Path to prod overlay directory'
+        required: false
+        type: string
+        default: 'k8s/overlays/prod'
+      overlay_path:
+        description: 'Direct path to overlay directory (overrides branch-based detection). Use for release workflows.'
+        required: false
+        type: string
+        default: ''
+      target_branch:
+        description: 'Branch to checkout and push to (overrides github.ref_name). Required when overlay_path is set.'
+        required: false
+        type: string
+        default: ''
+      commit_message_prefix:
+        description: 'Prefix for the commit message (e.g., service name)'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      GH_TOKEN:
+        required: true
+        description: 'GitHub token (PAT or App token) with push permissions to the repo'
+
+jobs:
+  update-kustomization:
+    name: Update Kustomization
+    runs-on: ubuntu-latest
+
+    # Run on branch pushes (develop/main) or when overlay_path is explicitly set (release workflows)
+    if: >-
+      inputs.overlay_path != '' ||
+      (github.ref_type == 'branch' && (github.ref_name == 'develop' || github.ref_name == 'main'))
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+          ref: ${{ inputs.target_branch || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Determine overlay directory
+        id: overlay
+        run: |
+          if [ -n "${{ inputs.overlay_path }}" ]; then
+            echo "dir=${{ inputs.overlay_path }}" >> "$GITHUB_OUTPUT"
+          else
+            case "${{ github.ref_name }}" in
+              develop)
+                echo "dir=${{ inputs.overlay_dev_path }}" >> "$GITHUB_OUTPUT"
+                ;;
+              main)
+                echo "dir=${{ inputs.overlay_prod_path }}" >> "$GITHUB_OUTPUT"
+                ;;
+            esac
+          fi
+
+      - name: Update kustomization.yaml
+        run: |
+          OVERLAY_DIR="${{ steps.overlay.outputs.dir }}"
+          KUSTOMIZATION_FILE="${OVERLAY_DIR}/kustomization.yaml"
+
+          if [ ! -f "$KUSTOMIZATION_FILE" ]; then
+            echo "::warning::${KUSTOMIZATION_FILE} not found. Skipping kustomization update."
+            exit 0
+          fi
+
+          IMAGE_TAG="${{ inputs.image_tag }}"
+          REGISTRY="${{ inputs.registry }}"
+          PROJECT="${{ inputs.gcp_project_id }}"
+          REPO="${{ inputs.repository }}"
+
+          echo "Updating images in ${KUSTOMIZATION_FILE}:"
+          echo '${{ inputs.images }}' | jq -c '.[]' | while IFS= read -r img; do
+            KUSTOMIZE_NAME=$(echo "$img" | jq -r '.kustomize_name')
+            IMAGE_NAME=$(echo "$img" | jq -r '.image_name')
+            TAG_OVERRIDE=$(echo "$img" | jq -r '.tag_override // empty')
+            EFFECTIVE_TAG="${TAG_OVERRIDE:-$IMAGE_TAG}"
+            NEW_NAME="${REGISTRY}/${PROJECT}/${REPO}/${IMAGE_NAME}"
+
+            echo "  ${KUSTOMIZE_NAME} -> ${NEW_NAME}:${EFFECTIVE_TAG}"
+
+            # Update newTag for this image block
+            sed -i "/name: ${KUSTOMIZE_NAME}/,/newTag:/ s|newTag:.*|newTag: ${EFFECTIVE_TAG}|" "$KUSTOMIZATION_FILE"
+
+            # Update newName for this image block
+            sed -i "/name: ${KUSTOMIZE_NAME}/,/newName:/ s|newName:.*|newName: ${NEW_NAME}|" "$KUSTOMIZATION_FILE"
+          done
+
+          echo ""
+          echo "Updated ${KUSTOMIZATION_FILE}:"
+          cat "$KUSTOMIZATION_FILE"
+
+      - name: Commit and push changes
+        run: |
+          OVERLAY_DIR="${{ steps.overlay.outputs.dir }}"
+          IMAGE_TAG="${{ inputs.image_tag }}"
+          SHORT_SHA="${IMAGE_TAG:0:12}"
+          PREFIX="${{ inputs.commit_message_prefix }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add "${OVERLAY_DIR}/kustomization.yaml"
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          if [ -n "$PREFIX" ]; then
+            COMMIT_MSG="[skip ci] update ${PREFIX} image tag to ${SHORT_SHA} in ${OVERLAY_DIR}"
+          else
+            COMMIT_MSG="[skip ci] update image tag to ${SHORT_SHA} in ${OVERLAY_DIR}"
+          fi
+
+          git commit -m "$COMMIT_MSG"
+          git push origin HEAD:${{ inputs.target_branch || github.ref_name }}
+
+          echo "## Kustomization Updated" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Overlay:** \`${OVERLAY_DIR}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tag:** \`${IMAGE_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Branch:** \`${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"

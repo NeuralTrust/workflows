@@ -1,0 +1,308 @@
+# ==============================================================================
+# Reusable Workflow: Smoke Test (Post-Deploy Health Check)
+# ==============================================================================
+# Polls a health endpoint waiting for the expected version to appear.
+# Handles FluxCD async sync + Kubernetes rolling updates gracefully.
+#
+# Outcomes:
+#   ✅ SUCCESS  — New version detected within timeout
+#   ⚠️ WARNING  — Service responding but old version still running (FluxCD lag)
+#   🚨 PROBLEM  — Service not responding at all
+#
+# Usage (in deploy.yml caller):
+#   jobs:
+#     deploy:
+#       uses: NeuralTrust/workflows/.github/workflows/docker-build-deploy.yml@main
+#       ...
+#
+#     smoke-test:
+#       needs: deploy
+#       uses: NeuralTrust/workflows/.github/workflows/smoke-test.yml@main
+#       with:
+#         health_url: https://api.dev.example.com/health
+#         expected_version: ${{ github.sha }}
+#       secrets:
+#         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+#
+# Usage (in release.yml caller):
+#     smoke-test:
+#       needs: release
+#       uses: NeuralTrust/workflows/.github/workflows/smoke-test.yml@main
+#       with:
+#         health_url: https://api.example.com/health
+#         expected_version: ${{ github.ref_name }}
+#         environment: prod
+#       secrets:
+#         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+# ==============================================================================
+
+name: Smoke Test
+
+on:
+  workflow_call:
+    inputs:
+      health_url:
+        description: 'URL to poll (e.g., https://api.dev.example.com/health)'
+        required: true
+        type: string
+      expected_version:
+        description: 'Version string to look for in the health response (commit SHA or release tag)'
+        required: true
+        type: string
+      timeout_minutes:
+        description: 'Max minutes to wait for new version before reporting'
+        required: false
+        type: number
+        default: 10
+      poll_interval:
+        description: 'Seconds between health check polls'
+        required: false
+        type: number
+        default: 30
+      initial_delay:
+        description: 'Seconds to wait before first poll (gives FluxCD time to start sync)'
+        required: false
+        type: number
+        default: 30
+      environment:
+        description: 'Environment name for notifications (e.g., dev, prod)'
+        required: false
+        type: string
+        default: 'dev'
+      service_name:
+        description: 'Service name for notifications (defaults to repo name)'
+        required: false
+        type: string
+        default: ''
+
+    secrets:
+      SLACK_WEBHOOK_URL:
+        required: false
+        description: 'Slack webhook for WARNING/PROBLEM alerts'
+
+jobs:
+  smoke-test:
+    name: Smoke Test (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Wait for initial sync delay
+        run: |
+          echo "Waiting ${{ inputs.initial_delay }}s for FluxCD to detect changes..."
+          sleep ${{ inputs.initial_delay }}
+
+      - name: Poll health endpoint
+        id: poll
+        run: |
+          HEALTH_URL="${{ inputs.health_url }}"
+          EXPECTED="${{ inputs.expected_version }}"
+          TIMEOUT=$(( ${{ inputs.timeout_minutes }} * 60 ))
+          INTERVAL=${{ inputs.poll_interval }}
+          ELAPSED=0
+
+          echo "============================================"
+          echo "Smoke Test Configuration"
+          echo "============================================"
+          echo "  URL:      ${HEALTH_URL}"
+          echo "  Expected: ${EXPECTED}"
+          echo "  Timeout:  ${{ inputs.timeout_minutes }}min"
+          echo "  Interval: ${INTERVAL}s"
+          echo "============================================"
+          echo ""
+
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            HTTP_CODE=$(curl -sf -o /tmp/health_response.txt -w '%{http_code}' --max-time 10 "$HEALTH_URL" 2>/dev/null) || HTTP_CODE="000"
+            RESPONSE=$(cat /tmp/health_response.txt 2>/dev/null) || RESPONSE=""
+
+            MINS=$((ELAPSED / 60))
+            SECS=$((ELAPSED % 60))
+            TIMESTAMP=$(printf "%02d:%02d" $MINS $SECS)
+
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "204" ]; then
+              if echo "$RESPONSE" | grep -q "$EXPECTED"; then
+                echo "[${TIMESTAMP}] ✅ New version detected!"
+                echo ""
+                echo "Response: ${RESPONSE}"
+                echo ""
+                echo "result=success" >> "$GITHUB_OUTPUT"
+                echo "response=${RESPONSE}" >> "$GITHUB_OUTPUT"
+                echo "http_code=${HTTP_CODE}" >> "$GITHUB_OUTPUT"
+                echo "elapsed=${ELAPSED}" >> "$GITHUB_OUTPUT"
+                exit 0
+              else
+                echo "[${TIMESTAMP}] Service responding (HTTP ${HTTP_CODE}) but version not matched yet"
+              fi
+            elif [ "$HTTP_CODE" = "000" ]; then
+              echo "[${TIMESTAMP}] Service not reachable (connection failed)"
+            else
+              echo "[${TIMESTAMP}] Service returned HTTP ${HTTP_CODE}"
+            fi
+
+            sleep "$INTERVAL"
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          echo ""
+          echo "⏱️ Timeout reached (${TIMEOUT}s)"
+          echo ""
+
+          # Final check — is the service at least responding?
+          HTTP_CODE=$(curl -sf -o /tmp/health_response.txt -w '%{http_code}' --max-time 10 "$HEALTH_URL" 2>/dev/null) || HTTP_CODE="000"
+          RESPONSE=$(cat /tmp/health_response.txt 2>/dev/null) || RESPONSE=""
+
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "204" ]; then
+            echo "⚠️ WARNING: Service healthy but running OLD version"
+            echo "  Expected: ${EXPECTED}"
+            echo "  Response: ${RESPONSE}"
+            echo ""
+            echo "result=warning" >> "$GITHUB_OUTPUT"
+            echo "response=${RESPONSE}" >> "$GITHUB_OUTPUT"
+            echo "http_code=${HTTP_CODE}" >> "$GITHUB_OUTPUT"
+            echo "elapsed=${ELAPSED}" >> "$GITHUB_OUTPUT"
+          else
+            echo "🚨 PROBLEM: Service not responding at all!"
+            echo "  HTTP code: ${HTTP_CODE}"
+            echo ""
+            echo "result=problem" >> "$GITHUB_OUTPUT"
+            echo "response=" >> "$GITHUB_OUTPUT"
+            echo "http_code=${HTTP_CODE}" >> "$GITHUB_OUTPUT"
+            echo "elapsed=${ELAPSED}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Send Slack notification
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "No Slack webhook configured, skipping notification"
+            exit 0
+          fi
+
+          RESULT="${{ steps.poll.outputs.result }}"
+          SERVICE="${{ inputs.service_name }}"
+          [ -z "$SERVICE" ] && SERVICE="${{ github.repository }}"
+          ENV="${{ inputs.environment }}"
+          EXPECTED="${{ inputs.expected_version }}"
+          SHORT_VERSION="${EXPECTED:0:12}"
+          URL="${{ inputs.health_url }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          ELAPSED="${{ steps.poll.outputs.elapsed }}"
+
+          case "$RESULT" in
+            success)
+              COLOR="#36a64f"
+              EMOJI=":white_check_mark:"
+              TITLE="Smoke Test Passed"
+              MSG="New version \`${SHORT_VERSION}\` is live on *${ENV}*"
+              ;;
+            warning)
+              COLOR="#ff9900"
+              EMOJI=":warning:"
+              TITLE="Smoke Test Warning"
+              MSG="Service healthy on *${ENV}* but still running *old version* after ${{ inputs.timeout_minutes }}min. Expected \`${SHORT_VERSION}\`. FluxCD sync may be delayed."
+              ;;
+            problem)
+              COLOR="#dc3545"
+              EMOJI=":rotating_light:"
+              TITLE="Smoke Test FAILED"
+              MSG="Service *not responding* on *${ENV}* after ${{ inputs.timeout_minutes }}min! Health endpoint: \`${URL}\`"
+              ;;
+            *)
+              COLOR="#808080"
+              EMOJI=":grey_question:"
+              TITLE="Smoke Test Unknown"
+              MSG="Unexpected result for *${ENV}*"
+              ;;
+          esac
+
+          curl -sf "$SLACK_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n \
+              --arg color "$COLOR" \
+              --arg emoji "$EMOJI" \
+              --arg title "$TITLE" \
+              --arg msg "$MSG" \
+              --arg service "$SERVICE" \
+              --arg env "$ENV" \
+              --arg version "$SHORT_VERSION" \
+              --arg url "$URL" \
+              --arg run_url "$RUN_URL" \
+              --arg actor "${{ github.actor }}" \
+              '{
+                "attachments": [{
+                  "color": $color,
+                  "blocks": [
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": ($emoji + " *" + $title + "* | `" + $service + "` (" + $env + ")")
+                      }
+                    },
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": $msg
+                      }
+                    },
+                    {
+                      "type": "section",
+                      "fields": [
+                        {"type": "mrkdwn", "text": ("*Health URL:*\n`" + $url + "`")},
+                        {"type": "mrkdwn", "text": ("*Expected:*\n`" + $version + "`")},
+                        {"type": "mrkdwn", "text": ("*Actor:*\n" + $actor)},
+                        {"type": "mrkdwn", "text": ("*Workflow:*\n<" + $run_url + "|View Run>")}
+                      ]
+                    }
+                  ]
+                }]
+              }'
+            )" || echo "::warning::Slack notification failed"
+
+      - name: Set exit code
+        run: |
+          RESULT="${{ steps.poll.outputs.result }}"
+          case "$RESULT" in
+            success)
+              echo "✅ Smoke test passed"
+              exit 0
+              ;;
+            warning)
+              echo "⚠️ Smoke test warning — old version still running"
+              # Exit 0 — service IS running, just old version
+              exit 0
+              ;;
+            problem)
+              echo "🚨 Smoke test failed — service not responding"
+              exit 1
+              ;;
+          esac
+
+      - name: Summary
+        if: always()
+        run: |
+          RESULT="${{ steps.poll.outputs.result }}"
+          echo "## Smoke Test (${{ inputs.environment }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          case "$RESULT" in
+            success)
+              echo "**Result:** ✅ New version deployed and verified" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            warning)
+              echo "**Result:** ⚠️ Service healthy but old version still running" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "> FluxCD sync or rolling update may still be in progress." >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            problem)
+              echo "**Result:** 🚨 Service not responding" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+          esac
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **URL:** \`${{ inputs.health_url }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Expected:** \`${{ inputs.expected_version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Timeout:** ${{ inputs.timeout_minutes }} min" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **HTTP Code:** \`${{ steps.poll.outputs.http_code }}\`" >> "$GITHUB_STEP_SUMMARY"

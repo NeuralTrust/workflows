@@ -1,0 +1,222 @@
+# ==============================================================================
+# Reusable Workflow: Build and Push Docker Image to GCP Artifact Registry
+# ==============================================================================
+# Builds a Docker image with BuildKit caching and pushes to Artifact Registry.
+# Supports: custom Dockerfile, build targets, build args, tag prefix/suffix,
+#           semver tagging on git tags, and registry-based layer caching.
+#
+# Usage:
+#   jobs:
+#     build:
+#       uses: NeuralTrust/workflows/.github/workflows/build-push-image.yml@main
+#       with:
+#         image_name: my-service
+#         gcp_project_id: my-gcp-project
+#       secrets:
+#         WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
+#         WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+# ==============================================================================
+
+name: Build and Push Docker Image
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: 'Docker image name in the registry (e.g., "tenant-app", "aiapi")'
+        required: true
+        type: string
+      gcp_project_id:
+        description: 'GCP Project ID that owns the Artifact Registry'
+        required: true
+        type: string
+      registry:
+        description: 'Artifact Registry host'
+        required: false
+        type: string
+        default: 'europe-west1-docker.pkg.dev'
+      repository:
+        description: 'Artifact Registry repository name'
+        required: false
+        type: string
+        default: 'nt-docker'
+      dockerfile:
+        description: 'Path to Dockerfile relative to context (e.g., "Dockerfile", "dockerfiles/gpu/Dockerfile")'
+        required: false
+        type: string
+        default: 'Dockerfile'
+      context:
+        description: 'Docker build context path'
+        required: false
+        type: string
+        default: '.'
+      build_target:
+        description: 'Docker build target for multi-stage builds (e.g., "api", "worker")'
+        required: false
+        type: string
+        default: ''
+      build_args:
+        description: 'Newline-separated build args (KEY=VALUE). APP_VERSION is auto-added.'
+        required: false
+        type: string
+        default: ''
+      tag_prefix:
+        description: 'Prefix for all image tags (e.g., "gpu-")'
+        required: false
+        type: string
+        default: ''
+      tag_suffix:
+        description: 'Suffix for all image tags (e.g., "-with-models")'
+        required: false
+        type: string
+        default: ''
+      runner:
+        description: 'GitHub Actions runner label'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+    secrets:
+      WIF_PROVIDER:
+        required: true
+        description: 'GCP Workload Identity Federation provider'
+      WIF_SERVICE_ACCOUNT:
+        required: true
+        description: 'GCP service account email for WIF authentication'
+      BUILD_SECRETS:
+        required: false
+        description: 'Newline-separated secret build args (KEY=VALUE)'
+      DOCKER_SECRETS:
+        required: false
+        description: 'Newline-separated Docker build secrets (e.g. for mount-type secrets in Dockerfile)'
+    outputs:
+      image_ref:
+        description: 'Full image reference with commit SHA tag'
+        value: ${{ jobs.build-push.outputs.image_ref }}
+      image_tag:
+        description: 'Image tag (prefix + commit SHA + suffix)'
+        value: ${{ jobs.build-push.outputs.image_tag }}
+
+jobs:
+  build-push:
+    name: Build & Push ${{ inputs.image_name }}
+    runs-on: ${{ inputs.runner }}
+
+    outputs:
+      image_ref: ${{ steps.meta.outputs.image_ref }}
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Compute image metadata
+        id: meta
+        run: |
+          IMAGE_BASE="${{ inputs.registry }}/${{ inputs.gcp_project_id }}/${{ inputs.repository }}/${{ inputs.image_name }}"
+          SHA="${{ github.sha }}"
+          P="${{ inputs.tag_prefix }}"
+          S="${{ inputs.tag_suffix }}"
+
+          IMAGE_TAG="${P}${SHA}${S}"
+          echo "image_base=${IMAGE_BASE}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${IMAGE_BASE}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "cache_ref=${IMAGE_BASE}:${P}cache${S}" >> "$GITHUB_OUTPUT"
+          echo "latest_ref=${IMAGE_BASE}:${P}latest${S}" >> "$GITHUB_OUTPUT"
+
+          # Build comma-separated tags list
+          TAGS="${IMAGE_BASE}:${IMAGE_TAG}"
+          TAGS="${TAGS},${IMAGE_BASE}:${P}latest${S}"
+          TAGS="${TAGS},${IMAGE_BASE}:${P}cache${S}"
+
+          # Add semver tag if this is a tag push
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG_NAME="${{ github.ref_name }}"
+            SEMVER_TAG="${P}${TAG_NAME}${S}"
+            TAGS="${TAGS},${IMAGE_BASE}:${SEMVER_TAG}"
+            echo "has_semver=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_semver=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Login to Artifact Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.registry }}
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Prepare build args
+        id: build-args
+        run: |
+          # Compute APP_VERSION: tag name (for tag pushes) or commit SHA
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            APP_VERSION="${{ github.ref_name }}"
+          else
+            APP_VERSION="${{ github.sha }}"
+          fi
+
+          # Start with APP_VERSION
+          ARGS="APP_VERSION=${APP_VERSION}"
+
+          # Append user-provided build args
+          if [ -n "$INPUT_ARGS" ]; then
+            ARGS="${ARGS}"$'\n'"${INPUT_ARGS}"
+          fi
+
+          # Append secret build args
+          if [ -n "$SECRET_ARGS" ]; then
+            ARGS="${ARGS}"$'\n'"${SECRET_ARGS}"
+          fi
+
+          # Use EOF delimiter for multiline output
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "args<<${EOF}" >> "$GITHUB_OUTPUT"
+          echo "${ARGS}" >> "$GITHUB_OUTPUT"
+          echo "${EOF}" >> "$GITHUB_OUTPUT"
+        env:
+          INPUT_ARGS: ${{ inputs.build_args }}
+          SECRET_ARGS: ${{ secrets.BUILD_SECRETS }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.context }}/${{ inputs.dockerfile }}
+          target: ${{ inputs.build_target || '' }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: ${{ steps.build-args.outputs.args }}
+          cache-from: |
+            type=registry,ref=${{ steps.meta.outputs.cache_ref }}
+            type=registry,ref=${{ steps.meta.outputs.latest_ref }}
+          secrets: ${{ secrets.DOCKER_SECRETS }}
+          cache-to: type=inline
+          provenance: false
+
+      - name: Summary
+        run: |
+          echo "## Docker Image Built & Pushed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Image:** \`${{ steps.meta.outputs.image_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Latest:** \`${{ steps.meta.outputs.latest_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${{ steps.meta.outputs.has_semver }}" == "true" ]]; then
+            echo "- **Semver:** \`${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -1,0 +1,68 @@
+# ==============================================================================
+# Composite Action: Setup Kreuzberg FFI and Tesseract
+# ==============================================================================
+# Installs Tesseract OCR + Kreuzberg FFI libraries and configures CGO
+# environment variables for Go builds that depend on kreuzberg-ffi.
+#
+# Usage:
+#   - name: Setup Kreuzberg FFI and Tesseract
+#     uses: NeuralTrust/workflows/.github/actions/setup-kreuzberg@main
+#     with:
+#       version: 'v4.1.0'
+# ==============================================================================
+
+name: 'Setup Kreuzberg FFI and Tesseract'
+description: 'Install Tesseract OCR and Kreuzberg FFI libraries for Go CGO builds'
+
+inputs:
+  version:
+    description: 'Kreuzberg FFI release version'
+    required: false
+    default: 'v4.1.0'
+  tesseract_langs:
+    description: 'Space-separated list of Tesseract language packs to install'
+    required: false
+    default: 'eng spa'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Tesseract OCR
+      shell: bash
+      run: |
+        sudo apt-get update
+        LANG_PKGS=""
+        for lang in ${{ inputs.tesseract_langs }}; do
+          LANG_PKGS="$LANG_PKGS tesseract-ocr-${lang}"
+        done
+        sudo apt-get install -y tesseract-ocr ${LANG_PKGS} poppler-utils
+
+    - name: Setup Tesseract data cache
+      shell: bash
+      run: |
+        sudo mkdir -p /home/runner/work/kreuzberg/kreuzberg/target/tesseract-rs-cache
+        sudo ln -sf /usr/share/tesseract-ocr/5/tessdata \
+          /home/runner/work/kreuzberg/kreuzberg/target/tesseract-rs-cache/tessdata
+
+    - name: Download and install Kreuzberg FFI
+      shell: bash
+      env:
+        KREUZBERG_VERSION: ${{ inputs.version }}
+      run: |
+        echo "Installing Kreuzberg FFI ${KREUZBERG_VERSION}..."
+        curl -LO "https://github.com/kreuzberg-dev/kreuzberg/releases/download/${KREUZBERG_VERSION}/go-ffi-linux-x86_64.tar.gz"
+        tar -xzf go-ffi-linux-x86_64.tar.gz
+        sudo cp kreuzberg-ffi/lib/* /usr/local/lib/
+        sudo cp kreuzberg-ffi/include/* /usr/local/include/
+        sudo ldconfig
+        rm -rf kreuzberg-ffi go-ffi-linux-x86_64.tar.gz
+        echo "Kreuzberg FFI ${KREUZBERG_VERSION} installed successfully"
+
+    - name: Configure CGO environment
+      shell: bash
+      run: |
+        echo "CGO_ENABLED=1" >> $GITHUB_ENV
+        echo "CGO_CFLAGS=-I/usr/local/include" >> $GITHUB_ENV
+        echo "CGO_LDFLAGS=-L/usr/local/lib -lkreuzberg_ffi" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=/usr/local/lib" >> $GITHUB_ENV
+        echo "GOFLAGS=-mod=mod" >> $GITHUB_ENV

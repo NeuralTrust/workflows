@@ -1,0 +1,306 @@
+# ==============================================================================
+# Reusable Workflow: SAST & Security Scanning
+# ==============================================================================
+# Runs static application security testing:
+#   - Trivy: vulnerability scanning for dependencies, IaC, secrets (MANDATORY - blocks CI)
+#   - Gitleaks: secret/credential detection in git history (informational - does not block CI)
+#   - Gosec: Go source code SAST (informational - does not block CI)
+#   - Bandit: Python source code SAST (informational - does not block CI)
+#   - njsscan: Node/JS source code SAST (informational - does not block CI)
+#
+# Only Trivy failures block auto-approve. All other scanners run with
+# continue-on-error: true — findings appear in the UI as warnings but
+# do not fail the workflow.
+#
+# Usage (basic - all repos):
+#   jobs:
+#     security:
+#       uses: NeuralTrust/workflows/.github/workflows/sast.yml@main
+#
+# Usage (Go projects):
+#   jobs:
+#     security:
+#       uses: NeuralTrust/workflows/.github/workflows/sast.yml@main
+#       with:
+#         gosec_enabled: true
+#
+# Usage (Python projects):
+#   jobs:
+#     security:
+#       uses: NeuralTrust/workflows/.github/workflows/sast.yml@main
+#       with:
+#         bandit_enabled: true
+#
+# Usage (Node projects):
+#   jobs:
+#     security:
+#       uses: NeuralTrust/workflows/.github/workflows/sast.yml@main
+#       with:
+#         njsscan_enabled: true
+# ==============================================================================
+
+name: SAST & Security
+
+on:
+  workflow_call:
+    inputs:
+      # ======================================================================
+      # Trivy (all languages)
+      # ======================================================================
+      trivy_severity:
+        description: 'Trivy severity levels to report (comma-separated)'
+        required: false
+        type: string
+        default: 'CRITICAL,HIGH'
+      trivy_exit_code:
+        description: 'Exit code when vulnerabilities are found (1=fail, 0=warn)'
+        required: false
+        type: string
+        default: '1'
+      scan_type:
+        description: 'Trivy scan type (fs, config, repo)'
+        required: false
+        type: string
+        default: 'fs'
+
+      # ======================================================================
+      # Gitleaks (all languages)
+      # ======================================================================
+      gitleaks_enabled:
+        description: 'Enable gitleaks secret detection'
+        required: false
+        type: boolean
+        default: true
+
+      # ======================================================================
+      # Gosec (Go)
+      # ======================================================================
+      gosec_enabled:
+        description: 'Enable Gosec Go security scanner'
+        required: false
+        type: boolean
+        default: false
+      gosec_args:
+        description: 'Gosec arguments (e.g., -exclude-dir=vendor -no-fail ./...)'
+        required: false
+        type: string
+        default: './...'
+      gosec_version:
+        description: 'Gosec version to install (e.g., 2.21.4)'
+        required: false
+        type: string
+        default: 'latest'
+
+      # ======================================================================
+      # Bandit (Python)
+      # ======================================================================
+      bandit_enabled:
+        description: 'Enable Bandit Python security scanner'
+        required: false
+        type: boolean
+        default: false
+      bandit_args:
+        description: 'Bandit arguments (e.g., -r src/ -ll -x tests)'
+        required: false
+        type: string
+        default: '-r . -ll'
+
+      # ======================================================================
+      # njsscan (Node/JS)
+      # ======================================================================
+      njsscan_enabled:
+        description: 'Enable njsscan Node.js/JS security scanner'
+        required: false
+        type: boolean
+        default: false
+      njsscan_args:
+        description: 'njsscan arguments (e.g., --missing-controls)'
+        required: false
+        type: string
+        default: '.'
+
+jobs:
+  # ============================================================================
+  # Trivy: Vulnerability & Misconfiguration Scanner (all languages)
+  # ============================================================================
+  trivy:
+    name: Vulnerability Scan (Trivy)
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: ${{ inputs.scan_type }}
+          scan-ref: '.'
+          severity: ${{ inputs.trivy_severity }}
+          format: 'table'
+          exit-code: ${{ inputs.trivy_exit_code }}
+          ignore-unfixed: true
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Trivy Vulnerability Scan" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Severity:** ${{ inputs.trivy_severity }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Scan type:** ${{ inputs.scan_type }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
+  # Gitleaks: Secret Detection (all languages)
+  # ============================================================================
+  gitleaks:
+    name: Secret Detection (Gitleaks)
+    runs-on: ubuntu-latest
+    if: inputs.gitleaks_enabled
+    continue-on-error: true
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        run: |
+          # Run gitleaks via Docker (no license required)
+          docker run --rm \
+            -v "${{ github.workspace }}:/repo" \
+            zricethezav/gitleaks:latest \
+            detect \
+            --source /repo \
+            --verbose \
+            --exit-code 1 \
+            --log-opts="--all"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Gitleaks Secret Detection" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Scanned git history for secrets and credentials." >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
+  # Gosec: Go Source Code SAST
+  # ============================================================================
+  gosec:
+    name: Go SAST (Gosec)
+    runs-on: ubuntu-latest
+    if: inputs.gosec_enabled
+    continue-on-error: true
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Gosec
+        run: |
+          if [ "${{ inputs.gosec_version }}" = "latest" ]; then
+            go install github.com/securego/gosec/v2/cmd/gosec@latest
+          else
+            go install github.com/securego/gosec/v2/cmd/gosec@v${{ inputs.gosec_version }}
+          fi
+
+      - name: Run Gosec Security Scanner
+        run: gosec ${{ inputs.gosec_args }}
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Gosec Go Security Scanner" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Args:** \`${{ inputs.gosec_args }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
+  # Bandit: Python Source Code SAST
+  # ============================================================================
+  bandit:
+    name: Python SAST (Bandit)
+    runs-on: ubuntu-latest
+    if: inputs.bandit_enabled
+    continue-on-error: true
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Bandit
+        run: pip install 'bandit[toml]'
+
+      - name: Run Bandit Security Scanner
+        run: bandit ${{ inputs.bandit_args }}
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Bandit Python Security Scanner" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Args:** \`${{ inputs.bandit_args }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Scanned Python source code for:" >> "$GITHUB_STEP_SUMMARY"
+          echo "- SQL injection, command injection" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Insecure functions (\`eval\`, \`exec\`, \`pickle\`)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Hardcoded passwords and secrets" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Weak cryptography" >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
+  # njsscan: Node/JS Source Code SAST
+  # ============================================================================
+  njsscan:
+    name: Node SAST (njsscan)
+    runs-on: ubuntu-latest
+    if: inputs.njsscan_enabled
+    continue-on-error: true
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Run njsscan
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/src" \
+            opensecurity/njsscan:latest \
+            --exit-warning ${{ inputs.njsscan_args != '.' && inputs.njsscan_args || '/src' }}
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## njsscan Node.js Security Scanner" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Args:** \`${{ inputs.njsscan_args }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Scanned JavaScript/Node.js source code for:" >> "$GITHUB_STEP_SUMMARY"
+          echo "- XSS, prototype pollution" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Insecure regex, eval injection" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Command injection, path traversal" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Hardcoded secrets" >> "$GITHUB_STEP_SUMMARY"
