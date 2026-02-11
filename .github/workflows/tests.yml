@@ -674,7 +674,7 @@ jobs:
         if: inputs.coverage_enabled && always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-report
+          name: coverage-${{ inputs.coverage_file }}
           path: ${{ inputs.working_directory }}/${{ inputs.coverage_file }}
           retention-days: 14
 
