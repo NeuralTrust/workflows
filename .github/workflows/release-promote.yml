@@ -192,12 +192,13 @@ jobs:
           # Check if this commit came from a develop→main PR
           PR_DATA=$(gh api repos/${{ github.repository }}/commits/${{ github.sha }}/pulls 2>/dev/null || echo '[]')
 
+          # Use 'objects' filter to skip any non-object entries in the API response
           DEV_PR=$(echo "$PR_DATA" | jq -r '
-            [.[] | select(
+            [.[] | objects | select(
               .base.ref == "main" and
               (.head.ref == "${{ inputs.dev_branch }}" or .head.ref == "dev") and
               .merged_at != null
-            )] | first // empty')
+            )] | first // empty' 2>/dev/null || echo '')
 
           if [ -n "$DEV_PR" ] && [ "$DEV_PR" != "null" ]; then
             PR_NUM=$(echo "$DEV_PR" | jq -r '.number')
@@ -208,13 +209,23 @@ jobs:
             echo "dev_sha=${DEV_SHA}" >> "$GITHUB_OUTPUT"
             echo "pr_number=${PR_NUM}" >> "$GITHUB_OUTPUT"
           else
-            # Also check merge commit parents as fallback
+            # Fallback: check merge commit parents, but ONLY promote if the
+            # second parent actually belongs to the dev branch.
             PARENT_COUNT=$(git cat-file -p ${{ github.sha }} | grep -c '^parent ' || true)
             if [ "$PARENT_COUNT" -gt 1 ]; then
               DEV_SHA=$(git rev-parse ${{ github.sha }}^2)
               echo "Merge commit detected, second parent: ${DEV_SHA}"
-              echo "initial=promote" >> "$GITHUB_OUTPUT"
-              echo "dev_sha=${DEV_SHA}" >> "$GITHUB_OUTPUT"
+              # Verify the second parent is on the dev branch
+              if git branch -r --contains "$DEV_SHA" 2>/dev/null | grep -qE "origin/(${{ inputs.dev_branch }}|dev)$"; then
+                echo "Second parent belongs to ${{ inputs.dev_branch }} branch"
+                echo "initial=promote" >> "$GITHUB_OUTPUT"
+                echo "dev_sha=${DEV_SHA}" >> "$GITHUB_OUTPUT"
+              else
+                BRANCH_INFO=$(git branch -r --contains "$DEV_SHA" 2>/dev/null | head -5 || echo "unknown")
+                echo "Second parent is NOT on ${{ inputs.dev_branch }} — branches: ${BRANCH_INFO}"
+                echo "Treating as rebuild (feature branch or hotfix merge)"
+                echo "initial=rebuild" >> "$GITHUB_OUTPUT"
+              fi
             else
               echo "No develop→main PR found — hotfix or direct push"
               echo "initial=rebuild" >> "$GITHUB_OUTPUT"
@@ -287,7 +298,6 @@ jobs:
             DEV_BASE="${{ steps.meta.outputs.dev_image_base }}"
 
             SHA_REF="${DEV_BASE}:${P}${DEV_SHA}${S}"
-            LATEST_REF="${DEV_BASE}:${P}latest${S}"
 
             echo "Checking dev image: ${SHA_REF}"
 
@@ -295,12 +305,8 @@ jobs:
               echo "Dev image found by commit SHA"
               echo "final=promote" >> "$GITHUB_OUTPUT"
               echo "source_ref=${SHA_REF}" >> "$GITHUB_OUTPUT"
-            elif crane manifest "${LATEST_REF}" > /dev/null 2>&1; then
-              echo "::warning::Dev image not found by SHA, using :latest"
-              echo "final=promote" >> "$GITHUB_OUTPUT"
-              echo "source_ref=${LATEST_REF}" >> "$GITHUB_OUTPUT"
             else
-              echo "::warning::No dev image found — falling back to rebuild"
+              echo "::warning::Dev image not found by SHA — falling back to rebuild"
               echo "final=rebuild" >> "$GITHUB_OUTPUT"
             fi
           else
