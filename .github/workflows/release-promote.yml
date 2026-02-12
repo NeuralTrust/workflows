@@ -384,6 +384,20 @@ jobs:
           INPUT_ARGS: ${{ inputs.build_args }}
           SECRET_ARGS: ${{ secrets.BUILD_SECRETS }}
 
+      - name: Prepare Docker secrets
+        if: steps.strategy.outputs.final == 'rebuild'
+        id: docker-secrets
+        run: |
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "value<<${EOF}" >> "$GITHUB_OUTPUT"
+          echo "GCP_ACCESS_TOKEN=${{ steps.auth.outputs.access_token }}" >> "$GITHUB_OUTPUT"
+          if [ -n "$DOCKER_SECRETS" ]; then
+            echo "$DOCKER_SECRETS" >> "$GITHUB_OUTPUT"
+          fi
+          echo "${EOF}" >> "$GITHUB_OUTPUT"
+        env:
+          DOCKER_SECRETS: ${{ secrets.DOCKER_SECRETS }}
+
       - name: Build and push Docker image
         if: steps.strategy.outputs.final == 'rebuild'
         uses: docker/build-push-action@v6
@@ -397,7 +411,7 @@ jobs:
           cache-from: |
             type=registry,ref=${{ steps.meta.outputs.prod_cache_ref }}
             type=registry,ref=${{ steps.meta.outputs.prod_latest_ref }}
-          secrets: ${{ secrets.DOCKER_SECRETS }}
+          secrets: ${{ steps.docker-secrets.outputs.value }}
           cache-to: type=inline
           provenance: false
 
