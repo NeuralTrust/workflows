@@ -136,10 +136,12 @@ jobs:
           SUMMARY=$(echo "$REVIEW" | jq -r '.summary')
           APPROVED=$(echo "$REVIEW" | jq -r '.approved')
           ISSUE_COUNT=$(echo "$REVIEW" | jq '.issues | length')
+          CRITICAL_COUNT=$(echo "$REVIEW" | jq '[.issues[] | select(.severity == "error")] | length')
           SKIP=$(echo "$REVIEW" | jq -r '.skip // false')
           
           echo "Summary: $SUMMARY"
-          echo "Issues found: $ISSUE_COUNT"
+          echo "Total issues found: $ISSUE_COUNT"
+          echo "Critical issues found: $CRITICAL_COUNT"
           echo "Approved: $APPROVED"
           
           # Skip posting if there was an API error
@@ -148,47 +150,39 @@ jobs:
             exit 0
           fi
           
-          # Build review comments array for the API
+          # Only post PR comments for critical (error) issues.
+          # Warnings and suggestions are logged in the workflow summary only.
+          if [ "$CRITICAL_COUNT" -eq 0 ]; then
+            echo "✅ No critical issues — skipping PR comment (warnings/suggestions visible in workflow summary)"
+            exit 0
+          fi
+          
+          # Build review comments array with critical issues only
           COMMENTS="[]"
           
-          if [ "$ISSUE_COUNT" -gt 0 ]; then
-            # For each issue, try to find the position in the diff
-            for i in $(seq 0 $((ISSUE_COUNT - 1))); do
-              FILE=$(echo "$REVIEW" | jq -r ".issues[$i].file")
-              LINE=$(echo "$REVIEW" | jq -r ".issues[$i].line")
-              SEVERITY=$(echo "$REVIEW" | jq -r ".issues[$i].severity")
-              MESSAGE=$(echo "$REVIEW" | jq -r ".issues[$i].message")
-              
-              # Add emoji based on severity
-              case "$SEVERITY" in
-                error) EMOJI="🚨" ;;
-                warning) EMOJI="⚠️" ;;
-                suggestion) EMOJI="💡" ;;
-                *) EMOJI="📝" ;;
-              esac
-              
-              BODY="$EMOJI $SEVERITY: $MESSAGE"
-              
-              # Add to comments array (GitHub will validate the line)
-              COMMENTS=$(echo "$COMMENTS" | jq \
-                --arg path "$FILE" \
-                --arg line "$LINE" \
-                --arg body "$BODY" \
-                '. + [{"path": $path, "line": ($line | tonumber), "body": $body}]')
-            done
-          fi
+          for i in $(seq 0 $((ISSUE_COUNT - 1))); do
+            SEVERITY=$(echo "$REVIEW" | jq -r ".issues[$i].severity")
+            
+            # Only include critical (error) issues as inline comments
+            if [ "$SEVERITY" != "error" ]; then
+              continue
+            fi
+            
+            FILE=$(echo "$REVIEW" | jq -r ".issues[$i].file")
+            LINE=$(echo "$REVIEW" | jq -r ".issues[$i].line")
+            MESSAGE=$(echo "$REVIEW" | jq -r ".issues[$i].message")
+            
+            BODY="🚨 error: $MESSAGE"
+            
+            COMMENTS=$(echo "$COMMENTS" | jq \
+              --arg path "$FILE" \
+              --arg line "$LINE" \
+              --arg body "$BODY" \
+              '. + [{"path": $path, "line": ($line | tonumber), "body": $body}]')
+          done
           
-          # Determine review event type
-          if [ "$APPROVED" = "true" ] && [ "$ISSUE_COUNT" -eq 0 ]; then
-            EVENT="APPROVE"
-            BODY="🤖 AI Review: ✅ $SUMMARY"
-          elif [ "$ISSUE_COUNT" -gt 0 ]; then
-            EVENT="REQUEST_CHANGES"
-            BODY="🤖 AI Review: $SUMMARY — Found $ISSUE_COUNT issue(s), see inline comments."
-          else
-            EVENT="COMMENT"
-            BODY="🤖 AI Review: $SUMMARY"
-          fi
+          EVENT="REQUEST_CHANGES"
+          BODY="🤖 AI Review: $SUMMARY — Found $CRITICAL_COUNT critical issue(s), see inline comments."
           
           # Create the review with inline comments
           REVIEW_BODY=$(printf '%s' "$BODY" | jq -Rs .)
@@ -214,26 +208,20 @@ jobs:
           if echo "$RESULT" | grep -q "error"; then
             echo "⚠️ Inline comments failed, posting general comment"
             
-            # Build a comment with all issues listed
-            ISSUES_TEXT=""
-            if [ "$ISSUE_COUNT" -gt 0 ]; then
-              ISSUES_TEXT="\n\nIssues:\n"
-              for i in $(seq 0 $((ISSUE_COUNT - 1))); do
-                FILE=$(echo "$REVIEW" | jq -r ".issues[$i].file")
-                LINE=$(echo "$REVIEW" | jq -r ".issues[$i].line")
-                SEVERITY=$(echo "$REVIEW" | jq -r ".issues[$i].severity")
-                MESSAGE=$(echo "$REVIEW" | jq -r ".issues[$i].message")
-                
-                case "$SEVERITY" in
-                  error) EMOJI="🚨" ;;
-                  warning) EMOJI="⚠️" ;;
-                  suggestion) EMOJI="💡" ;;
-                  *) EMOJI="📝" ;;
-                esac
-                
-                ISSUES_TEXT="$ISSUES_TEXT\n- $EMOJI $FILE:$LINE — $MESSAGE"
-              done
-            fi
+            # Build a comment with critical issues only
+            ISSUES_TEXT="\n\nCritical issues:\n"
+            for i in $(seq 0 $((ISSUE_COUNT - 1))); do
+              SEVERITY=$(echo "$REVIEW" | jq -r ".issues[$i].severity")
+              if [ "$SEVERITY" != "error" ]; then
+                continue
+              fi
+              
+              FILE=$(echo "$REVIEW" | jq -r ".issues[$i].file")
+              LINE=$(echo "$REVIEW" | jq -r ".issues[$i].line")
+              MESSAGE=$(echo "$REVIEW" | jq -r ".issues[$i].message")
+              
+              ISSUES_TEXT="$ISSUES_TEXT\n- 🚨 $FILE:$LINE — $MESSAGE"
+            done
             
             COMMENT="🤖 AI Review: $SUMMARY$ISSUES_TEXT"
             
@@ -246,19 +234,43 @@ jobs:
         run: |
           REVIEW=$(cat review.json)
           ISSUE_COUNT=$(echo "$REVIEW" | jq '.issues | length')
+          CRITICAL_COUNT=$(echo "$REVIEW" | jq '[.issues[] | select(.severity == "error")] | length')
+          WARNING_COUNT=$(echo "$REVIEW" | jq '[.issues[] | select(.severity == "warning")] | length')
+          SUGGESTION_COUNT=$(echo "$REVIEW" | jq '[.issues[] | select(.severity == "suggestion")] | length')
           APPROVED=$(echo "$REVIEW" | jq -r '.approved')
           
           echo "## 🤖 AI Code Review Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **PR**: #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Files reviewed**: ${{ steps.diff.outputs.file_count }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Issues found**: $ISSUE_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "- **Issues found**: $ISSUE_COUNT (🚨 $CRITICAL_COUNT critical, ⚠️ $WARNING_COUNT warnings, 💡 $SUGGESTION_COUNT suggestions)" >> $GITHUB_STEP_SUMMARY
+          echo "- **PR commented**: $([ "$CRITICAL_COUNT" -gt 0 ] && echo 'Yes (critical issues)' || echo 'No')" >> $GITHUB_STEP_SUMMARY
           echo "- **Model**: ${{ inputs.model }}" >> $GITHUB_STEP_SUMMARY
           
           if [ "$APPROVED" = "true" ]; then
             echo "- **Result**: ✅ Approved" >> $GITHUB_STEP_SUMMARY
           else
             echo "- **Result**: ⚠️ Changes requested" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # List all issues in the summary so warnings/suggestions are still visible
+          if [ "$ISSUE_COUNT" -gt 0 ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Issues" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            for i in $(seq 0 $((ISSUE_COUNT - 1))); do
+              FILE=$(echo "$REVIEW" | jq -r ".issues[$i].file")
+              LINE=$(echo "$REVIEW" | jq -r ".issues[$i].line")
+              SEVERITY=$(echo "$REVIEW" | jq -r ".issues[$i].severity")
+              MESSAGE=$(echo "$REVIEW" | jq -r ".issues[$i].message")
+              case "$SEVERITY" in
+                error) EMOJI="🚨" ;;
+                warning) EMOJI="⚠️" ;;
+                suggestion) EMOJI="💡" ;;
+                *) EMOJI="📝" ;;
+              esac
+              echo "- $EMOJI **$SEVERITY** — \`$FILE:$LINE\` — $MESSAGE" >> $GITHUB_STEP_SUMMARY
+            done
           fi
 
       - name: Fail if critical issues found
