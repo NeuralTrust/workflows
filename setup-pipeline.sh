@@ -209,20 +209,42 @@ setup_wif "$PROD_GCP_PROJECT_ID" "PROD"
 setup_wif "$DEV_GCP_PROJECT_ID" "DEV"
 
 # =============================================================================
-# Phase 0.2 — GCP: Cross-project read access (promote strategy)
+# Phase 0.2 — GCP: Cross-project read access (bidirectional)
 # =============================================================================
-header "Cross-project access — Prod SA reads Dev registry"
+# Both SAs need read access to each other's registries:
+#   - Prod SA → dev registry: image promote (crane copy), pulling dev packages
+#   - Dev SA → prod registry: pulling prod packages/images in dev environments
+# Covers both Docker (nt-docker) and Python (nt-python) repositories.
+# =============================================================================
 
 PROD_SA_EMAIL="${SA_NAME}@${PROD_GCP_PROJECT_ID}.iam.gserviceaccount.com"
+DEV_SA_EMAIL="${SA_NAME}@${DEV_GCP_PROJECT_ID}.iam.gserviceaccount.com"
 
-info "Granting Artifact Registry reader on dev registry to prod SA..."
-gcloud artifacts repositories add-iam-policy-binding "$AR_REPO" \
-  --project="$DEV_GCP_PROJECT_ID" \
-  --location="$AR_LOCATION" \
-  --member="serviceAccount:$PROD_SA_EMAIL" \
-  --role="roles/artifactregistry.reader" \
-  --quiet 2>/dev/null || true
-success "Prod SA can now read dev registry (for crane copy / image promote)"
+header "Cross-project access — Prod SA reads Dev registries"
+
+for REPO in "$AR_REPO" "$AR_PYTHON_REPO"; do
+  info "Granting Artifact Registry reader on dev/$REPO to prod SA..."
+  gcloud artifacts repositories add-iam-policy-binding "$REPO" \
+    --project="$DEV_GCP_PROJECT_ID" \
+    --location="$AR_LOCATION" \
+    --member="serviceAccount:$PROD_SA_EMAIL" \
+    --role="roles/artifactregistry.reader" \
+    --quiet 2>/dev/null || true
+  success "Prod SA → dev/$REPO (reader)"
+done
+
+header "Cross-project access — Dev SA reads Prod registries"
+
+for REPO in "$AR_REPO" "$AR_PYTHON_REPO"; do
+  info "Granting Artifact Registry reader on prod/$REPO to dev SA..."
+  gcloud artifacts repositories add-iam-policy-binding "$REPO" \
+    --project="$PROD_GCP_PROJECT_ID" \
+    --location="$AR_LOCATION" \
+    --member="serviceAccount:$DEV_SA_EMAIL" \
+    --role="roles/artifactregistry.reader" \
+    --quiet 2>/dev/null || true
+  success "Dev SA → prod/$REPO (reader)"
+done
 
 # =============================================================================
 # Phase 0.3 — Resolve WIF Provider paths
@@ -248,8 +270,6 @@ PROD_WIF_PROVIDER_PATH=$(gcloud iam workload-identity-pools providers describe "
   exit 1
 }
 success "PROD_WIF_PROVIDER: $PROD_WIF_PROVIDER_PATH"
-
-DEV_SA_EMAIL="${SA_NAME}@${DEV_GCP_PROJECT_ID}.iam.gserviceaccount.com"
 
 # =============================================================================
 # Phase 0.4 — GitHub: Org variables and secrets
@@ -357,8 +377,11 @@ echo "    GH_TOKEN"
 echo "    OPENAI_API_KEY"
 echo "    SLACK_WEBHOOK_URL"
 echo ""
-echo -e "  ${GREEN}Cross-project access${NC}"
-echo "    Prod SA → dev registry (artifactregistry.reader)"
+echo -e "  ${GREEN}Cross-project access (bidirectional)${NC}"
+echo "    Prod SA → dev/$AR_REPO (reader)"
+echo "    Prod SA → dev/$AR_PYTHON_REPO (reader)"
+echo "    Dev SA  → prod/$AR_REPO (reader)"
+echo "    Dev SA  → prod/$AR_PYTHON_REPO (reader)"
 echo ""
 echo -e "${BLUE}══════════════════════════════════════════════════════════════════${NC}"
 echo -e "${BLUE} Copy-paste commands to set GitHub org variables & secrets manually${NC}"
