@@ -30,6 +30,7 @@ DEV_GCP_PROJECT_ID="${DEV_GCP_PROJECT_ID:-}"
 GH_ORG="${GH_ORG:-NeuralTrust}"
 AR_LOCATION="${AR_LOCATION:-europe-west1}"
 AR_REPO="${AR_REPO:-nt-docker}"
+AR_PYTHON_REPO="${AR_PYTHON_REPO:-nt-python}"
 WIF_POOL="github-actions"
 WIF_PROVIDER="github"
 SA_NAME="github-actions"
@@ -99,7 +100,8 @@ success "Dev GCP Project:  $DEV_GCP_PROJECT_ID"
 
 info "GitHub Org:        $GH_ORG"
 info "AR Location:       $AR_LOCATION"
-info "AR Repository:     $AR_REPO"
+info "AR Docker Repo:    $AR_REPO"
+info "AR Python Repo:    $AR_PYTHON_REPO"
 
 # ---------------------------------------------------------------------------
 # Resolve project numbers
@@ -171,15 +173,24 @@ setup_wif() {
     success "Service account '$SA_EMAIL' created"
   fi
 
-  # Step 4: Grant Artifact Registry writer
-  info "Granting Artifact Registry writer to $SA_EMAIL..."
+  # Step 4: Grant Artifact Registry writer (Docker + Python repos)
+  info "Granting Artifact Registry writer to $SA_EMAIL on $AR_REPO (Docker)..."
   gcloud artifacts repositories add-iam-policy-binding "$AR_REPO" \
     --project="$PROJECT_ID" \
     --location="$AR_LOCATION" \
     --member="serviceAccount:$SA_EMAIL" \
     --role="roles/artifactregistry.writer" \
     --quiet 2>/dev/null || true
-  success "Artifact Registry writer granted"
+  success "Artifact Registry writer granted on $AR_REPO"
+
+  info "Granting Artifact Registry writer to $SA_EMAIL on $AR_PYTHON_REPO (Python)..."
+  gcloud artifacts repositories add-iam-policy-binding "$AR_PYTHON_REPO" \
+    --project="$PROJECT_ID" \
+    --location="$AR_LOCATION" \
+    --member="serviceAccount:$SA_EMAIL" \
+    --role="roles/artifactregistry.writer" \
+    --quiet 2>/dev/null || true
+  success "Artifact Registry writer granted on $AR_PYTHON_REPO"
 
   # Step 5: Allow GitHub Actions to impersonate the SA
   local PROJECT_NUMBER

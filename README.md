@@ -68,6 +68,7 @@ Every repo follows the same standardized pipeline:
 |----------|-------------|
 | [`release-promote.yml`](#smart-release-promote--rebuild) | **Recommended** — Smart release: promote from dev or rebuild (single image) |
 | [`multi-image-release-promote.yml`](#multi-image-smart-release) | **Recommended** — Smart release for multi-image services |
+| [`python-publish.yml`](#python-package-publish) | Build and publish Python package to GCP Artifact Registry (uv/poetry) |
 | [`release-deploy.yml`](#release-deploy-legacy) | Legacy — Always rebuilds (single image, release tag) |
 | [`multi-image-release.yml`](#multi-image-release-legacy) | Legacy — Always rebuilds (multiple images, release tag) |
 
@@ -682,6 +683,81 @@ jobs:
 ## Multi-Image Release (Legacy)
 
 **`multi-image-release.yml`** — Always rebuilds. Use `multi-image-release-promote.yml` instead.
+
+---
+
+## Python Package Publish
+
+**`python-publish.yml`** — Builds a Python package (wheel + sdist) and publishes it to a GCP Artifact Registry Python repository. Supports both `uv` and `poetry` build tools.
+
+### Quick Start
+
+```yaml
+# Using uv (default) — e.g., TrustTest
+jobs:
+  publish:
+    uses: NeuralTrust/workflows/.github/workflows/python-publish.yml@main
+    with:
+      gcp_project_id: ${{ vars.PROD_GCP_PROJECT_ID }}
+    secrets:
+      WIF_PROVIDER: ${{ secrets.PROD_WIF_PROVIDER }}
+      WIF_SERVICE_ACCOUNT: ${{ secrets.PROD_WIF_SERVICE_ACCOUNT }}
+```
+
+```yaml
+# Using poetry — e.g., internal-sdk
+jobs:
+  publish:
+    uses: NeuralTrust/workflows/.github/workflows/python-publish.yml@main
+    with:
+      gcp_project_id: ${{ vars.PROD_GCP_PROJECT_ID }}
+      build_tool: poetry
+      python_version: '3.10'
+    secrets:
+      WIF_PROVIDER: ${{ secrets.PROD_WIF_PROVIDER }}
+      WIF_SERVICE_ACCOUNT: ${{ secrets.PROD_WIF_SERVICE_ACCOUNT }}
+```
+
+### Typical Pipeline
+
+Python library repos follow a slightly different pattern from Docker-based services:
+
+```
+┌──────────────┐     ┌──────────────────────────────────────────────────────┐
+│ Push develop │────▶│ publish-dev.yml → python-publish → DEV AR registry   │
+└──────────────┘     └──────────────────────────────────────────────────────┘
+
+┌──────────────┐     ┌──────────────────────────────────────────────────────┐
+│ PR → main    │────▶│ ci.yml → AI Review + Lint + SAST + Auto-Approve      │
+└──────────────┘     └──────────────────────────────────────────────────────┘
+
+┌──────────────┐     ┌──────────────────────────────────────────┐
+│ Push main    │────▶│ auto-release.yml → AI Semver Bump + GitHub│
+│              │     │ Release + update pyproject.toml version    │
+└──────────────┘     └─────────────────┬────────────────────────┘
+                                       │ triggers
+                    ┌──────────────────▼──────────────────────────────────┐
+                    │ release.yml → python-publish → PROD AR registry     │
+                    └────────────────────────────────────────────────────┘
+```
+
+### Inputs
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `gcp_project_id` | Yes | — | GCP Project ID that owns the Artifact Registry |
+| `build_tool` | No | `uv` | Build tool: `uv` or `poetry` |
+| `python_version` | No | `3.11` | Python version |
+| `ar_location` | No | `europe-west1` | Artifact Registry location |
+| `ar_repository` | No | `nt-python` | Artifact Registry Python repository name |
+| `working_directory` | No | `.` | Working directory containing `pyproject.toml` |
+
+### Secrets
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `WIF_PROVIDER` | Yes | GCP Workload Identity Federation provider |
+| `WIF_SERVICE_ACCOUNT` | Yes | GCP service account email |
 
 ---
 
