@@ -1,0 +1,147 @@
+# ==============================================================================
+# Reusable Workflow: Build and Publish Python Package to GCP Artifact Registry
+# ==============================================================================
+# Builds a Python package (wheel + sdist) and publishes it to a GCP Artifact
+# Registry Python repository. Supports both uv and poetry build tools.
+#
+# Usage (uv — default):
+#   jobs:
+#     publish:
+#       uses: NeuralTrust/workflows/.github/workflows/python-publish.yml@main
+#       with:
+#         gcp_project_id: my-gcp-project
+#       secrets:
+#         WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
+#         WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+#
+# Usage (poetry):
+#   jobs:
+#     publish:
+#       uses: NeuralTrust/workflows/.github/workflows/python-publish.yml@main
+#       with:
+#         gcp_project_id: my-gcp-project
+#         build_tool: poetry
+#       secrets:
+#         WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
+#         WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+# ==============================================================================
+
+name: Python Publish
+
+on:
+  workflow_call:
+    inputs:
+      gcp_project_id:
+        description: 'GCP Project ID that owns the Artifact Registry'
+        required: true
+        type: string
+      build_tool:
+        description: 'Build tool: uv or poetry'
+        required: false
+        type: string
+        default: 'uv'
+      python_version:
+        description: 'Python version to use'
+        required: false
+        type: string
+        default: '3.11'
+      ar_location:
+        description: 'Artifact Registry location (e.g., europe-west1, us-central1)'
+        required: false
+        type: string
+        default: 'europe-west1'
+      ar_repository:
+        description: 'Artifact Registry Python repository name'
+        required: false
+        type: string
+        default: 'nt-python'
+      working_directory:
+        description: 'Working directory containing pyproject.toml'
+        required: false
+        type: string
+        default: '.'
+    secrets:
+      WIF_PROVIDER:
+        required: true
+        description: 'GCP Workload Identity Federation provider'
+      WIF_SERVICE_ACCOUNT:
+        required: true
+        description: 'GCP service account email for WIF authentication'
+
+jobs:
+  publish:
+    name: Build & Publish (${{ inputs.build_tool }})
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python ${{ inputs.python_version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      # ==================================================================
+      # uv: build + publish
+      # ==================================================================
+      - name: Install uv
+        if: inputs.build_tool == 'uv'
+        run: pip install uv
+
+      - name: Build package (uv)
+        if: inputs.build_tool == 'uv'
+        working-directory: ${{ inputs.working_directory }}
+        run: uv build
+
+      - name: Publish to Artifact Registry (uv)
+        if: inputs.build_tool == 'uv'
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          UV_PUBLISH_USERNAME: oauth2accesstoken
+          UV_PUBLISH_PASSWORD: ${{ steps.auth.outputs.access_token }}
+          UV_PUBLISH_URL: "https://${{ inputs.ar_location }}-python.pkg.dev/${{ inputs.gcp_project_id }}/${{ inputs.ar_repository }}/"
+        run: uv publish
+
+      # ==================================================================
+      # poetry: build + publish
+      # ==================================================================
+      - name: Install poetry
+        if: inputs.build_tool == 'poetry'
+        run: pip install poetry
+
+      - name: Build and publish to Artifact Registry (poetry)
+        if: inputs.build_tool == 'poetry'
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          POETRY_HTTP_BASIC_GCP_USERNAME: oauth2accesstoken
+          POETRY_HTTP_BASIC_GCP_PASSWORD: ${{ steps.auth.outputs.access_token }}
+        run: |
+          poetry config repositories.gcp "https://${{ inputs.ar_location }}-python.pkg.dev/${{ inputs.gcp_project_id }}/${{ inputs.ar_repository }}/"
+          poetry config virtualenvs.create false
+          poetry publish --build --repository gcp
+
+      # ==================================================================
+      # Summary
+      # ==================================================================
+      - name: Summary
+        run: |
+          REGISTRY="https://${{ inputs.ar_location }}-python.pkg.dev/${{ inputs.gcp_project_id }}/${{ inputs.ar_repository }}/"
+          echo "## Python Package Published" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Build tool:** \`${{ inputs.build_tool }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Python:** \`${{ inputs.python_version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Registry:** \`${REGISTRY}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tag:** \`${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"
