@@ -298,15 +298,20 @@ jobs:
             DEV_BASE="${{ steps.meta.outputs.dev_image_base }}"
 
             SHA_REF="${DEV_BASE}:${P}${DEV_SHA}${S}"
+            LATEST_REF="${DEV_BASE}:${P}latest${S}"
 
-            echo "Checking dev image: ${SHA_REF}"
+            echo "Checking dev image by SHA: ${SHA_REF}"
 
             if crane manifest "${SHA_REF}" > /dev/null 2>&1; then
               echo "Dev image found by commit SHA"
               echo "final=promote" >> "$GITHUB_OUTPUT"
               echo "source_ref=${SHA_REF}" >> "$GITHUB_OUTPUT"
+            elif crane manifest "${LATEST_REF}" > /dev/null 2>&1; then
+              echo "::notice::Dev image not found by SHA (likely a [skip ci] commit) — using latest tag from dev registry"
+              echo "final=promote" >> "$GITHUB_OUTPUT"
+              echo "source_ref=${LATEST_REF}" >> "$GITHUB_OUTPUT"
             else
-              echo "::warning::Dev image not found by SHA — falling back to rebuild"
+              echo "::warning::Dev image not found by SHA or latest tag — falling back to rebuild"
               echo "final=rebuild" >> "$GITHUB_OUTPUT"
             fi
           else
