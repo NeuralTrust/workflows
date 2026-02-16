@@ -103,7 +103,7 @@ on:
         description: 'Bandit arguments (e.g., -r src/ -ll -x tests)'
         required: false
         type: string
-        default: '-r . -ll'
+        default: '-c pyproject.toml -r src --severity-level=medium --confidence-level=medium -f screen'
 
       # ======================================================================
       # njsscan (Node/JS)
