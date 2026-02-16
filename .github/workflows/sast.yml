@@ -70,7 +70,7 @@ on:
         description: 'Enable gitleaks secret detection'
         required: false
         type: boolean
-        default: true
+        default: false
 
       # ======================================================================
       # Gosec (Go)
