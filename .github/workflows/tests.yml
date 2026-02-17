@@ -269,7 +269,7 @@ jobs:
         if: inputs.language == 'go' && inputs.lint_command == ''
         working-directory: ${{ inputs.working_directory }}
         run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.7.0
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.9.0
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
           golangci-lint run --timeout=10m ./...
 
