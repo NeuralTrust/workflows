@@ -2,41 +2,54 @@
 # Reusable Workflow: SAST & Security Scanning
 # ==============================================================================
 # Runs static application security testing:
-#   - Trivy: vulnerability scanning for dependencies, IaC, secrets (MANDATORY - blocks CI)
-#   - Gitleaks: secret/credential detection in git history (informational - does not block CI)
-#   - Gosec: Go source code SAST (informational - does not block CI)
-#   - Bandit: Python source code SAST (informational - does not block CI)
-#   - njsscan: Node/JS source code SAST (informational - does not block CI)
+#   - Trivy:     vulnerability scanning for deps, IaC, secrets (MANDATORY - blocks CI)
+#   - pip-audit: Python dependency CVE check via OSV database (optional, informational)
+#   - Gitleaks:  secret/credential detection in git history   (optional, informational)
+#   - Bandit:    Python source code SAST                      (optional, informational)
+#   - Gosec:     Go source code SAST                          (optional, informational)
+#   - njsscan:   Node/JS source code SAST                     (optional, informational)
 #
 # Only Trivy failures block auto-approve. All other scanners run with
 # continue-on-error: true — findings appear in the UI as warnings but
 # do not fail the workflow.
 #
-# Usage (basic - all repos):
+# Usage (basic — all repos):
 #   jobs:
 #     security:
 #       uses: NeuralTrust/workflows/.github/workflows/sast.yml@main
 #
-# Usage (Go projects):
-#   jobs:
-#     security:
-#       uses: NeuralTrust/workflows/.github/workflows/sast.yml@main
-#       with:
-#         gosec_enabled: true
-#
-# Usage (Python projects):
+# Usage (Python project — source in app/):
 #   jobs:
 #     security:
 #       uses: NeuralTrust/workflows/.github/workflows/sast.yml@main
 #       with:
 #         bandit_enabled: true
+#         bandit_path: app           # ← set to your source directory
+#         pip_audit_enabled: true
+#         gitleaks_enabled: true
 #
-# Usage (Node projects):
+# Usage (Go project):
+#   jobs:
+#     security:
+#       uses: NeuralTrust/workflows/.github/workflows/sast.yml@main
+#       with:
+#         gosec_enabled: true
+#         gitleaks_enabled: true
+#
+# Usage (Node project):
 #   jobs:
 #     security:
 #       uses: NeuralTrust/workflows/.github/workflows/sast.yml@main
 #       with:
 #         njsscan_enabled: true
+#         gitleaks_enabled: true
+#
+# Usage (IaC / full scan):
+#   jobs:
+#     security:
+#       uses: NeuralTrust/workflows/.github/workflows/sast.yml@main
+#       with:
+#         trivy_scanners: vuln,secret,config   # also scan k8s/terraform/docker
 # ==============================================================================
 
 name: SAST & Security
@@ -62,12 +75,38 @@ on:
         required: false
         type: string
         default: 'fs'
+      trivy_scanners:
+        description: >
+          Comma-separated list of Trivy scanners to enable.
+          Supported: vuln, secret, config, license.
+          Default enables vulnerability and secret scanning.
+          Add "config" to also scan IaC files (k8s, Terraform, Dockerfile).
+        required: false
+        type: string
+        default: 'vuln,secret'
+
+      # ======================================================================
+      # pip-audit (Python)
+      # ======================================================================
+      pip_audit_enabled:
+        description: 'Enable pip-audit Python dependency CVE scanning (OSV database)'
+        required: false
+        type: boolean
+        default: false
+      pip_audit_path:
+        description: >
+          Path to requirements file for pip-audit (e.g. requirements.txt).
+          Leave empty to let pip-audit auto-detect (works with uv.lock via
+          `uv export`, or falls back to scanning the installed environment).
+        required: false
+        type: string
+        default: ''
 
       # ======================================================================
       # Gitleaks (all languages)
       # ======================================================================
       gitleaks_enabled:
-        description: 'Enable gitleaks secret detection'
+        description: 'Enable gitleaks secret detection across the full git history'
         required: false
         type: boolean
         default: false
@@ -99,11 +138,22 @@ on:
         required: false
         type: boolean
         default: false
-      bandit_args:
-        description: 'Bandit arguments (e.g., -r src/ -ll -x tests)'
+      bandit_path:
+        description: >
+          Directory to scan with Bandit (relative to repo root).
+          Set this to your source directory, e.g. "app", "src", "backend".
+          Ignored when bandit_args is non-empty.
         required: false
         type: string
-        default: '-c pyproject.toml -r src --severity-level=medium --confidence-level=medium -f screen'
+        default: 'src'
+      bandit_args:
+        description: >
+          Full Bandit argument string. When non-empty this overrides the
+          auto-constructed command and bandit_path is ignored.
+          Use this for advanced cases (e.g. custom config file, extra exclusions).
+        required: false
+        type: string
+        default: ''
 
       # ======================================================================
       # njsscan (Node/JS)
@@ -140,6 +190,7 @@ jobs:
         with:
           scan-type: ${{ inputs.scan_type }}
           scan-ref: '.'
+          scanners: ${{ inputs.trivy_scanners }}
           severity: ${{ inputs.trivy_severity }}
           format: 'table'
           exit-code: ${{ inputs.trivy_exit_code }}
@@ -152,6 +203,62 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Severity:** ${{ inputs.trivy_severity }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Scan type:** ${{ inputs.scan_type }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Scanners:** ${{ inputs.trivy_scanners }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
+  # pip-audit: Python Dependency CVE Scanner (OSV database)
+  # ============================================================================
+  pip-audit:
+    name: Python Dep Audit (pip-audit)
+    runs-on: ubuntu-latest
+    if: inputs.pip_audit_enabled
+    continue-on-error: true
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pip-audit and uv
+        run: pip install pip-audit uv
+
+      - name: Run pip-audit
+        run: |
+          if [ -n "${{ inputs.pip_audit_path }}" ]; then
+            echo "Auditing from provided requirements file: ${{ inputs.pip_audit_path }}"
+            pip-audit -r "${{ inputs.pip_audit_path }}"
+          elif [ -f "uv.lock" ]; then
+            echo "uv.lock detected — exporting to requirements format for audit"
+            uv export --format requirements-txt --no-hashes --no-dev -o /tmp/audit-requirements.txt
+            pip-audit -r /tmp/audit-requirements.txt
+          elif [ -f "requirements.txt" ]; then
+            echo "Auditing from requirements.txt"
+            pip-audit -r requirements.txt
+          else
+            echo "No requirements file found — auditing installed environment"
+            pip-audit
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## pip-audit Python Dependency Audit" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Checked Python dependencies against the OSV vulnerability database." >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ inputs.pip_audit_path }}" ]; then
+            echo "- **Source:** \`${{ inputs.pip_audit_path }}\`" >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f "uv.lock" ]; then
+            echo "- **Source:** \`uv.lock\` (exported)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- **Source:** \`requirements.txt\` / installed environment" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # ============================================================================
   # Gitleaks: Secret Detection (all languages)
@@ -173,7 +280,6 @@ jobs:
 
       - name: Run Gitleaks
         run: |
-          # Run gitleaks via Docker (no license required)
           docker run --rm \
             -v "${{ github.workspace }}:/repo" \
             zricethezav/gitleaks:latest \
@@ -188,7 +294,7 @@ jobs:
         run: |
           echo "## Gitleaks Secret Detection" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Scanned git history for secrets and credentials." >> "$GITHUB_STEP_SUMMARY"
+          echo "Scanned full git history for secrets and credentials." >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
   # Gosec: Go Source Code SAST
@@ -254,14 +360,30 @@ jobs:
         run: pip install 'bandit[toml]'
 
       - name: Run Bandit Security Scanner
-        run: bandit ${{ inputs.bandit_args }}
+        run: |
+          if [ -n "${{ inputs.bandit_args }}" ]; then
+            # Full override: use caller-supplied args verbatim
+            bandit ${{ inputs.bandit_args }}
+          else
+            # Auto-construct from bandit_path; use pyproject.toml config if present
+            CONFIG_FLAG=""
+            if [ -f "pyproject.toml" ]; then
+              CONFIG_FLAG="-c pyproject.toml"
+            fi
+            bandit $CONFIG_FLAG -r "${{ inputs.bandit_path }}" \
+              --severity-level=medium --confidence-level=medium -f screen
+          fi
 
       - name: Summary
         if: always()
         run: |
           echo "## Bandit Python Security Scanner" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Args:** \`${{ inputs.bandit_args }}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ inputs.bandit_args }}" ]; then
+            echo "- **Args (override):** \`${{ inputs.bandit_args }}\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- **Path:** \`${{ inputs.bandit_path }}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Scanned Python source code for:" >> "$GITHUB_STEP_SUMMARY"
           echo "- SQL injection, command injection" >> "$GITHUB_STEP_SUMMARY"
