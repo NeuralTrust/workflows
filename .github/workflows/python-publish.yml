@@ -86,6 +86,9 @@ jobs:
         with:
           python-version: ${{ inputs.python_version }}
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Authenticate to Google Cloud
         id: auth
         uses: google-github-actions/auth@v2
@@ -97,10 +100,6 @@ jobs:
       # ==================================================================
       # uv: build + publish
       # ==================================================================
-      - name: Install uv
-        if: inputs.build_tool == 'uv'
-        run: pip install uv
-
       - name: Build package (uv)
         if: inputs.build_tool == 'uv'
         working-directory: ${{ inputs.working_directory }}
@@ -120,7 +119,7 @@ jobs:
       # ==================================================================
       - name: Install poetry
         if: inputs.build_tool == 'poetry'
-        run: pip install poetry
+        run: uv pip install --system poetry
 
       - name: Build and publish to Artifact Registry (poetry)
         if: inputs.build_tool == 'poetry'
