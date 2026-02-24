@@ -230,7 +230,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Install pip-audit
-        run: uv pip install --system pip-audit
+        run: uv pip install --system --no-config pip-audit
 
       - name: Run pip-audit
         run: |
@@ -363,7 +363,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Install Bandit
-        run: uv pip install --system 'bandit[toml]'
+        run: uv pip install --system --no-config 'bandit[toml]'
 
       - name: Run Bandit Security Scanner
         run: |
