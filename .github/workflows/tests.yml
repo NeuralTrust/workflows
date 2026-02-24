@@ -210,6 +210,9 @@ on:
       GH_TOKEN:
         required: false
         description: 'GitHub token for private module/repo access'
+      GCP_PYPI_SA_KEY:
+        required: false
+        description: 'GCP service account key for private Artifact Registry Python index'
       TEST_SECRETS:
         required: false
         description: 'Additional secrets as KEY=VALUE pairs (one per line), exported as env vars'
@@ -287,16 +290,15 @@ jobs:
       - name: Install Python dependencies
         if: inputs.language == 'python'
         working-directory: ${{ inputs.working_directory }}
-        run: |
-          if [ -f requirements-dev.txt ]; then uv pip install --system -r requirements-dev.txt; fi
-          if [ -f requirements.txt ]; then uv pip install --system -r requirements.txt; fi
-          if [ -f pyproject.toml ]; then uv pip install --system -e ".[dev]" 2>/dev/null || uv pip install --system -e . 2>/dev/null || true; fi
+        env:
+          UV_INDEX_INTERNAL_USERNAME: ${{ secrets.GCP_PYPI_SA_KEY && 'oauth2accesstoken' || '' }}
+          UV_INDEX_INTERNAL_PASSWORD: ${{ secrets.GCP_PYPI_SA_KEY }}
+        run: uv pip install --system ".[dev]"
 
       - name: Run Python lint (default)
         if: inputs.language == 'python' && inputs.lint_command == ''
         working-directory: ${{ inputs.working_directory }}
         run: |
-          uv pip install --system ruff mypy
           ruff check .
           mypy .
 
@@ -547,10 +549,10 @@ jobs:
       - name: Install Python dependencies
         if: inputs.language == 'python'
         working-directory: ${{ inputs.working_directory }}
-        run: |
-          if [ -f requirements-dev.txt ]; then uv pip install --system -r requirements-dev.txt; fi
-          if [ -f requirements.txt ]; then uv pip install --system -r requirements.txt; fi
-          if [ -f pyproject.toml ]; then uv pip install --system -e ".[dev]" 2>/dev/null || uv pip install --system -e . 2>/dev/null || true; fi
+        env:
+          UV_INDEX_INTERNAL_USERNAME: ${{ secrets.GCP_PYPI_SA_KEY && 'oauth2accesstoken' || '' }}
+          UV_INDEX_INTERNAL_PASSWORD: ${{ secrets.GCP_PYPI_SA_KEY }}
+        run: uv pip install --system ".[dev]"
 
       # ---- Node ----
       - name: Set up Node
