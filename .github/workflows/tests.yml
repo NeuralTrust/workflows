@@ -210,9 +210,12 @@ on:
       GH_TOKEN:
         required: false
         description: 'GitHub token for private module/repo access'
-      GCP_PYPI_SA_KEY:
+      WIF_PROVIDER:
         required: false
-        description: 'GCP service account key for private Artifact Registry Python index'
+        description: 'GCP Workload Identity Federation provider for private Artifact Registry access'
+      WIF_SERVICE_ACCOUNT:
+        required: false
+        description: 'GCP service account email for private Artifact Registry access'
       TEST_SECRETS:
         required: false
         description: 'Additional secrets as KEY=VALUE pairs (one per line), exported as env vars'
@@ -225,6 +228,9 @@ jobs:
     name: Lint (${{ inputs.language }})
     runs-on: ubuntu-latest
     if: inputs.lint_enabled
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Checkout code
@@ -287,12 +293,21 @@ jobs:
         if: inputs.language == 'python'
         uses: astral-sh/setup-uv@v5
 
+      - name: Authenticate to Google Cloud
+        if: inputs.language == 'python' && secrets.WIF_PROVIDER != '' && secrets.WIF_SERVICE_ACCOUNT != ''
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          token_format: access_token
+
       - name: Install Python dependencies
         if: inputs.language == 'python'
         working-directory: ${{ inputs.working_directory }}
         env:
-          UV_INDEX_INTERNAL_USERNAME: ${{ secrets.GCP_PYPI_SA_KEY && 'oauth2accesstoken' || '' }}
-          UV_INDEX_INTERNAL_PASSWORD: ${{ secrets.GCP_PYPI_SA_KEY }}
+          UV_INDEX_INTERNAL_USERNAME: ${{ steps.auth.outputs.access_token && 'oauth2accesstoken' || '' }}
+          UV_INDEX_INTERNAL_PASSWORD: ${{ steps.auth.outputs.access_token }}
         run: uv pip install --system ".[dev]"
 
       - name: Run Python lint (default)
@@ -367,6 +382,9 @@ jobs:
     name: Test (${{ inputs.language }})
     runs-on: ubuntu-latest
     if: inputs.test_enabled
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Checkout code
@@ -546,12 +564,21 @@ jobs:
         if: inputs.language == 'python'
         uses: astral-sh/setup-uv@v5
 
+      - name: Authenticate to Google Cloud
+        if: inputs.language == 'python' && secrets.WIF_PROVIDER != '' && secrets.WIF_SERVICE_ACCOUNT != ''
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          token_format: access_token
+
       - name: Install Python dependencies
         if: inputs.language == 'python'
         working-directory: ${{ inputs.working_directory }}
         env:
-          UV_INDEX_INTERNAL_USERNAME: ${{ secrets.GCP_PYPI_SA_KEY && 'oauth2accesstoken' || '' }}
-          UV_INDEX_INTERNAL_PASSWORD: ${{ secrets.GCP_PYPI_SA_KEY }}
+          UV_INDEX_INTERNAL_USERNAME: ${{ steps.auth.outputs.access_token && 'oauth2accesstoken' || '' }}
+          UV_INDEX_INTERNAL_PASSWORD: ${{ steps.auth.outputs.access_token }}
         run: uv pip install --system ".[dev]"
 
       # ---- Node ----
@@ -619,9 +646,7 @@ jobs:
       - name: Run Python tests (default)
         if: inputs.language == 'python' && inputs.test_command == ''
         working-directory: ${{ inputs.working_directory }}
-        run: |
-          uv pip install --system pytest pytest-cov
-          python -m pytest -v --cov --cov-report=xml:coverage.xml
+        run: pytest -v --cov --cov-report=xml:coverage.xml
 
       - name: Run Node tests (default)
         if: inputs.language == 'node' && inputs.test_command == ''
