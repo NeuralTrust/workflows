@@ -294,13 +294,15 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Authenticate to Google Cloud
-        if: inputs.language == 'python' && secrets.WIF_PROVIDER != '' && secrets.WIF_SERVICE_ACCOUNT != ''
+        if: inputs.language == 'python' && env.HAS_WIF == 'true'
         id: auth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
           token_format: access_token
+        env:
+          HAS_WIF: ${{ secrets.WIF_PROVIDER != '' && secrets.WIF_SERVICE_ACCOUNT != '' }}
 
       - name: Install Python dependencies
         if: inputs.language == 'python'
@@ -565,13 +567,15 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Authenticate to Google Cloud
-        if: inputs.language == 'python' && secrets.WIF_PROVIDER != '' && secrets.WIF_SERVICE_ACCOUNT != ''
+        if: inputs.language == 'python' && env.HAS_WIF == 'true'
         id: auth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
           token_format: access_token
+        env:
+          HAS_WIF: ${{ secrets.WIF_PROVIDER != '' && secrets.WIF_SERVICE_ACCOUNT != '' }}
 
       - name: Install Python dependencies
         if: inputs.language == 'python'
