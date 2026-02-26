@@ -39,8 +39,25 @@ jobs:
       checks: read
     
     steps:
+      - name: Check if PR author is same as approver
+        id: self_check
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          PR_AUTHOR=$(gh api repos/$REPO/pulls/$PR_NUMBER -q '.user.login')
+          CURRENT_USER=$(gh api user -q '.login')
+          if [ "$PR_AUTHOR" = "$CURRENT_USER" ]; then
+            echo "self_pr=true" >> $GITHUB_OUTPUT
+            echo "PR author is the same as approver; skipping approval (cannot approve own PR)."
+          else
+            echo "self_pr=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Wait for CI checks
         id: wait
+        if: steps.self_check.outputs.self_pr != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -98,7 +115,7 @@ jobs:
           echo "result=timeout" >> $GITHUB_OUTPUT
 
       - name: Approve PR
-        if: steps.wait.outputs.result == 'success'
+        if: steps.self_check.outputs.self_pr != 'true' && steps.wait.outputs.result == 'success'
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
