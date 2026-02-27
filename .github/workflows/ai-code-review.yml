@@ -46,15 +46,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          # Get the diff for this PR
-          gh pr diff ${{ github.event.pull_request.number }} > pr_diff.txt
-          
           # Get changed files with patch info (needed for line comments)
-          gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files > files.json
+          gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files --paginate > files.json
           
-          # Count files
           FILE_COUNT=$(jq length files.json)
           echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+          
+          # Get the diff — gh pr diff returns HTTP 406 when diff exceeds
+          # GitHub's 20,000-line limit, so fall back to per-file patches.
+          if gh pr diff ${{ github.event.pull_request.number }} > pr_diff.txt 2>/dev/null; then
+            echo "diff_source=full" >> $GITHUB_OUTPUT
+          else
+            echo "::notice::PR diff too large for GitHub API; assembling from per-file patches"
+            echo "diff_source=patches" >> $GITHUB_OUTPUT
+            # Build a diff from the per-file patches (already paginated above)
+            jq -r '.[] | select(.patch != null) | "diff --git a/\(.filename) b/\(.filename)\n--- a/\(.filename)\n+++ b/\(.filename)\n\(.patch)"' files.json > pr_diff.txt
+          fi
           
           # Truncate diff if too large (max ~80KB to fit in context with response)
           if [ $(wc -c < pr_diff.txt) -gt 80000 ]; then
