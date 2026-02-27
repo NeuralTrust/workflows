@@ -494,7 +494,7 @@ jobs:
             echo "POSTGRES_USER=${{ inputs.postgres_user }}" >> $GITHUB_ENV
             echo "POSTGRES_PASSWORD=${{ inputs.postgres_password }}" >> $GITHUB_ENV
             echo "POSTGRES_DB=${{ inputs.postgres_db }}" >> $GITHUB_ENV
-            echo "DATABASE_URL=postgres://${{ inputs.postgres_user }}:${{ inputs.postgres_password }}@localhost:5432/${{ inputs.postgres_db }}?sslmode=disable" >> $GITHUB_ENV
+            echo "DATABASE_URL=postgresql://${{ inputs.postgres_user }}:${{ inputs.postgres_password }}@localhost:5432/${{ inputs.postgres_db }}?sslmode=disable" >> $GITHUB_ENV
           fi
 
           if [ "${{ inputs.clickhouse_enabled }}" = "true" ]; then
