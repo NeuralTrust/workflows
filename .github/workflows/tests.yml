@@ -305,8 +305,9 @@ jobs:
           HAS_WIF: ${{ secrets.WIF_PROVIDER != '' && secrets.WIF_SERVICE_ACCOUNT != '' }}
 
       - name: Configure private repo access
-        if: inputs.language == 'python' && secrets.GH_TOKEN
+        if: inputs.language == 'python' && env.HAS_GH_TOKEN == 'true'
         env:
+          HAS_GH_TOKEN: ${{ secrets.GH_TOKEN != '' }}
           TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           git config --global url."https://${TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
@@ -586,8 +587,9 @@ jobs:
           HAS_WIF: ${{ secrets.WIF_PROVIDER != '' && secrets.WIF_SERVICE_ACCOUNT != '' }}
 
       - name: Configure private repo access
-        if: inputs.language == 'python' && secrets.GH_TOKEN
+        if: inputs.language == 'python' && env.HAS_GH_TOKEN == 'true'
         env:
+          HAS_GH_TOKEN: ${{ secrets.GH_TOKEN != '' }}
           TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           git config --global url."https://${TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
