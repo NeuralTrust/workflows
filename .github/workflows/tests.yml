@@ -304,6 +304,14 @@ jobs:
         env:
           HAS_WIF: ${{ secrets.WIF_PROVIDER != '' && secrets.WIF_SERVICE_ACCOUNT != '' }}
 
+      - name: Configure private repo access
+        if: inputs.language == 'python' && secrets.GH_TOKEN
+        env:
+          TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          git config --global url."https://${TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://${TOKEN}@github.com/".insteadOf "git@github.com:"
+
       - name: Install Python dependencies
         if: inputs.language == 'python'
         working-directory: ${{ inputs.working_directory }}
@@ -576,6 +584,14 @@ jobs:
           token_format: access_token
         env:
           HAS_WIF: ${{ secrets.WIF_PROVIDER != '' && secrets.WIF_SERVICE_ACCOUNT != '' }}
+
+      - name: Configure private repo access
+        if: inputs.language == 'python' && secrets.GH_TOKEN
+        env:
+          TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          git config --global url."https://${TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://${TOKEN}@github.com/".insteadOf "git@github.com:"
 
       - name: Install Python dependencies
         if: inputs.language == 'python'
