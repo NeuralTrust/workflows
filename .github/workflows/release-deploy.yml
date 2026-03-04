@@ -224,23 +224,6 @@ jobs:
           cache-to: type=inline
           provenance: false
 
-      - name: Scan Docker image for vulnerabilities
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ steps.meta.outputs.image_ref }}
-          severity: 'CRITICAL,HIGH'
-          format: 'table'
-          exit-code: '0'
-          ignore-unfixed: true
-
-      - name: Image scan summary
-        if: always()
-        run: |
-          echo "## Docker Image Scan" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Image:** \`${{ steps.meta.outputs.image_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Severity:** CRITICAL,HIGH" >> "$GITHUB_STEP_SUMMARY"
-
   # ============================================================================
   # Job 2: Update Kustomization with Release Tag
   # ============================================================================
