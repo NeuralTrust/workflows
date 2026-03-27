@@ -78,6 +78,7 @@ Every repo follows the same standardized pipeline:
 |----------|-------------|
 | [`tests.yml`](#tests--linting) | Generic test runner (Go/Python/Node/Rust) + optional services |
 | [`sast.yml`](#sast--security) | Trivy + Gitleaks + language SAST (Gosec/Bandit/njsscan) |
+| [`dast.yml`](#dast) | OWASP ZAP scan of running app (APIs/frontend); JWT or login-based auth |
 | [`ai-code-review.yml`](#ai-code-review) | AI-powered PR code review with inline comments |
 | [`auto-approve.yml`](#auto-approve) | Auto-approve PR when all CI checks pass |
 | [`ai-release-bump.yml`](#ai-release-bump) | AI-powered semver classification + GitHub Release creation |
@@ -569,6 +570,32 @@ jobs:
 | `bandit_args` | `-r . -ll` | Bandit arguments |
 | `njsscan_enabled` | `false` | Enable Node/JS SAST |
 | `njsscan_args` | `.` | njsscan target path |
+
+---
+
+## DAST (Dynamic Application Security Testing)
+
+**`dast.yml`** — Scans a **running** application (API or frontend) with OWASP ZAP. Use it after deploy so the target URL is live.
+
+- **APIs with JWT**: Pass the token via secret (`auth_method: jwt_static`) or obtain it from your login endpoint (`auth_method: jwt_login`). ZAP sends `Authorization: Bearer <token>` on every request so protected endpoints are scanned.
+- **Frontend (many screens)**: Point ZAP at the app URL; it spiders and scans. For login-protected UIs, use JWT if your app uses it, or see [docs/DAST.md](docs/DAST.md) for form-based auth options.
+
+Full guide (auth options, inputs, secrets): **[docs/DAST.md](docs/DAST.md)**.
+
+```yaml
+# Example: API with JWT from login (run after deploy)
+  dast:
+    needs: deploy
+    uses: NeuralTrust/workflows/.github/workflows/dast.yml@main
+    with:
+      target_url: https://api.dev.example.com
+      auth_method: jwt_login
+      auth_login_url: https://api.dev.example.com/auth/login
+      jwt_response_path: .access_token
+    secrets:
+      AUTH_USERNAME: ${{ secrets.DAST_TEST_USER }}
+      AUTH_PASSWORD: ${{ secrets.DAST_TEST_PASSWORD }}
+```
 
 ---
 
