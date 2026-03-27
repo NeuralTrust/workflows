@@ -1,0 +1,192 @@
+# ==============================================================================
+# Reusable Workflow: DAST (Dynamic Application Security Testing)
+# ==============================================================================
+# Scans a running application (APIs or frontend) with OWASP ZAP.
+# Supports JWT-authenticated APIs and optional form-based auth for frontends.
+#
+# API (JWT):
+#   - Obtain JWT from a login endpoint (POST with credentials) or pass a token via secret.
+#   - ZAP sends "Authorization: Bearer <token>" on every request so protected endpoints are scanned.
+#
+# Frontend (many screens):
+#   - Point ZAP at the app URL; it will spider/crawl and scan discovered pages.
+#   - For login-protected frontends, either: (1) pass the same JWT if your app uses it
+#     for API calls and the UI is behind the same auth, or (2) use ZAP Automation
+#     Framework (zaproxy/action-af) with a plan that does form-based login (see docs).
+#
+# Usage (API with JWT from secret):
+#   jobs:
+#     dast:
+#       uses: NeuralTrust/workflows/.github/workflows/dast.yml@main
+#       with:
+#         target_url: https://api.dev.example.com
+#         auth_method: jwt_static
+#       secrets:
+#         JWT_TOKEN: ${{ secrets.DAST_JWT_TOKEN }}
+#
+# Usage (API with JWT from login endpoint):
+#   jobs:
+#     dast:
+#       uses: NeuralTrust/workflows/.github/workflows/dast.yml@main
+#       with:
+#         target_url: https://api.dev.example.com
+#         auth_method: jwt_login
+#         auth_login_url: https://api.dev.example.com/auth/login
+#         auth_login_body: '{"username":"{{USERNAME}}","password":"{{PASSWORD}}"}'
+#         jwt_response_path: .access_token
+#       secrets:
+#         AUTH_USERNAME: ${{ secrets.DAST_TEST_USER }}
+#         AUTH_PASSWORD: ${{ secrets.DAST_TEST_PASSWORD }}
+#
+# Usage (Frontend, no auth or same JWT):
+#   jobs:
+#     dast:
+#       uses: NeuralTrust/workflows/.github/workflows/dast.yml@main
+#       with:
+#         target_url: https://app.dev.example.com
+#         auth_method: jwt_static
+#       secrets:
+#         JWT_TOKEN: ${{ secrets.DAST_JWT_TOKEN }}
+#
+# Usage (Frontend, form-based login — use additional_urls to scan known screens):
+#   Run ZAP against the base URL; for full form-based login use ZAP Automation
+#   Framework (see docs/DAST.md). Here you can still scan with optional JWT if
+#   your frontend sends it in API requests.
+# ==============================================================================
+
+name: DAST (Dynamic Application Security Testing)
+
+on:
+  workflow_call:
+    inputs:
+      target_url:
+        description: 'Base URL to scan (e.g. https://api.dev.example.com or https://app.example.com)'
+        required: true
+        type: string
+      auth_method:
+        description: 'Auth: none, jwt_static (token from secret), jwt_login (obtain token from login endpoint)'
+        required: false
+        type: string
+        default: 'none'
+      auth_login_url:
+        description: 'When auth_method=jwt_login, URL to POST for login'
+        required: false
+        type: string
+        default: ''
+      auth_login_body:
+        description: >
+          When auth_method=jwt_login, request body. Use {{USERNAME}} and {{PASSWORD}}.
+          Default: JSON {"username":"{{USERNAME}}","password":"{{PASSWORD}}"}
+        required: false
+        type: string
+        default: '{"username":"{{USERNAME}}","password":"{{PASSWORD}}"}'
+      auth_login_content_type:
+        description: 'Content-Type for login request'
+        required: false
+        type: string
+        default: 'application/json'
+      jwt_response_path:
+        description: 'jq path to extract JWT from login response (e.g. .access_token or .token)'
+        required: false
+        type: string
+        default: '.access_token // .token'
+      # Note: zaproxy/action-baseline failure behavior can be tuned via rules_file_name or cmd_options
+      severity_threshold:
+        description: 'Reserved for future use (e.g. fail on severity: high, medium, low, info)'
+        required: false
+        type: string
+        default: 'high'
+      additional_urls:
+        description: 'Comma-separated extra URLs to include in scan (optional)'
+        required: false
+        type: string
+        default: ''
+
+    secrets:
+      JWT_TOKEN:
+        description: 'When auth_method=jwt_static, the Bearer token to send on every request'
+        required: false
+      AUTH_USERNAME:
+        description: 'When auth_method=jwt_login, login username'
+        required: false
+      AUTH_PASSWORD:
+        description: 'When auth_method=jwt_login, login password'
+        required: false
+
+jobs:
+  dast:
+    name: DAST (ZAP)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Obtain JWT (login)
+        id: jwt
+        if: inputs.auth_method == 'jwt_login' && inputs.auth_login_url != ''
+        env:
+          AUTH_LOGIN_URL: ${{ inputs.auth_login_url }}
+          AUTH_LOGIN_BODY: ${{ inputs.auth_login_body }}
+          AUTH_LOGIN_CONTENT_TYPE: ${{ inputs.auth_login_content_type }}
+          AUTH_USERNAME: ${{ secrets.AUTH_USERNAME }}
+          AUTH_PASSWORD: ${{ secrets.AUTH_PASSWORD }}
+          JWT_RESPONSE_PATH: ${{ inputs.jwt_response_path }}
+        run: |
+          set -e
+          BODY="${AUTH_LOGIN_BODY//\{\{USERNAME\}\}/$AUTH_USERNAME}"
+          BODY="${BODY//\{\{PASSWORD\}\}/$AUTH_PASSWORD}"
+          RESPONSE=$(curl -sf -X POST "$AUTH_LOGIN_URL" \
+            -H "Content-Type: $AUTH_LOGIN_CONTENT_TYPE" \
+            -d "$BODY")
+          TOKEN=$(echo "$RESPONSE" | jq -r "$JWT_RESPONSE_PATH")
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "::error::Failed to extract JWT from login response (path: $JWT_RESPONSE_PATH)"
+            exit 1
+          fi
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare ZAP auth config (JWT)
+        id: zap_auth
+        if: inputs.auth_method == 'jwt_static' || (inputs.auth_method == 'jwt_login' && steps.jwt.outputs.token != '')
+        env:
+          JWT_TOKEN: ${{ inputs.auth_method == 'jwt_static' && secrets.JWT_TOKEN || steps.jwt.outputs.token }}
+        run: |
+          TOKEN="$JWT_TOKEN"
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::No JWT available; scanning without auth"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p .zap
+          {
+            echo 'replacer.full_list(0).description=JWT Auth'
+            echo 'replacer.full_list(0).enabled=true'
+            echo 'replacer.full_list(0).matchtype=REQ_HEADER'
+            echo 'replacer.full_list(0).matchstr=Authorization'
+            echo 'replacer.full_list(0).regex=false'
+            printf 'replacer.full_list(0).replacement=Bearer %s\n' "$TOKEN"
+          } > .zap/options.prop
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+          echo "config_file=.zap/options.prop" >> "$GITHUB_OUTPUT"
+
+      - name: Run OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: ${{ inputs.target_url }}
+          cmd_options: ${{ steps.zap_auth.outputs.enabled == 'true' && '-z "-configfile .zap/options.prop"' || '' }}
+        continue-on-error: true
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## DAST (OWASP ZAP)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Target:** \`${{ inputs.target_url }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Auth:** ${{ inputs.auth_method }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Severity threshold (reserved):** ${{ inputs.severity_threshold }}" >> "$GITHUB_STEP_SUMMARY"
