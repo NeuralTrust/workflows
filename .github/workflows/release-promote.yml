@@ -357,8 +357,6 @@ jobs:
       - name: Set up Docker Buildx
         if: steps.strategy.outputs.final == 'rebuild'
         uses: docker/setup-buildx-action@v4
-        with:
-          driver: docker
 
       - name: Login to Artifact Registry (Docker)
         if: steps.strategy.outputs.final == 'rebuild'
