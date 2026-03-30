@@ -306,9 +306,9 @@ jobs:
           fi
 
           if [ -n "$PREFIX" ]; then
-            COMMIT_MSG="[skip ci] update ${PREFIX} image tag to ${SHORT_SHA} in ${OVERLAY_DIR}"
+            COMMIT_MSG="update ${PREFIX} image tag to ${SHORT_SHA} in ${OVERLAY_DIR}"
           else
-            COMMIT_MSG="[skip ci] update image tag to ${SHORT_SHA} in ${OVERLAY_DIR}"
+            COMMIT_MSG="update image tag to ${SHORT_SHA} in ${OVERLAY_DIR}"
           fi
 
           git commit -m "$COMMIT_MSG"

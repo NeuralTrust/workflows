@@ -334,7 +334,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "[skip ci] update ${{ inputs.image_name }} image tag to ${SHORT_TAG} in ${OVERLAY_DIR}"
+          git commit -m "update ${{ inputs.image_name }} image tag to ${SHORT_TAG} in ${OVERLAY_DIR}"
           git push origin HEAD:${{ github.ref_name }}
 
           echo "## Deployment Updated" >> "$GITHUB_STEP_SUMMARY"

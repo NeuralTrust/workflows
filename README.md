@@ -651,7 +651,7 @@ jobs:
 2. Injects `APP_VERSION=<commit-sha>` as a build arg
 3. Scans the image with Trivy (CRITICAL,HIGH, warn mode)
 4. Updates `kustomization.yaml` (image tag) and `config.env` (`APPLICATION_VERSION`)
-5. Commits and pushes with `[skip ci]`
+5. Commits and pushes overlay updates (deploy workflows use `paths-ignore: k8s/**` so this does not retrigger builds)
 6. Sends Slack notification
 
 ---

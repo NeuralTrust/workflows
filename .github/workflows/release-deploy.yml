@@ -303,7 +303,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "[skip ci] release ${{ inputs.image_name }} ${RELEASE_TAG} in ${OVERLAY_DIR}"
+          git commit -m "release ${{ inputs.image_name }} ${RELEASE_TAG} in ${OVERLAY_DIR}"
           git push origin main
 
           echo "## Release Deployed" >> "$GITHUB_STEP_SUMMARY"

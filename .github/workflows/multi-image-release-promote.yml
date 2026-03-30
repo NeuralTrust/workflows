@@ -270,7 +270,7 @@ jobs:
               echo "final=promote" >> "$GITHUB_OUTPUT"
               echo "source_ref=${SHA_REF}" >> "$GITHUB_OUTPUT"
             elif crane manifest "${LATEST_REF}" > /dev/null 2>&1; then
-              echo "::notice::${{ matrix.image.name }}: Dev image not found by SHA (likely a [skip ci] commit) — using latest tag from dev registry"
+              echo "::notice::${{ matrix.image.name }}: Dev image not found by SHA (overlay may be ahead of that commit) — using latest tag from dev registry"
               echo "final=promote" >> "$GITHUB_OUTPUT"
               echo "source_ref=${LATEST_REF}" >> "$GITHUB_OUTPUT"
             else
@@ -460,9 +460,9 @@ jobs:
           fi
 
           if [ -n "$PREFIX" ]; then
-            COMMIT_MSG="[skip ci] ${STRATEGY} ${PREFIX} ${RELEASE_TAG} in ${OVERLAY_DIR}"
+            COMMIT_MSG="${STRATEGY} ${PREFIX} ${RELEASE_TAG} in ${OVERLAY_DIR}"
           else
-            COMMIT_MSG="[skip ci] ${STRATEGY} ${RELEASE_TAG} in ${OVERLAY_DIR}"
+            COMMIT_MSG="${STRATEGY} ${RELEASE_TAG} in ${OVERLAY_DIR}"
           fi
 
           git commit -m "$COMMIT_MSG"
