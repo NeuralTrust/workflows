@@ -277,9 +277,9 @@ jobs:
           fi
 
           if [ -n "$PREFIX" ]; then
-            COMMIT_MSG="[skip ci] release ${PREFIX} ${RELEASE_TAG} in ${OVERLAY_DIR}"
+            COMMIT_MSG="release ${PREFIX} ${RELEASE_TAG} in ${OVERLAY_DIR}"
           else
-            COMMIT_MSG="[skip ci] release ${RELEASE_TAG} in ${OVERLAY_DIR}"
+            COMMIT_MSG="release ${RELEASE_TAG} in ${OVERLAY_DIR}"
           fi
 
           git commit -m "$COMMIT_MSG"

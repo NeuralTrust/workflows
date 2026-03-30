@@ -307,7 +307,7 @@ jobs:
               echo "final=promote" >> "$GITHUB_OUTPUT"
               echo "source_ref=${SHA_REF}" >> "$GITHUB_OUTPUT"
             elif crane manifest "${LATEST_REF}" > /dev/null 2>&1; then
-              echo "::notice::Dev image not found by SHA (likely a [skip ci] commit) — using latest tag from dev registry"
+              echo "::notice::Dev image not found by SHA (overlay may be ahead of that commit) — using latest tag from dev registry"
               echo "final=promote" >> "$GITHUB_OUTPUT"
               echo "source_ref=${LATEST_REF}" >> "$GITHUB_OUTPUT"
             else
@@ -510,7 +510,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "[skip ci] ${STRATEGY} ${{ inputs.image_name }} ${RELEASE_TAG} in ${OVERLAY_DIR}"
+          git commit -m "${STRATEGY} ${{ inputs.image_name }} ${RELEASE_TAG} in ${OVERLAY_DIR}"
           git push origin HEAD:main
 
           echo "## Deployment Updated" >> "$GITHUB_STEP_SUMMARY"

@@ -2,7 +2,8 @@
 # Reusable Workflow: Update Kustomization and Push
 # ==============================================================================
 # Updates image tags in kustomization.yaml based on branch (develop→dev, main→prod),
-# then commits and pushes the changes with [skip ci] to prevent re-triggering.
+# then commits and pushes. Callers should use paths-ignore (e.g. k8s/**) on deploy
+# workflows so these pushes do not retrigger build loops.
 #
 # Supports updating multiple images in a single kustomization.yaml file.
 #
@@ -169,9 +170,9 @@ jobs:
           fi
 
           if [ -n "$PREFIX" ]; then
-            COMMIT_MSG="[skip ci] update ${PREFIX} image tag to ${SHORT_SHA} in ${OVERLAY_DIR}"
+            COMMIT_MSG="update ${PREFIX} image tag to ${SHORT_SHA} in ${OVERLAY_DIR}"
           else
-            COMMIT_MSG="[skip ci] update image tag to ${SHORT_SHA} in ${OVERLAY_DIR}"
+            COMMIT_MSG="update image tag to ${SHORT_SHA} in ${OVERLAY_DIR}"
           fi
 
           git commit -m "$COMMIT_MSG"
