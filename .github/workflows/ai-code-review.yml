@@ -47,22 +47,86 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           # Get changed files with patch info (needed for line comments)
-          gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files --paginate > files.json
-          
+          gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files --paginate > files_raw.json
+
+          # Filter out files that should not be reviewed (lock files, generated,
+          # vendored, binary, images, config-only, and other noise).
+          EXCLUDE_PATTERN='(\.(lock|sum|mod)$|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Pipfile\.lock|poetry\.lock|composer\.lock|Cargo\.lock|go\.sum|bun\.lockb|\.min\.(js|css)$|\.bundle\.(js|css)$|dist/|build/|vendor/|node_modules/|__pycache__/|\.generated\.|\.g\.|_generated\.|\.pb\.go$|\.pb\.ts$|_pb2\.py$|\.swagger\.json$|\.openapi\.json$|\.(png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|mp4|webm|pdf|zip|tar|gz|bin|exe|dll|so|dylib)$|\.env\.example$|\.gitignore$|\.dockerignore$|LICENSE|CODEOWNERS|\.editorconfig$|\.prettierrc|\.eslintrc|\.eslintignore|tsconfig\.json$|jest\.config|vitest\.config|webpack\.config|vite\.config|babel\.config|\.babelrc|Makefile$|Dockerfile$|docker-compose|kustomization\.yaml$|Chart\.yaml$|values\.yaml$|\.helmignore$)'
+
+          jq --arg pat "$EXCLUDE_PATTERN" \
+            '[.[] | select(.filename | test($pat) | not)]' files_raw.json > files.json
+
           FILE_COUNT=$(jq length files.json)
+          SKIPPED=$(($(jq length files_raw.json) - FILE_COUNT))
           echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
-          
+          echo "skipped_count=$SKIPPED" >> $GITHUB_OUTPUT
+
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "::notice::All changed files were excluded from review"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo '{}' > pr_diff.txt
+            exit 0
+          fi
+
+          # Build the list of reviewable filenames for later validation
+          jq -r '.[].filename' files.json > reviewable_files.txt
+
           # Get the diff — gh pr diff returns HTTP 406 when diff exceeds
           # GitHub's 20,000-line limit, so fall back to per-file patches.
-          if gh pr diff ${{ github.event.pull_request.number }} > pr_diff.txt 2>/dev/null; then
+          if gh pr diff ${{ github.event.pull_request.number }} > full_diff.txt 2>/dev/null; then
             echo "diff_source=full" >> $GITHUB_OUTPUT
           else
             echo "::notice::PR diff too large for GitHub API; assembling from per-file patches"
             echo "diff_source=patches" >> $GITHUB_OUTPUT
-            # Build a diff from the per-file patches (already paginated above)
-            jq -r '.[] | select(.patch != null) | "diff --git a/\(.filename) b/\(.filename)\n--- a/\(.filename)\n+++ b/\(.filename)\n\(.patch)"' files.json > pr_diff.txt
+            jq -r '.[] | select(.patch != null) | "diff --git a/\(.filename) b/\(.filename)\n--- a/\(.filename)\n+++ b/\(.filename)\n\(.patch)"' files.json > full_diff.txt
           fi
-          
+
+          # When using the full diff, strip sections for excluded files.
+          # Keep only hunks whose "diff --git" header references a reviewable file.
+          python3 - <<'PYEOF'
+          import re, pathlib
+
+          reviewable = set(pathlib.Path("reviewable_files.txt").read_text().splitlines())
+          raw = pathlib.Path("full_diff.txt").read_text()
+          sections = re.split(r'(?=^diff --git )', raw, flags=re.MULTILINE)
+          kept = []
+          for s in sections:
+              m = re.match(r'diff --git a/.+ b/(.+)', s)
+              if m and m.group(1) in reviewable:
+                  kept.append(s)
+          pathlib.Path("pr_diff.txt").write_text("".join(kept))
+          PYEOF
+
+          # Extract valid diff line numbers per file for later validation
+          python3 - <<'PYEOF'
+          import re, json, pathlib
+
+          diff = pathlib.Path("pr_diff.txt").read_text()
+          valid = {}  # { filename: [line_numbers...] }
+          current_file = None
+          current_line = 0
+          for raw_line in diff.splitlines():
+              m = re.match(r'diff --git a/.+ b/(.+)', raw_line)
+              if m:
+                  current_file = m.group(1)
+                  if current_file not in valid:
+                      valid[current_file] = []
+                  continue
+              hm = re.match(r'^@@ -\d+(?:,\d+)? \+(\d+)', raw_line)
+              if hm:
+                  current_line = int(hm.group(1))
+                  continue
+              if raw_line.startswith('+') and not raw_line.startswith('+++'):
+                  if current_file:
+                      valid[current_file].append(current_line)
+                  current_line += 1
+              elif raw_line.startswith('-') and not raw_line.startswith('---'):
+                  pass  # deleted lines don't increment the new-file counter
+              else:
+                  current_line += 1
+          pathlib.Path("valid_lines.json").write_text(json.dumps(valid))
+          PYEOF
+
           # Truncate diff if too large (max ~80KB to fit in context with response)
           if [ $(wc -c < pr_diff.txt) -gt 80000 ]; then
             head -c 80000 pr_diff.txt > pr_diff_truncated.txt
@@ -77,65 +141,183 @@ jobs:
         run: |
           gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} > pr.json
           PR_TITLE=$(jq -r '.title' pr.json)
-          PR_BODY=$(jq -r '.body // ""' pr.json | head -c 500)
+          PR_BODY=$(jq -r '.body // ""' pr.json | head -c 1000)
           HEAD_SHA=$(jq -r '.head.sha' pr.json)
           echo "title=$PR_TITLE" >> $GITHUB_OUTPUT
           echo "head_sha=$HEAD_SHA" >> $GITHUB_OUTPUT
+          # Persist for use in the prompt
+          printf '%s' "$PR_TITLE" > pr_title.txt
+          printf '%s' "$PR_BODY" > pr_body.txt
 
       - name: AI Review with line-specific comments
         id: review
+        if: steps.diff.outputs.skip != 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           DIFF_CONTENT=$(cat pr_diff.txt)
-          
-          # Create the prompt asking for structured JSON output
-          cat > request.json << EOF
+          PR_TITLE=$(cat pr_title.txt)
+          PR_BODY=$(cat pr_body.txt)
+
+          # Build the user message with PR context + diff
+          USER_MSG=$(jq -n \
+            --arg title "$PR_TITLE" \
+            --arg body "$PR_BODY" \
+            --arg diff "$DIFF_CONTENT" \
+            '"## Pull Request\nTitle: \($title)\nDescription: \($body)\n\n## Diff\n\($diff)"')
+
+          SYSTEM_PROMPT=$(cat <<'SYSPROMPT'
+          You are a precise, senior code reviewer. Your goal is to find only **real, high-confidence bugs and security vulnerabilities** in the pull request diff below.
+
+          Return a JSON object:
+          {
+            "summary": "Brief overall assessment (1-2 sentences)",
+            "issues": [
+              {
+                "file": "path/to/file",
+                "line": 42,
+                "severity": "error|warning|suggestion",
+                "message": "Concise description of the issue and how to fix it",
+                "confidence": "high|medium"
+              }
+            ],
+            "approved": true/false
+          }
+
+          ## Severity definitions — be strict
+          - **error**: Definite bug, crash, data loss, security vulnerability, or race condition that WILL break production. You must be highly confident.
+          - **warning**: Likely bug or a pattern that is dangerous under realistic conditions (not hypothetical edge cases).
+          - **suggestion**: Concrete improvement with clear justification (not style preferences).
+
+          ## Rules — avoid false positives
+          1. You can ONLY see the diff. Do NOT assume what the rest of the codebase looks like. If a function, variable, or import is used but you cannot see its definition, assume it exists and is correct.
+          2. Do NOT flag:
+             - Style, formatting, or naming preferences
+             - Missing comments or documentation
+             - Code that "could be improved" but works correctly
+             - Test files using hardcoded values, mocks, dummy data, or example secrets
+             - Environment variable examples (.env.example, config samples)
+             - Defensive programming suggestions ("you should add nil check") unless there is clear evidence of a nil/null dereference in the diff
+             - Hypothetical issues ("if X were to happen...") without evidence in the diff
+             - Idiomatic differences between programming styles
+             - TODO/FIXME comments
+             - Import ordering
+             - Functions/methods that appear unused in the diff — they may be used elsewhere
+             - Error handling style preferences (e.g., "should use wrapped errors")
+             - Type assertions or casts that are valid for the context shown
+          3. The 'line' field MUST be a line number from the NEW side of the diff (lines with a + prefix). If you cannot determine the exact line, do NOT report the issue.
+          4. The 'file' field must exactly match a filename from the diff headers (b/path/to/file).
+          5. If you are not at least 80% confident an issue is real, do NOT report it.
+          6. When in doubt, do NOT report. A missed real issue is better than a false positive.
+          7. If no issues are found, return an empty issues array and approved: true. This is the expected outcome for most PRs.
+          8. Read the PR title and description to understand the author's intent before judging the changes.
+          SYSPROMPT
+          )
+
+          SYSTEM_PROMPT_JSON=$(printf '%s' "$SYSTEM_PROMPT" | jq -Rs .)
+
+          # Append language instruction
+          SYSTEM_PROMPT_JSON=$(echo "$SYSTEM_PROMPT_JSON" | jq -r .)
+          SYSTEM_PROMPT_JSON=$(printf '%s\n\nLanguage for review comments: %s' "$SYSTEM_PROMPT_JSON" "${{ inputs.language }}" | jq -Rs .)
+
+          cat > request.json <<REQEOF
           {
             "model": "${{ inputs.model }}",
             "response_format": { "type": "json_object" },
             "messages": [
               {
                 "role": "system",
-                "content": "You are an expert code reviewer. Analyze the pull request diff and identify issues. Ignore .env.example files and clearly dummy secrets and variables examples in tests and other files. Return a JSON object with this structure:\n\n{\n  \"summary\": \"Brief overall assessment (1-2 sentences)\",\n  \"issues\": [\n    {\n      \"file\": \"path/to/file.go\",\n      \"line\": 42,\n      \"severity\": \"error|warning|suggestion\",\n      \"message\": \"Description of the issue and how to fix it\"\n    }\n  ],\n  \"approved\": true/false\n}\n\nRules:\n- Only report actual issues (bugs, security, performance, bad practices)\n- 'line' must be a line number that appears in the diff (lines starting with +)\n- severity: 'error' for bugs/security, 'warning' for potential issues, 'suggestion' for improvements\n- If no issues found, return empty issues array and approved: true\n- Be concise in messages\n- Language: ${{ inputs.language }}"
+                "content": $SYSTEM_PROMPT_JSON
               },
               {
                 "role": "user",
-                "content": $(echo "$DIFF_CONTENT" | jq -Rs .)
+                "content": $USER_MSG
               }
             ],
             "max_tokens": 4000,
-            "temperature": 0.2
+            "temperature": 0
           }
-          EOF
-          
+          REQEOF
+
           # Call OpenAI API
           RESPONSE=$(curl -s https://api.openai.com/v1/chat/completions \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $OPENAI_API_KEY" \
             -d @request.json)
-          
-          # Check for errors - skip review silently on API errors
+
+          # Check for errors — skip review silently on API errors
           if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
             ERROR=$(echo "$RESPONSE" | jq -r '.error.message')
             echo "❌ OpenAI API Error: $ERROR"
             echo '{"summary": "", "issues": [], "approved": true, "skip": true}' > review.json
             exit 0
           fi
-          
+
           # Extract the review JSON
           echo "$RESPONSE" | jq -r '.choices[0].message.content' > review.json
-          
-          # Validate JSON - skip silently on parse errors
+
+          # Validate JSON — skip silently on parse errors
           if ! jq empty review.json 2>/dev/null; then
             echo "Invalid JSON response, skipping review"
             echo '{"summary": "", "issues": [], "approved": true, "skip": true}' > review.json
+            exit 0
           fi
-          
-          echo "Review generated:"
+
+          echo "Raw AI review:"
           cat review.json
 
+      - name: Validate AI output against diff
+        if: steps.diff.outputs.skip != 'true'
+        run: |
+          # Drop issues whose file+line don't appear in the actual diff,
+          # or that the AI marked as medium confidence.
+          python3 - <<'PYEOF'
+          import json, pathlib
+
+          review = json.loads(pathlib.Path("review.json").read_text())
+          valid_lines = json.loads(pathlib.Path("valid_lines.json").read_text())
+
+          original_count = len(review.get("issues", []))
+          validated = []
+          for issue in review.get("issues", []):
+              f = issue.get("file", "")
+              line = issue.get("line")
+              confidence = issue.get("confidence", "high")
+
+              # Drop medium-confidence issues
+              if confidence == "medium" and issue.get("severity") != "error":
+                  continue
+
+              # Verify the file exists in the diff
+              if f not in valid_lines:
+                  continue
+
+              # Verify the line number exists in the diff (tolerance ±3 for off-by-one)
+              file_lines = valid_lines[f]
+              if line is not None and file_lines:
+                  if not any(abs(line - vl) <= 3 for vl in file_lines):
+                      continue
+                  # Snap to the nearest valid line
+                  issue["line"] = min(file_lines, key=lambda vl: abs(line - vl))
+
+              # Strip the confidence field before posting
+              issue.pop("confidence", None)
+              validated.append(issue)
+
+          dropped = original_count - len(validated)
+          if dropped > 0:
+              print(f"Dropped {dropped} issue(s) that failed validation (wrong file/line or low confidence)")
+
+          review["issues"] = validated
+          if not validated:
+              review["approved"] = True
+          pathlib.Path("review.json").write_text(json.dumps(review, indent=2))
+          print("Validated review:")
+          print(json.dumps(review, indent=2))
+          PYEOF
+
       - name: Post review with inline comments
+        if: steps.diff.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
@@ -239,28 +421,34 @@ jobs:
 
       - name: Summary
         run: |
+          if [ "${{ steps.diff.outputs.skip }}" = "true" ]; then
+            echo "## 🤖 AI Code Review — Skipped" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "All changed files were excluded from review (lock files, generated code, etc.)." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
           REVIEW=$(cat review.json)
           ISSUE_COUNT=$(echo "$REVIEW" | jq '.issues | length')
           CRITICAL_COUNT=$(echo "$REVIEW" | jq '[.issues[] | select(.severity == "error")] | length')
           WARNING_COUNT=$(echo "$REVIEW" | jq '[.issues[] | select(.severity == "warning")] | length')
           SUGGESTION_COUNT=$(echo "$REVIEW" | jq '[.issues[] | select(.severity == "suggestion")] | length')
           APPROVED=$(echo "$REVIEW" | jq -r '.approved')
-          
+
           echo "## 🤖 AI Code Review Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **PR**: #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Files reviewed**: ${{ steps.diff.outputs.file_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Files reviewed**: ${{ steps.diff.outputs.file_count }} (${{ steps.diff.outputs.skipped_count }} excluded)" >> $GITHUB_STEP_SUMMARY
           echo "- **Issues found**: $ISSUE_COUNT (🚨 $CRITICAL_COUNT critical, ⚠️ $WARNING_COUNT warnings, 💡 $SUGGESTION_COUNT suggestions)" >> $GITHUB_STEP_SUMMARY
           echo "- **PR commented**: $([ "$CRITICAL_COUNT" -gt 0 ] && echo 'Yes (critical issues)' || echo 'No')" >> $GITHUB_STEP_SUMMARY
           echo "- **Model**: ${{ inputs.model }}" >> $GITHUB_STEP_SUMMARY
-          
+
           if [ "$APPROVED" = "true" ]; then
             echo "- **Result**: ✅ Approved" >> $GITHUB_STEP_SUMMARY
           else
             echo "- **Result**: ⚠️ Changes requested" >> $GITHUB_STEP_SUMMARY
           fi
-          
-          # List all issues in the summary so warnings/suggestions are still visible
+
           if [ "$ISSUE_COUNT" -gt 0 ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "### Issues" >> $GITHUB_STEP_SUMMARY
@@ -281,13 +469,14 @@ jobs:
           fi
 
       - name: Fail if critical issues found
+        if: steps.diff.outputs.skip != 'true'
         run: |
           REVIEW=$(cat review.json)
           ERROR_COUNT=$(echo "$REVIEW" | jq '[.issues[] | select(.severity == "error")] | length')
-          
+
           if [ "$ERROR_COUNT" -gt 0 ]; then
             echo "❌ Found $ERROR_COUNT critical issue(s). Blocking auto-approve."
             exit 1
           fi
-          
+
           echo "✅ No critical issues found."
