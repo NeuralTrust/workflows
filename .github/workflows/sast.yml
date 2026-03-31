@@ -84,6 +84,13 @@ on:
         required: false
         type: string
         default: 'vuln,secret'
+      trivy_ignorefile:
+        description: >
+          Path to a Trivy ignore file (.trivyignore) for suppressing
+          false positives. Auto-detected from repo root if present.
+        required: false
+        type: string
+        default: ''
 
       # ======================================================================
       # pip-audit (Python)
@@ -185,6 +192,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
+      - name: Detect Trivy ignore file
+        id: trivyignore
+        run: |
+          if [ -n "${{ inputs.trivy_ignorefile }}" ]; then
+            echo "path=${{ inputs.trivy_ignorefile }}" >> "$GITHUB_OUTPUT"
+          elif [ -f ".trivyignore" ]; then
+            echo "path=.trivyignore" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
@@ -195,6 +213,7 @@ jobs:
           format: 'table'
           exit-code: ${{ inputs.trivy_exit_code }}
           ignore-unfixed: true
+          trivyignores: ${{ steps.trivyignore.outputs.path }}
 
       - name: Summary
         if: always()
