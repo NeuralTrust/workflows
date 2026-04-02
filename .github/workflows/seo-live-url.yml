@@ -1,8 +1,9 @@
 # ==============================================================================
 # Reusable Workflow: SEO checks against a live URL (post-merge / scheduled)
 # ==============================================================================
-# After deploy: probe homepage, optional robots.txt / sitemap, then Lighthouse
-# (SEO category only). Pass repo variable BASE_URL as input `base_url` (e.g. https://neuraltrust.ai).
+# After deploy: homepage + robots + deep sitemap/content audit (URLs, H1, canonical,
+# JSON-LD), optional shallow sitemap HEAD, then Lighthouse (SEO category only).
+# Pass repo variable BASE_URL as input `base_url` (e.g. https://neuraltrust.ai).
 #
 # Usage (on push to main):
 #   jobs:
@@ -44,10 +45,37 @@ on:
         required: false
         type: boolean
         default: false
+      content_audit_enabled:
+        description: >
+          Fetch sitemap(s), validate <loc> URLs (host/scheme), sample HTTP checks,
+          audit homepage + lighthouse_paths HTML for H1, canonical, JSON-LD; parse robots Sitemap: line
+        required: false
+        type: boolean
+        default: true
+      content_audit_max_url_checks:
+        description: 'Max sitemap URLs to HEAD/GET (0 = skip URL reachability checks)'
+        required: false
+        type: string
+        default: '50'
+      content_audit_strict:
+        description: 'If true, fail job when content audit reports error-level findings'
+        required: false
+        type: boolean
+        default: false
+      workflows_ref:
+        description: 'Ref for NeuralTrust/workflows checkout (scripts/seo-live-content-audit.mjs)'
+        required: false
+        type: string
+        default: 'main'
       lhci_version:
         required: false
         type: string
         default: '0.14.0'
+
+    secrets:
+      GH_TOKEN:
+        description: 'Optional PAT to checkout private NeuralTrust/workflows'
+        required: false
 
 jobs:
   live:
@@ -115,6 +143,40 @@ jobs:
             if [ "$code" = "200" ]; then exit 0; fi
           done
           echo "::warning::No sitemap at /sitemap.xml or /sitemap_index.xml (HEAD not 200)"
+
+      - name: Checkout workflow scripts (content audit)
+        if: inputs.content_audit_enabled
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/workflows
+          ref: ${{ inputs.workflows_ref }}
+          path: _nt_workflows
+          token: ${{ secrets.GH_TOKEN || github.token }}
+
+      - name: Live content audit (sitemap, H1, canonical, JSON-LD, robots)
+        if: inputs.content_audit_enabled
+        id: content_audit
+        run: |
+          set +e
+          REPORT="${RUNNER_TEMP}/content-audit.md"
+          SCRIPT="${GITHUB_WORKSPACE}/_nt_workflows/scripts/seo-live-content-audit.mjs"
+          STRICT_ARGS=()
+          if [ "${{ inputs.content_audit_strict }}" = "true" ]; then
+            STRICT_ARGS=(--strict)
+          fi
+          node "$SCRIPT" \
+            --base-url "${{ steps.base.outputs.url }}" \
+            --home-html /tmp/home.html \
+            --paths "${{ inputs.lighthouse_paths }}" \
+            --max-url-checks "${{ inputs.content_audit_max_url_checks }}" \
+            "${STRICT_ARGS[@]}" | tee "$REPORT"
+          EC=${PIPESTATUS[0]}
+          set -e
+          {
+            echo ""
+            cat "$REPORT"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$EC"
 
       - name: Install Lighthouse CI
         run: npm install -g @lhci/cli@${{ inputs.lhci_version }}
@@ -192,7 +254,9 @@ jobs:
             echo "- **Base:** \`${{ steps.base.outputs.url }}\`"
             echo "- **Lighthouse paths:** \`${{ inputs.lighthouse_paths }}\`"
             echo "- **robots.txt check:** ${{ inputs.check_robots }}"
-            echo "- **sitemap probe:** ${{ inputs.check_sitemap }}"
+            echo "- **sitemap probe (HEAD):** ${{ inputs.check_sitemap }}"
+            echo "- **Deep content audit:** ${{ inputs.content_audit_enabled }} (max URL checks: ${{ inputs.content_audit_max_url_checks }})"
+            echo "- **Content audit strict:** ${{ inputs.content_audit_strict }}"
             echo "- **Min SEO score (assert):** ${{ inputs.assert_seo_min_score != '' && inputs.assert_seo_min_score || '_(not enforced)_' }}"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"

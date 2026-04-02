@@ -155,6 +155,25 @@ function findRobots(files, projectRoot) {
 	})
 }
 
+function countH1TagsInSource(content) {
+	const m = content.match(/<h1\b/gi)
+	return m ? m.length : 0
+}
+
+function hasCanonicalInSource(content) {
+	return (
+		(/\balternates\s*:/.test(content) && /\bcanonical\s*:/.test(content)) ||
+		/<link[^>]+rel=['"]canonical['"]/i.test(content)
+	)
+}
+
+function hasJsonLdInSource(content) {
+	return (
+		/application\/ld\+json/i.test(content) ||
+		/['"]application\/ld\+json['"]/.test(content)
+	)
+}
+
 function auditImageAlts(content, file) {
 	const lines = content.split('\n')
 	lines.forEach((line, idx) => {
@@ -285,16 +304,14 @@ function runAudit(projectRoot, rootDirs) {
 		)
 	}
 
-	// Page-level: flag app router pages without any local metadata (informational)
+	// Page-level: metadata nudge, images, H1 / canonical / JSON-LD hints
 	for (const f of allFiles) {
 		if (!isPageFile(path.basename(f)) || isApiRoute(f)) continue
 		const c = read(f)
 		if (/^['"]use client['"]/m.test(c.trimStart())) continue
-		if (hasMetadataExport(c)) continue
 		const rel = relPosix(projectRoot, f)
-		// Deep app routes often rely on parent layouts; only nudge for shallow paths
 		const depth = rel.split('/').length
-		if (depth <= 4) {
+		if (!hasMetadataExport(c) && depth <= 4) {
 			add(
 				'info',
 				'page-metadata',
@@ -304,6 +321,47 @@ function runAudit(projectRoot, rootDirs) {
 			)
 		}
 		auditImageAlts(c, f)
+
+		// Catch-all routes (e.g. [...slug]) often render H1/JSON-LD from CMS — skip noisy static rules
+		if (/\[\.\.\.[^\]]+\]/.test(rel)) continue
+
+		// H1 / canonical / JSON-LD hints on route pages (static source)
+		const h1n = countH1TagsInSource(c)
+		if (h1n === 0) {
+			add(
+				'warn',
+				'page-h1',
+				'No `<h1` in this page source (may be injected by MDX/CMS).',
+				'Ensure the rendered page has exactly one visible H1 for SEO.',
+				f
+			)
+		} else if (h1n > 1) {
+			add(
+				'warn',
+				'page-h1-multiple',
+				`Multiple (\`${h1n}\`) \`<h1>\` in source — usually prefer one per page.`,
+				'Consolidate to a single H1 or move secondary headings to h2.',
+				f
+			)
+		}
+		if (!hasCanonicalInSource(c) && !/\bgenerateMetadata\b/.test(c)) {
+			add(
+				'info',
+				'page-canonical',
+				'No `alternates.canonical` / `<link rel="canonical">` in this file (may inherit from layout).',
+				'Set explicit canonicals on indexable URLs to avoid duplicate content.',
+				f
+			)
+		}
+		if (!hasJsonLdInSource(c)) {
+			add(
+				'info',
+				'page-jsonld',
+				'No `application/ld+json` script in this file.',
+				'Add JSON-LD where you need rich results (Organization, WebSite, Article, FAQ…).',
+				f
+			)
+		}
 	}
 
 	// Top-level locale segment layout only (avoid noise on every nested dashboard layout)
