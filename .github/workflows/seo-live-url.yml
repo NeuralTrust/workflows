@@ -182,12 +182,40 @@ jobs:
 
       - name: Summary
         if: always()
+        working-directory: ${{ github.workspace }}
         run: |
           {
             echo "## SEO live checks"
+            echo ""
+            echo "### Configuration"
             echo ""
             echo "- **Base:** \`${{ steps.base.outputs.url }}\`"
             echo "- **Lighthouse paths:** \`${{ inputs.lighthouse_paths }}\`"
             echo "- **robots.txt check:** ${{ inputs.check_robots }}"
             echo "- **sitemap probe:** ${{ inputs.check_sitemap }}"
+            echo "- **Min SEO score (assert):** ${{ inputs.assert_seo_min_score != '' && inputs.assert_seo_min_score || '_(not enforced)_' }}"
+            echo ""
           } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -f .lighthouseci/manifest.json ]; then
+            {
+              echo "### Lighthouse (SEO category)"
+              echo ""
+              echo "| URL | SEO score |"
+              echo "|-----|----------|"
+              rep_count="$(jq '[.[] | select(.isRepresentativeRun == true)] | length' .lighthouseci/manifest.json)"
+              if [ "${rep_count:-0}" -gt 0 ]; then
+                jq -r '.[] | select(.isRepresentativeRun == true) | (.summary.seo // null) as $s | "| `\(.url)` | **" + (if $s == null then "—" else ((($s * 100) | floor | tostring) + "%") end) + "** |"' .lighthouseci/manifest.json
+              else
+                jq -r '.[] | (.summary.seo // null) as $s | "| `\(.url)` | **" + (if $s == null then "—" else ((($s * 100) | floor | tostring) + "%") end) + "** |"' .lighthouseci/manifest.json
+              fi
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### Lighthouse (SEO category)"
+              echo ""
+              echo "_(No \`.lighthouseci/manifest.json\` — Lighthouse did not finish or did not write output. See the **Run Lighthouse CI** step logs.)_"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
