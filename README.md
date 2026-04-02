@@ -80,8 +80,7 @@ Every repo follows the same standardized pipeline:
 | [`sast.yml`](#sast--security) | Trivy + Gitleaks + language SAST (Gosec/Bandit/njsscan) |
 | [`dast.yml`](#dast) | OWASP ZAP scan of running app (APIs/frontend); JWT or login-based auth |
 | [`seo-check.yml`](#seo-static-audit) | Static Next.js SEO audit (metadata, sitemap/robots presence); job summary |
-| [`seo-runtime-pr.yml`](#seo-runtime-pr--live-url) | Optional: build + local server + Lighthouse SEO (not used in default PR flow) |
-| [`seo-live-url.yml`](#seo-runtime-pr--live-url) | Post-merge: probe homepage / `robots.txt` + Lighthouse SEO on the live site |
+| [`seo-live-url.yml`](#seo-live-url) | Live site: homepage / `robots.txt` / sitemap content audit + Lighthouse SEO |
 | [`ai-code-review.yml`](#ai-code-review) | AI-powered PR code review with inline comments |
 | [`auto-approve.yml`](#auto-approve) | Auto-approve PR when all CI checks pass |
 | [`ai-release-bump.yml`](#ai-release-bump) | AI-powered semver classification + GitHub Release creation |
@@ -607,13 +606,11 @@ jobs:
 
 **`seo-check.yml`** — Fast static scan via `scripts/seo-static-audit.mjs` (metadata, `robots` / sitemap routes, common gaps). See workflow file header for `workflow_call` inputs.
 
-## SEO runtime (optional) & live URL
+## SEO live URL
 
-**Default PR flow** (`web-public` / `app` `.github/workflows/seo.yml`): **static audit only** via `seo-check.yml`. After merge to `main`, **`seo-live-url.yml`** runs using repository variable **`BASE_URL`** — that is the primary runtime check (real HTTP responses, `robots.txt`, Lighthouse SEO on production).
+**Example static site repo** (e.g. `web-public` `.github/workflows/site.yml`): on PR — **static** `seo-check.yml` plus **bundle** `npm run build:budget` in parallel; on push to `main` — **`seo-live-url.yml`** when repo variable **`BASE_URL`** is set. Copy `site.yml` into other repos and adjust `app_roots` / scripts as needed.
 
-**`seo-runtime-pr.yml`** — Optional: install → build → local server → Lighthouse SEO (same category as live, but against localhost). Use when you want a PR gate without waiting for deploy; not wired into the default `seo.yml` callers. Optional `BUILD_SECRETS` for `DATABASE_URL`, etc.
-
-**`seo-live-url.yml`** — `curl` homepage (and optionally `robots.txt`, sitemap HEAD) then Lighthouse SEO on **`base_url`**. Set repository variable **`BASE_URL`** (same name you can reuse elsewhere); the job is skipped when unset.
+**`seo-live-url.yml`** — `curl` homepage, optional `robots.txt` + sitemap HEAD, then **`seo-live-content-audit.mjs`**: parse sitemap(s), validate `<loc>` URLs (scheme/host vs `base_url`), sample **HEAD/GET** on up to N URLs, check **`robots.txt`** for `Sitemap:` lines, and on homepage + Lighthouse paths audit **H1**, **`<link rel="canonical">`**, and **`application/ld+json`** (valid JSON). Then Lighthouse SEO on **`base_url`**. Inputs: `content_audit_enabled`, `content_audit_max_url_checks`, `content_audit_strict`. Set repository variable **`BASE_URL`**; job skipped when unset.
 
 ---
 
