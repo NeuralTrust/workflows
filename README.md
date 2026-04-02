@@ -609,11 +609,11 @@ jobs:
 
 ## SEO runtime (optional) & live URL
 
-**Default PR flow** (`web-public` / `app` `.github/workflows/seo.yml`): **static audit only** via `seo-check.yml`. After merge to `main`, **`seo-live-url.yml`** runs against **`SEO_LIVE_BASE_URL`** — that is the primary runtime check (real HTTP responses, `robots.txt`, Lighthouse SEO on production).
+**Default PR flow** (`web-public` / `app` `.github/workflows/seo.yml`): **static audit only** via `seo-check.yml`. After merge to `main`, **`seo-live-url.yml`** runs using repository variable **`BASE_URL`** — that is the primary runtime check (real HTTP responses, `robots.txt`, Lighthouse SEO on production).
 
 **`seo-runtime-pr.yml`** — Optional: install → build → local server → Lighthouse SEO (same category as live, but against localhost). Use when you want a PR gate without waiting for deploy; not wired into the default `seo.yml` callers. Optional `BUILD_SECRETS` for `DATABASE_URL`, etc.
 
-**`seo-live-url.yml`** — `curl` homepage (and optionally `robots.txt`, sitemap HEAD) then Lighthouse SEO on **`base_url`**. Set repository variable **`SEO_LIVE_BASE_URL`**; the job is skipped when unset.
+**`seo-live-url.yml`** — `curl` homepage (and optionally `robots.txt`, sitemap HEAD) then Lighthouse SEO on **`base_url`**. Set repository variable **`BASE_URL`** (same name you can reuse elsewhere); the job is skipped when unset.
 
 ---
 

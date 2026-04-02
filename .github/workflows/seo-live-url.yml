@@ -2,15 +2,15 @@
 # Reusable Workflow: SEO checks against a live URL (post-merge / scheduled)
 # ==============================================================================
 # After deploy: probe homepage, optional robots.txt / sitemap, then Lighthouse
-# (SEO category only). Set repository variable SEO_LIVE_BASE_URL (e.g. https://neuraltrust.ai).
+# (SEO category only). Pass repo variable BASE_URL as input `base_url` (e.g. https://neuraltrust.ai).
 #
 # Usage (on push to main):
 #   jobs:
 #     seo-live:
-#       if: vars.SEO_LIVE_BASE_URL != ''
+#       if: vars.BASE_URL != ''
 #       uses: NeuralTrust/workflows/.github/workflows/seo-live-url.yml@main
 #       with:
-#         base_url: ${{ vars.SEO_LIVE_BASE_URL }}
+#         base_url: ${{ vars.BASE_URL }}
 #         lighthouse_paths: /,/pricing
 #         assert_seo_min_score: '0.85'
 # ==============================================================================
