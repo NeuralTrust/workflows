@@ -1,0 +1,260 @@
+# ==============================================================================
+# Reusable Workflow: SEO runtime audit — build, serve locally, Lighthouse SEO
+# ==============================================================================
+# Optional PR or branch gate: install + build, start the production server, then
+# Lighthouse SEO only. Default web-public/app `seo.yml` uses static audit on PR and
+# `seo-live-url.yml` on main instead — live URL checks are usually more representative.
+#
+# Callers that need env for build (e.g. DATABASE_URL for Prisma) pass BUILD_SECRETS.
+#
+# Usage:
+#   jobs:
+#     seo-runtime:
+#       uses: NeuralTrust/workflows/.github/workflows/seo-runtime-pr.yml@main
+#       with:
+#         working_directory: .
+#         install_command: npm ci
+#         build_command: npm run build
+#         start_command: npm run start
+#         lighthouse_paths: /,/pricing
+#         assert_seo_min_score: '0.85'
+#       secrets:
+#         BUILD_SECRETS: |
+#           DATABASE_URL=${{ secrets.DATABASE_URL }}
+#         GH_TOKEN: ${{ secrets.GH_TOKEN }}
+# ==============================================================================
+
+name: SEO runtime (Lighthouse PR)
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: 'Project root for npm / Node commands'
+        required: false
+        type: string
+        default: '.'
+      node_version:
+        required: false
+        type: string
+        default: '24'
+      install_command:
+        required: false
+        type: string
+        default: 'npm ci'
+      build_command:
+        required: false
+        type: string
+        default: 'npm run build'
+      start_command:
+        description: 'Runs in background after build (e.g. npm run start)'
+        required: false
+        type: string
+        default: 'npm run start'
+      port:
+        required: false
+        type: string
+        default: '3000'
+      start_wait_seconds:
+        description: 'Max time to wait for HTTP 200 on /'
+        required: false
+        type: string
+        default: '120'
+      lighthouse_paths:
+        description: 'Comma-separated paths (e.g. /,/blog). First path should usually be /'
+        required: false
+        type: string
+        default: '/'
+      assert_seo_min_score:
+        description: >
+          If set (e.g. 0.85), fail when Lighthouse SEO category score is below this (0–1).
+          Leave empty to report scores only without failing the job.
+        required: false
+        type: string
+        default: ''
+      lhci_version:
+        required: false
+        type: string
+        default: '0.14.0'
+      setup_commands:
+        description: 'Optional shell to run in working_directory before install'
+        required: false
+        type: string
+        default: ''
+
+    secrets:
+      BUILD_SECRETS:
+        description: 'KEY=value lines exported before build (same pattern as tests.yml TEST_SECRETS)'
+        required: false
+      GH_TOKEN:
+        required: false
+
+jobs:
+  lighthouse-seo:
+    name: Lighthouse SEO (local server)
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    env:
+      PORT: ${{ inputs.port }}
+      LISTEN_HOST: 127.0.0.1
+      LHCI_BUILD_CONTEXT__EXTERNAL: 'true'
+
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Export build secrets
+        env:
+          PAYLOAD: ${{ secrets.BUILD_SECRETS }}
+        run: |
+          if [ -n "${PAYLOAD:-}" ]; then
+            while IFS= read -r line || [ -n "$line" ]; do
+              [ -z "$line" ] && continue
+              echo "$line" >> "$GITHUB_ENV"
+            done <<< "$PAYLOAD"
+          fi
+
+      - name: Setup (optional)
+        if: inputs.setup_commands != ''
+        run: ${{ inputs.setup_commands }}
+
+      - name: Install
+        run: ${{ inputs.install_command }}
+
+      - name: Build
+        run: ${{ inputs.build_command }}
+
+      - name: Start server
+        run: |
+          nohup ${{ inputs.start_command }} > /tmp/nt-next-server.log 2>&1 &
+          echo $! > /tmp/nt-next-server.pid
+          sleep 2
+          tail -n 20 /tmp/nt-next-server.log || true
+
+      - name: Wait for server
+        env:
+          MAX_WAIT: ${{ inputs.start_wait_seconds }}
+        run: |
+          set -e
+          URL="http://${LISTEN_HOST}:${PORT}/"
+          elapsed=0
+          while [ "$elapsed" -lt "$MAX_WAIT" ]; do
+            if curl -sf "$URL" > /dev/null; then
+              echo "Server ready: $URL"
+              exit 0
+            fi
+            sleep 2
+            elapsed=$((elapsed + 2))
+          done
+          echo "::error::Server did not respond in ${MAX_WAIT}s"
+          echo "---- server log ----"
+          cat /tmp/nt-next-server.log || true
+          exit 1
+
+      - name: Install Lighthouse CI
+        run: npm install -g @lhci/cli@${{ inputs.lhci_version }}
+
+      - name: Write lighthouserc.json
+        env:
+          BASE: http://127.0.0.1:${{ inputs.port }}
+          PATHS_CSV: ${{ inputs.lighthouse_paths }}
+          ASSERT_MIN: ${{ inputs.assert_seo_min_score }}
+        run: |
+          python3 <<'PY'
+          import json, os
+
+          base = os.environ["BASE"]
+          paths_csv = os.environ["PATHS_CSV"]
+          assert_min = os.environ.get("ASSERT_MIN", "").strip()
+
+          paths = [p.strip() for p in paths_csv.split(",") if p.strip()]
+          if not paths:
+              paths = ["/"]
+
+          urls = []
+          for p in paths:
+              p = p if p.startswith("/") else "/" + p
+              urls.append(base.rstrip("/") + p)
+
+          cfg = {
+              "ci": {
+                  "collect": {
+                      "url": urls,
+                      "numberOfRuns": 1,
+                      "settings": {
+                          "onlyCategories": ["seo"],
+                          "preset": "desktop",
+                          "chromeFlags": "--no-sandbox --disable-dev-shm-usage --disable-gpu",
+                      },
+                  },
+                  "upload": {
+                      "target": "filesystem",
+                      "outputDir": ".lighthouseci",
+                  },
+              }
+          }
+
+          if assert_min:
+              m = float(assert_min)
+              if m < 0 or m > 1:
+                  raise SystemExit("assert_seo_min_score must be between 0 and 1")
+              cfg["ci"]["assert"] = {
+                  "assertions": {
+                      "categories:seo": ["error", {"minScore": m}],
+                  }
+              }
+
+          with open("lighthouserc.json", "w") as f:
+              json.dump(cfg, f, indent=2)
+          print(json.dumps(cfg, indent=2))
+          PY
+        working-directory: ${{ github.workspace }}
+
+      - name: Run Lighthouse CI
+        env:
+          LHCI_BUILD_CONTEXT__EXTERNAL: 'true'
+        run: |
+          export LHCI_BUILD_CONTEXT__EXTERNAL=true
+          lhci autorun --config="${GITHUB_WORKSPACE}/lighthouserc.json"
+        working-directory: ${{ github.workspace }}
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## Lighthouse SEO (local)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **URLs:** \`${{ inputs.lighthouse_paths }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Port:** ${{ inputs.port }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ inputs.assert_seo_min_score }}" ]; then
+            echo "- **Min SEO score:** ${{ inputs.assert_seo_min_score }}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- **Min SEO score:** _(not enforced)_" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f /tmp/nt-next-server.log ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "<details><summary>Server log (tail)</summary>" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            tail -n 80 /tmp/nt-next-server.log >> "$GITHUB_STEP_SUMMARY" || true
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f /tmp/nt-next-server.pid ]; then
+            kill "$(cat /tmp/nt-next-server.pid)" 2>/dev/null || true
+          fi

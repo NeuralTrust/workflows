@@ -1,0 +1,193 @@
+# ==============================================================================
+# Reusable Workflow: SEO checks against a live URL (post-merge / scheduled)
+# ==============================================================================
+# After deploy: probe homepage, optional robots.txt / sitemap, then Lighthouse
+# (SEO category only). Set repository variable SEO_LIVE_BASE_URL (e.g. https://neuraltrust.ai).
+#
+# Usage (on push to main):
+#   jobs:
+#     seo-live:
+#       if: vars.SEO_LIVE_BASE_URL != ''
+#       uses: NeuralTrust/workflows/.github/workflows/seo-live-url.yml@main
+#       with:
+#         base_url: ${{ vars.SEO_LIVE_BASE_URL }}
+#         lighthouse_paths: /,/pricing
+#         assert_seo_min_score: '0.85'
+# ==============================================================================
+
+name: SEO live URL
+
+on:
+  workflow_call:
+    inputs:
+      base_url:
+        description: 'Production (or preview) origin, e.g. https://neuraltrust.ai'
+        required: true
+        type: string
+      lighthouse_paths:
+        description: 'Comma-separated paths to audit with Lighthouse (always includes / first if omitted)'
+        required: false
+        type: string
+        default: '/'
+      assert_seo_min_score:
+        description: 'If set (0–1), fail when SEO category score is below this; empty = report only'
+        required: false
+        type: string
+        default: ''
+      check_robots:
+        description: 'HTTP GET robots.txt and fail if non-2xx'
+        required: false
+        type: boolean
+        default: true
+      check_sitemap:
+        description: 'HTTP HEAD sitemap.xml (or /sitemap_index.xml) and warn on failure'
+        required: false
+        type: boolean
+        default: false
+      lhci_version:
+        required: false
+        type: string
+        default: '0.14.0'
+
+jobs:
+  live:
+    name: Lighthouse SEO (live)
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    env:
+      LHCI_BUILD_CONTEXT__EXTERNAL: 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+
+      - name: Normalize base URL
+        id: base
+        env:
+          RAW: ${{ inputs.base_url }}
+        run: |
+          b="${RAW// /}"
+          b="${b%/}"
+          echo "url=$b" >> "$GITHUB_OUTPUT"
+
+      - name: Probe homepage
+        run: |
+          set -e
+          URL="${{ steps.base.outputs.url }}/"
+          echo "GET $URL"
+          code=$(curl -sS -o /tmp/home.html -w "%{http_code}" -L "$URL")
+          if [ "$code" -lt 200 ] || [ "$code" -ge 400 ]; then
+            echo "::error::Homepage returned HTTP $code"
+            exit 1
+          fi
+          echo "Homepage OK ($code), $(wc -c < /tmp/home.html) bytes"
+
+      - name: Probe robots.txt
+        if: inputs.check_robots
+        run: |
+          set -e
+          URL="${{ steps.base.outputs.url }}/robots.txt"
+          code=$(curl -sS -o /tmp/robots.txt -w "%{http_code}" -L "$URL")
+          if [ "$code" -lt 200 ] || [ "$code" -ge 400 ]; then
+            echo "::error::robots.txt returned HTTP $code"
+            exit 1
+          fi
+          echo "robots.txt OK ($code)"
+          echo "--- head ---"
+          head -n 30 /tmp/robots.txt
+
+      - name: Probe sitemap (optional)
+        if: inputs.check_sitemap
+        continue-on-error: true
+        run: |
+          for path in /sitemap.xml /sitemap_index.xml; do
+            URL="${{ steps.base.outputs.url }}${path}"
+            code=$(curl -sS -o /dev/null -w "%{http_code}" -I -L "$URL" || echo "000")
+            echo "$path -> $code"
+            if [ "$code" = "200" ]; then exit 0; fi
+          done
+          echo "::warning::No sitemap at /sitemap.xml or /sitemap_index.xml (HEAD not 200)"
+
+      - name: Install Lighthouse CI
+        run: npm install -g @lhci/cli@${{ inputs.lhci_version }}
+
+      - name: Write lighthouserc.json
+        env:
+          BASE: ${{ steps.base.outputs.url }}
+          PATHS_CSV: ${{ inputs.lighthouse_paths }}
+          ASSERT_MIN: ${{ inputs.assert_seo_min_score }}
+        run: |
+          python3 <<'PY'
+          import json, os
+
+          base = os.environ["BASE"].rstrip("/")
+          paths_csv = os.environ["PATHS_CSV"]
+          assert_min = os.environ.get("ASSERT_MIN", "").strip()
+
+          paths = [p.strip() for p in paths_csv.split(",") if p.strip()]
+          if not paths:
+              paths = ["/"]
+
+          urls = []
+          for p in paths:
+              p = p if p.startswith("/") else "/" + p
+              urls.append(base + p)
+
+          cfg = {
+              "ci": {
+                  "collect": {
+                      "url": urls,
+                      "numberOfRuns": 1,
+                      "settings": {
+                          "onlyCategories": ["seo"],
+                          "preset": "desktop",
+                          "chromeFlags": "--no-sandbox --disable-dev-shm-usage --disable-gpu",
+                      },
+                  },
+                  "upload": {
+                      "target": "filesystem",
+                      "outputDir": ".lighthouseci",
+                  },
+              }
+          }
+
+          if assert_min:
+              m = float(assert_min)
+              if m < 0 or m > 1:
+                  raise SystemExit("assert_seo_min_score must be between 0 and 1")
+              cfg["ci"]["assert"] = {
+                  "assertions": {
+                      "categories:seo": ["error", {"minScore": m}],
+                  }
+              }
+
+          with open("lighthouserc.json", "w") as f:
+              json.dump(cfg, f, indent=2)
+          print(json.dumps(cfg, indent=2))
+          PY
+        working-directory: ${{ github.workspace }}
+
+      - name: Run Lighthouse CI
+        run: |
+          export LHCI_BUILD_CONTEXT__EXTERNAL=true
+          lhci autorun --config="${GITHUB_WORKSPACE}/lighthouserc.json"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## SEO live checks"
+            echo ""
+            echo "- **Base:** \`${{ steps.base.outputs.url }}\`"
+            echo "- **Lighthouse paths:** \`${{ inputs.lighthouse_paths }}\`"
+            echo "- **robots.txt check:** ${{ inputs.check_robots }}"
+            echo "- **sitemap probe:** ${{ inputs.check_sitemap }}"
+          } >> "$GITHUB_STEP_SUMMARY"

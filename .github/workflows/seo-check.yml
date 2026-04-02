@@ -1,0 +1,125 @@
+# ==============================================================================
+# Reusable Workflow: SEO static audit (Next.js App Router)
+# ==============================================================================
+# Clones the NeuralTrust/workflows repo for scripts/seo-static-audit.mjs, then
+# scans the caller checkout for metadata, sitemap/robots, OG/Twitter hints, and
+# common issues. Outputs a Markdown table (job summary + logs) with suggested fixes.
+#
+# Usage (web-public — App Router under src/app):
+#   jobs:
+#     seo:
+#       uses: NeuralTrust/workflows/.github/workflows/seo-check.yml@main
+#       with:
+#         app_roots: src/app
+#         project_name: web-public
+#
+# Usage (dashboard app — App Router under app/):
+#   jobs:
+#     seo:
+#       uses: NeuralTrust/workflows/.github/workflows/seo-check.yml@main
+#       with:
+#         app_roots: app
+#         project_name: app
+#
+# Optional: fail CI on error-level findings (missing root metadata, etc.):
+#   with:
+#     strict: true
+#
+# Pin the script version (defaults to main):
+#   with:
+#     workflows_ref: main
+# ==============================================================================
+
+name: SEO static audit
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: 'Subdirectory of the repo to treat as project root for --cwd'
+        required: false
+        type: string
+        default: '.'
+      app_roots:
+        description: 'Comma-separated App Router roots (e.g. app or src/app)'
+        required: false
+        type: string
+        default: 'app,src/app'
+      node_version:
+        description: 'Node.js version for running the audit script'
+        required: false
+        type: string
+        default: '24'
+      workflows_ref:
+        description: 'Git ref of NeuralTrust/workflows (contains scripts/seo-static-audit.mjs)'
+        required: false
+        type: string
+        default: 'main'
+      strict:
+        description: 'If true, fail the job when the script reports error-level findings'
+        required: false
+        type: boolean
+        default: false
+      project_name:
+        description: 'Label in the report heading (optional)'
+        required: false
+        type: string
+        default: ''
+
+    secrets:
+      GH_TOKEN:
+        description: >
+          Optional PAT with contents:read on NeuralTrust/workflows (needed if that repo is private).
+          If omitted, GITHUB_TOKEN is used (works when workflows is public or same-repo callers).
+        required: false
+
+jobs:
+  seo-static-audit:
+    name: SEO static audit
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout calling repository
+        uses: actions/checkout@v5
+
+      - name: Checkout workflow scripts
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/workflows
+          ref: ${{ inputs.workflows_ref }}
+          path: _nt_workflows
+          token: ${{ secrets.GH_TOKEN || github.token }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Run SEO static audit
+        id: audit
+        env:
+          SEO_PROJECT_NAME: ${{ inputs.project_name }}
+        run: |
+          set -euo pipefail
+          SCRIPT="${GITHUB_WORKSPACE}/_nt_workflows/scripts/seo-static-audit.mjs"
+          CWD="${GITHUB_WORKSPACE}/${{ inputs.working_directory }}"
+          CWD=$(cd "$CWD" && pwd)
+          ROOTS="${{ inputs.app_roots }}"
+          REPORT_FILE="${RUNNER_TEMP}/seo-report.md"
+          STRICT_FLAG=""
+          if [ "${{ inputs.strict }}" = "true" ]; then
+            STRICT_FLAG=--strict
+          fi
+          set +e
+          node "$SCRIPT" --cwd "$CWD" --roots "$ROOTS" $STRICT_FLAG | tee "$REPORT_FILE"
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+          {
+            echo "## SEO audit (${{ inputs.project_name != '' && inputs.project_name || github.repository }})"
+            echo ""
+            cat "$REPORT_FILE"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$EXIT_CODE"

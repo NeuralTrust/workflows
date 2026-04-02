@@ -1,0 +1,64 @@
+# ==============================================================================
+# SEO audit: web-public + app (scheduled / manual)
+# ==============================================================================
+# Runs scripts/seo-static-audit.mjs against NeuralTrust frontends. Requires
+# GH_TOKEN (org PAT) with contents:read on web-public, app, and workflows if private.
+#
+# Triggers: workflow_dispatch, weekly Monday 09:00 UTC.
+# ==============================================================================
+
+name: SEO audit (web-public & app)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 9 * * 1'
+
+concurrency:
+  group: seo-audit-frontends
+  cancel-in-progress: false
+
+jobs:
+  seo:
+    name: ${{ matrix.project_name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repo: web-public
+            app_roots: src/app
+            project_name: web-public
+          - repo: app
+            app_roots: app
+            project_name: app
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout workflows (script)
+        uses: actions/checkout@v5
+
+      - name: Checkout ${{ matrix.repo }}
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository_owner }}/${{ matrix.repo }}
+          path: target
+          token: ${{ secrets.GH_TOKEN || github.token }}
+
+      - name: Run SEO static audit
+        env:
+          SEO_PROJECT_NAME: ${{ matrix.project_name }}
+        run: |
+          set -euo pipefail
+          SCRIPT="${GITHUB_WORKSPACE}/scripts/seo-static-audit.mjs"
+          REPORT_FILE="${RUNNER_TEMP}/seo-report.md"
+          node "$SCRIPT" \
+            --cwd "${GITHUB_WORKSPACE}/target" \
+            --roots "${{ matrix.app_roots }}" | tee "$REPORT_FILE"
+          {
+            echo "## ${{ matrix.project_name }}"
+            echo ""
+            cat "$REPORT_FILE"
+          } >> "$GITHUB_STEP_SUMMARY"
