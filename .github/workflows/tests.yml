@@ -238,6 +238,14 @@ jobs:
         with:
           token: ${{ secrets.GH_TOKEN || github.token }}
 
+      - name: Configure private repository access
+        env:
+          TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"
+          fi
+
       # ---- Go ----
       - name: Set up Go
         if: inputs.language == 'go'
@@ -393,6 +401,14 @@ jobs:
         uses: actions/checkout@v5
         with:
           token: ${{ secrets.GH_TOKEN || github.token }}
+
+      - name: Configure private repository access
+        env:
+          TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"
+          fi
 
       # ================================================================
       # Start service containers
