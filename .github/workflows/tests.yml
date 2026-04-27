@@ -325,7 +325,7 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
         run: |
           ruff check .
-          mypy .
+          ty check .
 
       # ---- Node ----
       - name: Set up Node
