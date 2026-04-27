@@ -4,6 +4,7 @@
 # Validates pull request metadata:
 #   - Title must start with an accepted conventional prefix.
 #   - Description must be at least 20 characters long after trimming whitespace.
+#   - PR must reference a Linear issue key or issue URL.
 #
 # Usage:
 #   jobs:
@@ -27,10 +28,11 @@ jobs:
       pull-requests: read
 
     steps:
-      - name: Validate PR title and description
+      - name: Validate PR title, description, and Linear issue
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           python3 - <<'PYEOF'
           import os
@@ -52,6 +54,7 @@ jobs:
 
           title = os.environ.get("PR_TITLE", "")
           body = os.environ.get("PR_BODY", "")
+          branch = os.environ.get("PR_BRANCH", "")
           trimmed_body = body.strip()
 
           errors = []
@@ -69,10 +72,21 @@ jobs:
                   f"Current length: {len(trimmed_body)}."
               )
 
+          linear_issue_pattern = re.compile(
+              r"(https?://linear\.app/[^\s]+/issue/[a-z][a-z0-9]+-\d+|(?<![a-z0-9])[a-z][a-z0-9]+-\d+(?![a-z0-9]))",
+              re.IGNORECASE,
+          )
+          searchable_metadata = "\n".join([title, body, branch])
+          if not linear_issue_pattern.search(searchable_metadata):
+              errors.append(
+                  "PR must reference a Linear issue in the title, description, or branch name. "
+                  "Use an issue key like ENG-123 or a Linear issue URL."
+              )
+
           if errors:
               for error in errors:
                   print(f"::error::{error}")
               sys.exit(1)
 
-          print("PR title and description are valid.")
+          print("PR title, description, and Linear issue reference are valid.")
           PYEOF
