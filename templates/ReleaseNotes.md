@@ -1,4 +1,4 @@
-# Release vX.Y.Z
+## Release vX.Y.Z
 
 ## Highlights
 - …
