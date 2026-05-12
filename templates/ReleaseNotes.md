@@ -1,0 +1,22 @@
+# Release vX.Y.Z
+
+## Highlights
+- …
+
+## Added
+- …
+
+## Changed
+- …
+
+## Fixed
+- …
+
+## Security
+- …
+
+## Breaking changes
+- …
+
+## Migration notes
+- …
