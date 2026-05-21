@@ -83,7 +83,8 @@ Every repo follows the same standardized pipeline:
 | [`seo-live-url.yml`](#seo-live-url) | Live site: homepage / `robots.txt` / sitemap content audit + Lighthouse SEO |
 | [`ai-code-review.yml`](#ai-code-review) | AI-powered PR code review with inline comments |
 | [`auto-approve.yml`](#auto-approve) | Auto-approve PR when all CI checks pass |
-| [`ai-release-bump.yml`](#ai-release-bump) | AI-powered semver classification + GitHub Release creation |
+| [`ai-release-bump.yml`](#ai-release-bump) | AI-powered semver classification + GitHub Release creation (also promotes `## [Unreleased]` in CHANGELOG) |
+| [`openspec-changelog.yml`](#openspec-changelog-feed) | Append openspec proposal summaries to `## [Unreleased]` in CHANGELOG on PR merge |
 
 ### Post-Deploy
 
@@ -359,6 +360,10 @@ jobs:
 | `initial_version` | `v0.1.0` | Version for repos with no previous tags |
 | `tag_prefix` | `v` | Prefix for version tags |
 | `dry_run` | `false` | Compute version without creating release |
+| `version_update_script` | `''` | Shell commands to update version files. Receives `VERSION` and `TAG` env vars. |
+| `update_changelog` | `true` | If true, promote `## [Unreleased]` → `## [vX.Y.Z] — YYYY-MM-DD` in the changelog file before tagging. |
+| `changelog_path` | `CHANGELOG.md` | Path of the changelog file to promote. |
+| `unreleased_heading` | `## [Unreleased]` | Heading used for the unreleased section in the changelog. |
 
 ### Outputs
 
@@ -368,7 +373,97 @@ jobs:
 | `bump_type` | The bump type (`major`, `minor`, `patch`) |
 | `previous_version` | The previous version tag |
 
+### Loop Guard
+
+The bump-guard skips this workflow when the head commit message starts with:
+
+- `chore: bump version to …` — this workflow's own version bump commit.
+- `docs(changelog):` — entries written by [`openspec-changelog.yml`](#openspec-changelog-feed).
+
+If you configure additional automated commits that push to `main`, prefix them similarly so they don't retrigger the release pipeline.
+
 > **Important:** `GH_TOKEN` must be a PAT (not `GITHUB_TOKEN`) so the created release event can trigger other workflows.
+
+---
+
+## OpenSpec Changelog Feed
+
+**`openspec-changelog.yml`** — On every PR merged into `main`, scans the PR for `proposal.md` files under the configured openspec directories and appends a one-line entry per change to `## [Unreleased]` in `CHANGELOG.md`. The entry is categorized following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+### Proposal frontmatter contract
+
+Each `openspec/changes/<name>/proposal.md` (and `openspec/fixes/<name>/proposal.md`) drives one changelog entry:
+
+```yaml
+---
+linear: ENG-415          # optional, used to link the Linear issue
+type: breaking           # required: breaking | feat | fix | refactor | perf | chore | docs | security
+changelog: "Forwarding rules ahora apuntan directo a upstreams; /services removido y service_id → upstream_id."
+---
+
+# Proposal: Deprecate the Service entity
+```
+
+Mapping `type:` → section:
+
+| `type` | Section |
+|---|---|
+| `breaking` | `### Breaking` |
+| `feat` / `feature` | `### Added` |
+| `fix` | `### Fixed` |
+| `refactor` / `perf` / `chore` | `### Changed` |
+| `docs` | `### Docs` |
+| `security` | `### Security` |
+
+### Quick Start
+
+```yaml
+# .github/workflows/changelog.yml
+name: OpenSpec Changelog Feed
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  feed:
+    if: github.event.pull_request.merged == true
+    uses: NeuralTrust/workflows/.github/workflows/openspec-changelog.yml@main
+    secrets:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+```
+
+### Inputs
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `changelog_path` | `CHANGELOG.md` | Path of the CHANGELOG file to update |
+| `unreleased_heading` | `## [Unreleased]` | Heading for the unreleased section (must match exactly) |
+| `scope_dirs` | `openspec/changes,openspec/fixes` | Comma-separated list of openspec directories to scan |
+| `linear_team` | `neuraltrust` | Linear team slug used when proposal carries `linear: ENG-XXX` |
+| `commit_message_prefix` | `docs(changelog):` | Prefix used for the changelog commit. Must be allow-listed by `ai-release-bump.yml` bump-guard. |
+
+### How it composes with auto-release
+
+```
+PR merged to main
+        │
+        ├─▶ openspec-changelog.yml ── appends to ## [Unreleased] and pushes
+        │       commit: docs(changelog): add entry for #NN
+        │       (auto-release skips this push via bump-guard)
+        │
+        └─▶ auto-release.yml (push to main from the merge commit)
+              ├─ AI determines semver bump
+              ├─ Promotes ## [Unreleased] → ## [vX.Y.Z] — YYYY-MM-DD
+              └─ Creates GitHub Release at the bump commit
+```
+
+The Unreleased section accumulates entries from each merged PR, and `auto-release.yml` snapshots them under a versioned heading at release time.
+
+> **Important:** `GH_TOKEN` must be a PAT with `contents:write` on the caller repo, since the workflow pushes to `main`.
 
 ---
 

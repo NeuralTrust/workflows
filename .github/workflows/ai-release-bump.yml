@@ -18,9 +18,12 @@
 # Note: GH_TOKEN must be a PAT (not GITHUB_TOKEN) so the created release
 #       event can trigger other workflows (release.yml).
 #
-# Loop guard: pushes that only contain the automated "chore: bump version to …"
-# commit exit early (see bump-guard). Callers should also use paths-ignore on
-# push (e.g. k8s/**, .github/**) so overlay-only commits do not retrigger this.
+# Loop guard: pushes whose head commit message starts with `chore: bump version`
+# or `docs(changelog):` exit early (see bump-guard). The first covers the
+# automated semver bump this workflow itself produces; the second covers
+# pushes made by `openspec-changelog.yml`. Callers should also use paths-ignore
+# on push (e.g. k8s/**, .github/**) so overlay-only commits do not retrigger
+# this workflow.
 # ==============================================================================
 
 name: AI Release Bump
@@ -58,6 +61,21 @@ on:
         required: false
         type: string
         default: ''
+      update_changelog:
+        description: 'If true, promote `## [Unreleased]` to `## [vX.Y.Z] — YYYY-MM-DD` in the changelog file before tagging.'
+        required: false
+        type: boolean
+        default: true
+      changelog_path:
+        description: 'Path of the changelog file to promote when update_changelog is true.'
+        required: false
+        type: string
+        default: 'CHANGELOG.md'
+      unreleased_heading:
+        description: 'Heading used for the unreleased section in the changelog (must match exactly).'
+        required: false
+        type: string
+        default: '## [Unreleased]'
     secrets:
       OPENAI_API_KEY:
         required: true
@@ -90,16 +108,25 @@ jobs:
       contents: write
 
     steps:
-      - name: Skip if push is only the automated version bump
+      - name: Skip if push is only the automated version bump or a changelog feed
         id: bump-guard
         env:
           HEAD_MSG: ${{ github.event.head_commit.message }}
         run: |
-          if [ -n "${HEAD_MSG:-}" ] && printf '%s' "$HEAD_MSG" | grep -q 'chore: bump version to'; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Skipping: this push is the semver file bump only."
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+          skip=false
+          reason=""
+          if [ -n "${HEAD_MSG:-}" ]; then
+            if printf '%s' "$HEAD_MSG" | grep -q 'chore: bump version to'; then
+              skip=true
+              reason="automated semver file bump"
+            elif printf '%s' "$HEAD_MSG" | grep -q '^docs(changelog):'; then
+              skip=true
+              reason="openspec changelog feed commit"
+            fi
+          fi
+          echo "skip=${skip}" >> "$GITHUB_OUTPUT"
+          if [ "$skip" = "true" ]; then
+            echo "Skipping: $reason."
           fi
 
       - name: Checkout code
@@ -280,6 +307,71 @@ jobs:
           echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
           echo "Version bump: ${PREFIX}${CURRENT} → ${NEW_VERSION} ($BUMP)"
 
+      - name: Promote CHANGELOG Unreleased → versioned section
+        if: steps.bump-guard.outputs.skip != 'true' && steps.commits.outputs.has_commits == 'true' && inputs.update_changelog == true && inputs.dry_run == false
+        env:
+          CHANGELOG_PATH: ${{ inputs.changelog_path }}
+          UNRELEASED_HEADING: ${{ inputs.unreleased_heading }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        run: |
+          if [ ! -f "${CHANGELOG_PATH}" ]; then
+            echo "${CHANGELOG_PATH} does not exist; skipping promotion."
+            exit 0
+          fi
+          python3 - <<'PY'
+          """Promote `## [Unreleased]` to `## [vX.Y.Z] — YYYY-MM-DD`.
+
+          The Unreleased section is preserved (left empty) so future PRs keep
+          appending to it. If the Unreleased section has no body, no promotion
+          happens and the file is left untouched.
+          """
+          import os
+          import re
+          import sys
+          from datetime import date
+          from pathlib import Path
+
+          path = Path(os.environ["CHANGELOG_PATH"])
+          heading = os.environ["UNRELEASED_HEADING"]
+          new_version = os.environ["NEW_VERSION"]
+
+          text = path.read_text(encoding="utf-8")
+          if heading not in text:
+              print(f"Heading {heading!r} not found in {path}; skipping promotion.")
+              sys.exit(0)
+
+          lines = text.splitlines()
+          start = None
+          end = len(lines)
+          for i, line in enumerate(lines):
+              if line.strip() == heading:
+                  start = i + 1
+                  continue
+              if start is not None and line.startswith("## "):
+                  end = i
+                  break
+          if start is None:
+              print("Could not locate Unreleased bounds; skipping.")
+              sys.exit(0)
+
+          body = lines[start:end]
+          while body and not body[0].strip():
+              body.pop(0)
+          while body and not body[-1].strip():
+              body.pop()
+
+          if not body:
+              print("Unreleased section is empty; nothing to promote.")
+              sys.exit(0)
+
+          today = date.today().isoformat()
+          new_section = [heading, "", f"## [{new_version}] — {today}", ""] + body + [""]
+          rebuilt = lines[: start - 1] + new_section + lines[end:]
+          out = "\n".join(rebuilt).rstrip() + "\n"
+          path.write_text(out, encoding="utf-8")
+          print(f"Promoted Unreleased → {new_version} in {path}.")
+          PY
+
       - name: Update version files
         if: steps.bump-guard.outputs.skip != 'true' && steps.commits.outputs.has_commits == 'true' && inputs.version_update_script != '' && inputs.dry_run == false
         env:
@@ -296,10 +388,10 @@ jobs:
 
       - name: Commit and push version files
         id: commit-version
-        if: steps.bump-guard.outputs.skip != 'true' && steps.commits.outputs.has_commits == 'true' && inputs.version_update_script != '' && inputs.dry_run == false
+        if: steps.bump-guard.outputs.skip != 'true' && steps.commits.outputs.has_commits == 'true' && inputs.dry_run == false
         run: |
           if git diff --quiet; then
-            echo "No version files changed, skipping commit."
+            echo "No tracked file changes (version files + changelog); skipping commit."
             echo "pushed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
