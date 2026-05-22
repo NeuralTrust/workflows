@@ -1,0 +1,333 @@
+# ==============================================================================
+# Reusable Workflow: E2E Playwright + Allure
+# ==============================================================================
+# Runs Playwright tests from the e2e-tests Docker image against a deployed
+# service, then publishes results to allure-docker-service.
+#
+# Default runner: ubuntu-latest (public/Twingate URL).
+# Opt-in in-cluster: runner: arc-runner-medium (hits k8s svc URLs, no Twingate).
+#
+# Usage:
+#   jobs:
+#     e2e:
+#       needs: deploy
+#       uses: NeuralTrust/workflows/.github/workflows/e2e-playwright.yml@main
+#       with:
+#         service: app
+#         base_url: https://app.dev.neuraltrust.ai
+#         expected_version: ${{ github.sha }}
+#       secrets:
+#         TWINGATE_SERVICE_KEY: ${{ secrets.TWINGATE_SERVICE_KEY }}
+#         ALLURE_USER: ${{ secrets.ALLURE_USER }}
+#         ALLURE_PASS: ${{ secrets.ALLURE_PASS }}
+#         E2E_SECRETS_JSON: ${{ secrets.E2E_APP_SECRETS_JSON }}
+# ==============================================================================
+
+name: E2E Playwright (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: 'Playwright service name (app, trustgate, admin-console, data-plane)'
+        required: true
+        type: string
+      base_url:
+        description: 'Base URL of the service under test'
+        required: true
+        type: string
+      expected_version:
+        description: 'Commit SHA expected in health endpoint (empty = skip gate)'
+        required: false
+        type: string
+        default: ''
+      health_path:
+        description: 'Health check path'
+        required: false
+        type: string
+        default: '/api/health'
+      image_tag:
+        description: 'e2e-tests image tag in Artifact Registry'
+        required: false
+        type: string
+        default: 'develop'
+      runner:
+        description: 'ubuntu-latest | arc-runner-small | arc-runner-medium | arc-runner-large'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+      twingate_enabled:
+        description: 'Connect Twingate before tests (ignored on arc runners)'
+        required: false
+        type: boolean
+        default: true
+      grep:
+        description: 'Playwright --grep filter (empty = service default)'
+        required: false
+        type: string
+        default: ''
+      allure_project:
+        description: 'Allure project_id (defaults to service name)'
+        required: false
+        type: string
+        default: ''
+      e2e_run_enabled:
+        description: 'Run tests (false = list only)'
+        required: false
+        type: boolean
+        default: true
+      version_wait_minutes:
+        description: 'Health gate timeout in minutes'
+        required: false
+        type: string
+        default: '20'
+    secrets:
+      TWINGATE_SERVICE_KEY:
+        required: false
+      ALLURE_USER:
+        required: true
+      ALLURE_PASS:
+        required: true
+      E2E_SECRETS_JSON:
+        description: 'Optional JSON map of E2E_* env vars (overrides individual secrets when set)'
+        required: false
+      E2E_USER:
+        required: false
+      E2E_PASSWORD:
+        required: false
+      E2E_ADMIN_USER:
+        required: false
+      E2E_ADMIN_PASSWORD:
+        required: false
+      E2E_MEMBER_USER:
+        required: false
+      E2E_MEMBER_PASSWORD:
+        required: false
+      E2E_AUTH_USER:
+        required: false
+      E2E_AUTH_PASSWORD:
+        required: false
+      WIF_PROVIDER:
+        required: true
+      WIF_SERVICE_ACCOUNT:
+        required: true
+      GH_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: e2e-${{ inputs.service }}-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: E2E (${{ inputs.service }})
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 75
+    env:
+      SERVICE: ${{ inputs.service }}
+      UI_BASE_URL: ${{ inputs.base_url }}
+      ALLURE_PROJECT: ${{ inputs.allure_project || inputs.service }}
+      E2E_IMAGE_TAG: ${{ inputs.image_tag }}
+      IS_ARC_RUNNER: ${{ startsWith(inputs.runner, 'arc-') }}
+      ALLURE_URL: ${{ startsWith(inputs.runner, 'arc-') && (vars.ALLURE_INTERNAL_URL || 'http://allure-api.allure.svc.cluster.local:5050') || (vars.ALLURE_PUBLIC_URL || 'https://allure.dev.neuraltrust.ai') }}
+      ALLURE_UI_URL: ${{ vars.ALLURE_PUBLIC_URL || 'https://allure.dev.neuraltrust.ai' }}
+      E2E_RUN_ENABLED: ${{ inputs.e2e_run_enabled }}
+      REGISTRY: europe-west1-docker.pkg.dev
+      REPOSITORY: nt-docker
+    steps:
+      - name: Authenticate to GCP (pull e2e-tests image)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
+
+      - name: Resolve expected deploy version
+        id: expected_version
+        run: |
+          if [ -n "${{ inputs.expected_version }}" ]; then
+            SHA="${{ inputs.expected_version }}"
+          else
+            SHA="${{ github.sha }}"
+          fi
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "Expected deploy version: ${SHA}"
+
+      - name: Connect to Twingate
+        if: env.IS_ARC_RUNNER != 'true' && inputs.twingate_enabled == true
+        uses: twingate/github-action@v1
+        with:
+          service-key: ${{ secrets.TWINGATE_SERVICE_KEY }}
+
+      - name: Wait for deployed version
+        id: wait_deployed_version
+        if: inputs.e2e_run_enabled && inputs.expected_version != '' && steps.expected_version.outputs.sha != ''
+        env:
+          EXPECTED_SHA: ${{ steps.expected_version.outputs.sha }}
+          HEALTH_PATH: ${{ inputs.health_path }}
+          VERSION_WAIT_MINUTES: ${{ inputs.version_wait_minutes }}
+        run: |
+          set -euo pipefail
+          BASE="${UI_BASE_URL%/}"
+          WAIT_MINUTES="${VERSION_WAIT_MINUTES:-20}"
+          INTERVAL=30
+          DEADLINE=$(( $(date +%s) + WAIT_MINUTES * 60 ))
+          DEPLOYED=""
+
+          echo "Polling ${BASE}${HEALTH_PATH} until version == ${EXPECTED_SHA} (timeout ${WAIT_MINUTES}m)"
+
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            RESPONSE=$(curl -sf --max-time 30 "${BASE}${HEALTH_PATH}" || true)
+            if [ -n "$RESPONSE" ]; then
+              DEPLOYED=$(echo "$RESPONSE" | jq -r '.version // empty')
+              if [ "$DEPLOYED" = "$EXPECTED_SHA" ]; then
+                echo "Deployed version matches: ${DEPLOYED}"
+                exit 0
+              fi
+              echo "Waiting (${INTERVAL}s): deployed='${DEPLOYED}' expected='${EXPECTED_SHA}'"
+            else
+              echo "Waiting (${INTERVAL}s): health unreachable"
+            fi
+            sleep "$INTERVAL"
+          done
+
+          echo "::error::Version mismatch after ${WAIT_MINUTES}m — deployed='${DEPLOYED}' expected='${EXPECTED_SHA}'"
+          exit 1
+
+      - name: Verify UI/API reachable
+        if: inputs.e2e_run_enabled
+        run: |
+          BASE="${UI_BASE_URL%/}"
+          code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 60 "${BASE}/" || echo "000")
+          case "$code" in
+            200|301|302|303|307|308|401|403) echo "Target responded HTTP ${code}" ;;
+            *) echo "Target not reachable at ${BASE}/ (HTTP ${code})"; exit 1 ;;
+          esac
+
+      - name: Pull e2e-tests image
+        id: image
+        env:
+          GCP_PROJECT: ${{ vars.DEV_GCP_PROJECT_ID }}
+        run: |
+          IMAGE="${REGISTRY}/${GCP_PROJECT}/${REPOSITORY}/e2e-tests:${E2E_IMAGE_TAG}"
+          echo "ref=${IMAGE}" >> "$GITHUB_OUTPUT"
+          docker pull "${IMAGE}"
+
+      - name: Run Playwright (Docker)
+        id: run_tests
+        if: inputs.e2e_run_enabled && (steps.wait_deployed_version.outcome == 'success' || steps.wait_deployed_version.outcome == 'skipped')
+        env:
+          E2E_SECRETS_JSON: ${{ secrets.E2E_SECRETS_JSON }}
+          E2E_USER: ${{ secrets.E2E_USER }}
+          E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+          E2E_LOGIN_PATH: ${{ vars.E2E_LOGIN_PATH }}
+          E2E_TEAM_LOGIN_SELECT: ${{ vars.E2E_TEAM_LOGIN_SELECT }}
+          E2E_MY_TEAMS_WORKSPACE_NAME: ${{ vars.E2E_MY_TEAMS_WORKSPACE_NAME }}
+          E2E_ADMIN_USER: ${{ secrets.E2E_ADMIN_USER }}
+          E2E_ADMIN_PASSWORD: ${{ secrets.E2E_ADMIN_PASSWORD }}
+          E2E_ADMIN_TEAM_LOGIN_SELECT: ${{ vars.E2E_ADMIN_TEAM_LOGIN_SELECT }}
+          E2E_ADMIN_MY_TEAMS_WORKSPACE_NAME: ${{ vars.E2E_ADMIN_MY_TEAMS_WORKSPACE_NAME }}
+          E2E_MEMBER_USER: ${{ secrets.E2E_MEMBER_USER }}
+          E2E_MEMBER_PASSWORD: ${{ secrets.E2E_MEMBER_PASSWORD }}
+          E2E_MEMBER_TEAM_LOGIN_SELECT: ${{ vars.E2E_MEMBER_TEAM_LOGIN_SELECT }}
+          E2E_MEMBER_MY_TEAMS_WORKSPACE_NAME: ${{ vars.E2E_MEMBER_MY_TEAMS_WORKSPACE_NAME }}
+          E2E_AUTH_USER: ${{ secrets.E2E_AUTH_USER }}
+          E2E_AUTH_PASSWORD: ${{ secrets.E2E_AUTH_PASSWORD }}
+          E2E_AUTH_TEAM_LOGIN_SELECT: ${{ vars.E2E_AUTH_TEAM_LOGIN_SELECT }}
+          E2E_AUTH_BRANDING_IMG_NAME: ${{ vars.E2E_AUTH_BRANDING_IMG_NAME }}
+          E2E_MS_AZURE_TEAM_LOGIN_SELECT: ${{ vars.E2E_MS_AZURE_TEAM_LOGIN_SELECT }}
+          E2E_TEAM_SETTINGS_TEAM_ID: ${{ vars.E2E_TEAM_SETTINGS_TEAM_ID }}
+          E2E_DELETE_TEAM_DISPLAY_NAME: ${{ vars.E2E_DELETE_TEAM_DISPLAY_NAME }}
+          GREP: ${{ inputs.grep }}
+        run: |
+          set -euo pipefail
+          mkdir -p allure-results playwright-report
+
+          ENV_FILE="$(mktemp)"
+          if [ -n "${E2E_SECRETS_JSON:-}" ]; then
+            echo "${E2E_SECRETS_JSON}" | jq -r 'to_entries[] | "\(.key)=\(.value)"' >> "${ENV_FILE}"
+          else
+            for key in E2E_USER E2E_PASSWORD E2E_LOGIN_PATH E2E_TEAM_LOGIN_SELECT E2E_MY_TEAMS_WORKSPACE_NAME \
+              E2E_ADMIN_USER E2E_ADMIN_PASSWORD E2E_ADMIN_TEAM_LOGIN_SELECT E2E_ADMIN_MY_TEAMS_WORKSPACE_NAME \
+              E2E_MEMBER_USER E2E_MEMBER_PASSWORD E2E_MEMBER_TEAM_LOGIN_SELECT E2E_MEMBER_MY_TEAMS_WORKSPACE_NAME \
+              E2E_AUTH_USER E2E_AUTH_PASSWORD E2E_AUTH_TEAM_LOGIN_SELECT E2E_AUTH_BRANDING_IMG_NAME \
+              E2E_MS_AZURE_TEAM_LOGIN_SELECT E2E_TEAM_SETTINGS_TEAM_ID E2E_DELETE_TEAM_DISPLAY_NAME; do
+              val="${!key:-}"
+              if [ -n "${val}" ]; then
+                echo "${key}=${val}" >> "${ENV_FILE}"
+              fi
+            done
+          fi
+          echo "UI_BASE_URL=${UI_BASE_URL}" >> "${ENV_FILE}"
+          echo "SERVICE=${SERVICE}" >> "${ENV_FILE}"
+          echo "E2E_DISABLE_GLOBAL_SETUP=0" >> "${ENV_FILE}"
+
+          docker run --rm \
+            --env-file "${ENV_FILE}" \
+            -e "GREP=${GREP}" \
+            -v "$(pwd)/allure-results:/app/allure-results" \
+            -v "$(pwd)/playwright-report:/app/playwright-report" \
+            "${{ steps.image.outputs.ref }}"
+
+      - name: List tests only
+        if: ${{ !inputs.e2e_run_enabled }}
+        env:
+          GCP_PROJECT: ${{ vars.DEV_GCP_PROJECT_ID }}
+        run: |
+          docker run --rm \
+            -e SERVICE="${SERVICE}" \
+            "${REGISTRY}/${GCP_PROJECT}/${REPOSITORY}/e2e-tests:${E2E_IMAGE_TAG}" \
+            bash -c 'npx playwright test --list'
+
+      - name: Push results to Allure server
+        if: always() && steps.run_tests.outcome != 'skipped'
+        env:
+          ALLURE_USER: ${{ secrets.ALLURE_USER }}
+          ALLURE_PASS: ${{ secrets.ALLURE_PASS }}
+        run: |
+          docker run --rm \
+            -v "$(pwd)/allure-results:/app/allure-results" \
+            -e ALLURE_URL="${ALLURE_URL}" \
+            -e ALLURE_USER="${ALLURE_USER}" \
+            -e ALLURE_PASS="${ALLURE_PASS}" \
+            -e ALLURE_PROJECT="${ALLURE_PROJECT}" \
+            -e SERVICE="${SERVICE}" \
+            "${{ steps.image.outputs.ref }}" \
+            bash scripts/send-allure.sh || echo "::warning::Allure upload failed (server may not be deployed yet)"
+
+      - name: Upload Playwright HTML report
+        if: always() && steps.run_tests.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ inputs.service }}-${{ github.run_number }}
+          path: playwright-report/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload raw Allure results
+        if: always() && steps.run_tests.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results-${{ inputs.service }}-${{ github.run_number }}
+          path: allure-results/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## E2E (${SERVICE})"
+            echo "- **Runner:** \`${{ inputs.runner }}\`"
+            echo "- **Target:** \`${UI_BASE_URL}\`"
+            echo "- **Version tested:** \`${{ steps.expected_version.outputs.sha }}\`"
+            echo "- **Allure project:** \`${ALLURE_PROJECT}\`"
+            echo "- **Report UI:** ${ALLURE_UI_URL}/allure-docker-service-ui/projects/${ALLURE_PROJECT}"
+          } >> "$GITHUB_STEP_SUMMARY"
