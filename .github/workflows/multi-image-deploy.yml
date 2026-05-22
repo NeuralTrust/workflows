@@ -217,10 +217,10 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      security-events: write
     with:
       image_ref: '${{ inputs.registry }}/${{ inputs.gcp_project_id }}/${{ inputs.repository }}/${{ matrix.image.name }}:${{ matrix.image.tag_prefix }}${{ github.sha }}${{ matrix.image.tag_suffix }}'
       exit_code: '0'
+      upload_sarif: false
     secrets:
       WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
       WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
