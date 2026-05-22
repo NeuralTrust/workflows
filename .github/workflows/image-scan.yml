@@ -2,7 +2,10 @@
 # Reusable Workflow: Container Image Vulnerability Scan (Trivy)
 # ==============================================================================
 # Pulls a Docker image from GCP Artifact Registry and scans its layers with
-# Trivy for OS package and application dependency CVEs.
+# Trivy for OS package and application dependency CVEs only (not secrets).
+# Secret scanning is intentionally excluded: third-party packages often ship
+# test fixtures with masked placeholder tokens that Trivy misclassifies.
+# Use sast.yml / gitleaks for repository secret detection instead.
 #
 # Two modes are supported via the `exit_code` input:
 #   - "0" (warn)  → findings are reported in the job summary but never block.
@@ -82,6 +85,15 @@ on:
         required: false
         type: boolean
         default: true
+      scanners:
+        description: >
+          Comma-separated Trivy scanners for image scans. Default is `vuln`
+          only so prod gates block on fixable CVEs, not secret false positives
+          in dependency test data. Use `vuln,secret` only when you explicitly
+          need image-layer secret detection.
+        required: false
+        type: string
+        default: 'vuln'
       trivyignore_path:
         description: >
           Path to a Trivy ignore file (.trivyignore) for suppressing
@@ -165,6 +177,7 @@ jobs:
         with:
           scan-type: 'image'
           image-ref: ${{ inputs.image_ref }}
+          scanners: ${{ inputs.scanners }}
           severity: ${{ inputs.severity }}
           format: 'table'
           exit-code: ${{ inputs.exit_code }}
@@ -178,6 +191,7 @@ jobs:
         with:
           scan-type: 'image'
           image-ref: ${{ inputs.image_ref }}
+          scanners: ${{ inputs.scanners }}
           severity: ${{ inputs.severity }}
           format: 'sarif'
           output: 'trivy-image.sarif'
@@ -206,6 +220,7 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Image:** \`${{ inputs.image_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Severity:** \`${{ inputs.severity }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Scanners:** \`${{ inputs.scanners }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Fixable only:** \`${{ inputs.ignore_unfixed }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Mode:** \`${MODE}\` (exit_code=${{ inputs.exit_code }})" >> "$GITHUB_STEP_SUMMARY"
           if [ -n "${{ steps.trivyignore.outputs.path }}" ]; then
