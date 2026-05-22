@@ -1136,13 +1136,16 @@ jobs:
 | `severity` | `CRITICAL,HIGH` | Severity levels to scan |
 | `exit_code` | `0` | `0` = warn (never blocks), `1` = block on findings |
 | `ignore_unfixed` | `true` | Only count vulnerabilities with a fix available |
+| `scanners` | `vuln` | Trivy scanners (`vuln` only by default; avoids secret false positives in dependency test fixtures) |
 | `trivyignore_path` | *(auto)* | Path to `.trivyignore`; auto-detected from repo root if present |
 | `upload_sarif` | `true` | Upload SARIF to GitHub Security tab |
 | `registry` | `europe-west1-docker.pkg.dev` | Registry host for docker login |
 
 ### Suppressing false positives
 
-Add a `.trivyignore` file at the repo root (same convention as `sast.yml`) to suppress accepted findings. Both deploy and release scans auto-detect it.
+Image scans use `scanners: vuln` by default so prod gates block only on fixable CVEs, not Trivy secret hits in third-party packages (e.g. masked tokens in `trusttest` dataset YAML). Repository secret detection stays in `sast.yml` / Gitleaks.
+
+Add a `.trivyignore` file at the repo root (same convention as `sast.yml`) to suppress accepted CVE findings. Both deploy and release scans auto-detect it.
 
 ---
 
