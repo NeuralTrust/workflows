@@ -435,10 +435,10 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      security-events: write
     with:
       image_ref: ${{ needs.release.outputs.scan_target }}
       exit_code: '1'
+      upload_sarif: false
     secrets:
       WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
       WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
