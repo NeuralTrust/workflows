@@ -122,7 +122,12 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      security-events: write
+      # security-events: write is intentionally omitted — this workflow is
+      # often called as a nested reusable, and GitHub restricts nested jobs
+      # to the permissions the top-level consumer workflow grants. Most
+      # callers do not include security-events: write, which would cause a
+      # parse-time validation failure. The SARIF upload step below handles
+      # the missing permission gracefully via continue-on-error.
 
     steps:
       - name: Checkout code
@@ -183,6 +188,7 @@ jobs:
 
       - name: Upload SARIF to GitHub Security
         if: always() && inputs.upload_sarif && hashFiles('trivy-image.sarif') != ''
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: 'trivy-image.sarif'
