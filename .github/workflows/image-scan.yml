@@ -1,0 +1,200 @@
+# ==============================================================================
+# Reusable Workflow: Container Image Vulnerability Scan (Trivy)
+# ==============================================================================
+# Pulls a Docker image from GCP Artifact Registry and scans its layers with
+# Trivy for OS package and application dependency CVEs.
+#
+# Two modes are supported via the `exit_code` input:
+#   - "0" (warn)  → findings are reported in the job summary but never block.
+#                   Used for every develop build.
+#   - "1" (block) → any matching CRITICAL/HIGH fixable CVE fails the job.
+#                   Used as the prod promote gate.
+#
+# Findings are uploaded as SARIF to the GitHub Security tab when
+# `upload_sarif: true` (default). The caller must grant `security-events: write`
+# on the calling job for SARIF upload to succeed.
+#
+# A `.trivyignore` file at the repo root is auto-detected and used to suppress
+# accepted false-positives (same convention as sast.yml).
+#
+# Usage (dev, warn-only):
+#   jobs:
+#     scan:
+#       uses: NeuralTrust/workflows/.github/workflows/image-scan.yml@main
+#       permissions:
+#         contents: read
+#         id-token: write
+#         security-events: write
+#       with:
+#         image_ref: europe-west1-docker.pkg.dev/proj/repo/svc:sha-123abc
+#       secrets: inherit
+#
+# Usage (prod, block on CRITICAL/HIGH fixable):
+#   jobs:
+#     scan:
+#       uses: NeuralTrust/workflows/.github/workflows/image-scan.yml@main
+#       permissions:
+#         contents: read
+#         id-token: write
+#         security-events: write
+#       with:
+#         image_ref: europe-west1-docker.pkg.dev/proj/repo/svc:v1.2.3
+#         exit_code: '1'
+#       secrets: inherit
+# ==============================================================================
+
+name: Image Vulnerability Scan
+
+on:
+  workflow_call:
+    inputs:
+      image_ref:
+        description: >
+          Full image reference to scan, including registry, project, repo and tag
+          (e.g. europe-west1-docker.pkg.dev/my-proj/nt-docker/my-svc:abc123).
+        required: true
+        type: string
+      severity:
+        description: 'Trivy severity levels to scan (comma-separated)'
+        required: false
+        type: string
+        default: 'CRITICAL,HIGH'
+      exit_code:
+        description: >
+          Exit code when matching vulnerabilities are found.
+          "0" = warn (never blocks), "1" = block (fails the job).
+        required: false
+        type: string
+        default: '0'
+      ignore_unfixed:
+        description: >
+          When true, only count vulnerabilities that have a fix available
+          (matches the "fixable only" gate used for prod promotes).
+        required: false
+        type: boolean
+        default: true
+      trivyignore_path:
+        description: >
+          Path to a Trivy ignore file (.trivyignore) for suppressing
+          false positives. Auto-detected from repo root if present.
+        required: false
+        type: string
+        default: ''
+      upload_sarif:
+        description: >
+          Upload SARIF results to the GitHub Security tab. Requires
+          `security-events: write` permission on the calling job.
+        required: false
+        type: boolean
+        default: true
+      registry:
+        description: 'Artifact Registry host used for docker login'
+        required: false
+        type: string
+        default: 'europe-west1-docker.pkg.dev'
+      runner:
+        description: 'GitHub Actions runner label'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+    secrets:
+      WIF_PROVIDER:
+        required: true
+        description: 'GCP Workload Identity Federation provider'
+      WIF_SERVICE_ACCOUNT:
+        required: true
+        description: 'GCP service account email for WIF authentication'
+
+jobs:
+  scan:
+    name: Trivy Image Scan
+    runs-on: ${{ inputs.runner }}
+
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Detect Trivy ignore file
+        id: trivyignore
+        run: |
+          if [ -n "${{ inputs.trivyignore_path }}" ]; then
+            echo "path=${{ inputs.trivyignore_path }}" >> "$GITHUB_OUTPUT"
+          elif [ -f ".trivyignore" ]; then
+            echo "path=.trivyignore" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Login to Artifact Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ inputs.registry }}
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Run Trivy image scan (table)
+        id: trivy_table
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'image'
+          image-ref: ${{ inputs.image_ref }}
+          severity: ${{ inputs.severity }}
+          format: 'table'
+          exit-code: ${{ inputs.exit_code }}
+          ignore-unfixed: ${{ inputs.ignore_unfixed }}
+          vuln-type: 'os,library'
+          trivyignores: ${{ steps.trivyignore.outputs.path }}
+
+      - name: Run Trivy image scan (SARIF)
+        if: always() && inputs.upload_sarif
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'image'
+          image-ref: ${{ inputs.image_ref }}
+          severity: ${{ inputs.severity }}
+          format: 'sarif'
+          output: 'trivy-image.sarif'
+          exit-code: '0'
+          ignore-unfixed: ${{ inputs.ignore_unfixed }}
+          vuln-type: 'os,library'
+          trivyignores: ${{ steps.trivyignore.outputs.path }}
+
+      - name: Upload SARIF to GitHub Security
+        if: always() && inputs.upload_sarif && hashFiles('trivy-image.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-image.sarif'
+          category: 'trivy-image'
+
+      - name: Summary
+        if: always()
+        run: |
+          MODE="warn"
+          if [ "${{ inputs.exit_code }}" = "1" ]; then
+            MODE="block"
+          fi
+
+          echo "## Trivy Image Scan" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Image:** \`${{ inputs.image_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Severity:** \`${{ inputs.severity }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Fixable only:** \`${{ inputs.ignore_unfixed }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Mode:** \`${MODE}\` (exit_code=${{ inputs.exit_code }})" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ steps.trivyignore.outputs.path }}" ]; then
+            echo "- **Ignore file:** \`${{ steps.trivyignore.outputs.path }}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Full findings are available in the scan logs above and (when enabled) under the repository \`Security\` tab." >> "$GITHUB_STEP_SUMMARY"

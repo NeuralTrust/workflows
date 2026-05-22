@@ -204,7 +204,29 @@ jobs:
           provenance: false
 
   # ============================================================================
-  # Job 2: Update Kustomization (only on develop/main branch pushes)
+  # Job 2: Image Vulnerability Scan (warn mode — never blocks dev deploys)
+  # ============================================================================
+  scan:
+    name: Image Vulnerability Scan (${{ matrix.image.name }})
+    needs: build
+    strategy:
+      matrix:
+        image: ${{ fromJson(inputs.images) }}
+      fail-fast: false
+    uses: ./.github/workflows/image-scan.yml
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+    with:
+      image_ref: '${{ inputs.registry }}/${{ inputs.gcp_project_id }}/${{ inputs.repository }}/${{ matrix.image.name }}:${{ matrix.image.tag_prefix }}${{ github.sha }}${{ matrix.image.tag_suffix }}'
+      exit_code: '0'
+    secrets:
+      WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
+      WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+  # ============================================================================
+  # Job 3: Update Kustomization (only on develop/main branch pushes)
   # ============================================================================
   update-kustomization:
     name: Update Kustomization
