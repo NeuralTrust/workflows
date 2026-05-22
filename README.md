@@ -22,8 +22,10 @@ Every repo follows the same standardized pipeline:
                     ┌─────────────────────────▼──────────────────────────────────────┐
                     │ release.yml → Smart Release (promote or rebuild)               │
                     │                                                                │
-                    │   develop→main PR?  ──YES──▶  PROMOTE (crane copy, ~10s)       │──▶ Prod
-                    │   hotfix/direct?    ──YES──▶  REBUILD (docker build)           │──▶ Prod
+                    │   develop→main PR?  ──YES──▶  SCAN → PROMOTE (crane copy)      │──▶ Prod
+                    │   hotfix/direct?    ──YES──▶  REBUILD → SCAN                   │──▶ Prod
+                    │                                                                │
+                    │   Scan blocks CRITICAL/HIGH fixable CVEs (see image-scan.yml)  │
                     └────────────────────────────────────────────────────────────────┘
 
 ┌──────────────┐     ┌──────────────────────────────────────────────────┐
@@ -78,6 +80,7 @@ Every repo follows the same standardized pipeline:
 |----------|-------------|
 | [`tests.yml`](#tests--linting) | Generic test runner (Go/Python/Node/Rust) + optional services |
 | [`sast.yml`](#sast--security) | Trivy + Gitleaks + language SAST (Gosec/Bandit/njsscan) |
+| [`image-scan.yml`](#docker-image-scanning) | Trivy container image scan (warn on dev, block on prod release) |
 | [`dast.yml`](#dast) | OWASP ZAP scan of running app (APIs/frontend); JWT or login-based auth |
 | [`seo-check.yml`](#seo-static-audit) | Static Next.js SEO audit (metadata, sitemap/robots presence); job summary |
 | [`seo-live-url.yml`](#seo-live-url) | Live site: homepage / `robots.txt` / sitemap content audit + Lighthouse SEO |
@@ -91,6 +94,7 @@ Every repo follows the same standardized pipeline:
 | Workflow | Description |
 |----------|-------------|
 | [`smoke-test.yml`](#smoke-test) | Post-deploy health check with version polling |
+| [`e2e-playwright.yml`](#e2e-playwright) | Playwright E2E tests from the `e2e-tests` image + Allure reporting |
 
 ### Building Blocks
 
@@ -129,8 +133,19 @@ Is your dev and prod registry in the same GCP project?
 
 | Scenario | Strategy | Time | What happens |
 |----------|----------|------|-------------|
-| develop → main PR merged | **Promote** | ~10 seconds | Copies the tested dev image to prod (byte-identical) |
-| Hotfix / direct push to main | **Rebuild** | ~2-5 minutes | Full Docker build in the prod registry |
+| develop → main PR merged | **Promote** | ~10 seconds | Scans dev image → copies to prod if clean (byte-identical) |
+| Hotfix / direct push to main | **Rebuild** | ~2-5 minutes | Full Docker build → scan prod image before kustomize update |
+
+### Image scan gate (prod only)
+
+Before any prod tag is applied or kustomization is updated, the release image is scanned for **fixable CRITICAL/HIGH** CVEs. A failure blocks the release and sends a Slack alert.
+
+| Strategy | Image scanned | When copy/build completes |
+|----------|---------------|---------------------------|
+| **Promote** | Dev source image (by commit SHA) | Crane copy runs **after** scan passes — a dirty dev image never gets a prod release tag |
+| **Rebuild** | Freshly built prod image | Kustomize update runs **after** scan passes |
+
+Dev deploys use the same scanner in **warn mode** (`exit_code: 0`) — findings appear in the job summary and GitHub Security tab but never block deployment.
 
 ### How detection works
 
@@ -142,10 +157,27 @@ Is your dev and prod registry in the same GCP project?
    - If not found → falls back to **rebuild**
 3. If no develop→main PR → **rebuild** (hotfix path)
 
+### Release job flow
+
+```
+release (detect strategy + build if hotfix)
+    │
+    ▼
+scan (Trivy — blocks on fixable CRITICAL/HIGH)
+    │
+    ├─ promote ──▶ promote-copy (crane dev → prod)
+    │
+    └─ rebuild ──▶ (promote-copy skipped)
+    │
+    ▼
+update-kustomization + Slack notify
+```
+
 ### Benefits of promote
 
 - **Zero build time** — image copy takes ~10 seconds vs minutes for a full build
 - **Byte-identical binary** — what was tested in dev is exactly what runs in prod
+- **Scan-before-promote** — prod tags are only applied after the dev image passes the vulnerability gate
 - **Version injection via ConfigMap** — `APPLICATION_VERSION` is set in `config.env`, picked up by kustomize `configMapGenerator`, and overrides the build-time value at runtime
 
 ### Quick Start
@@ -257,7 +289,13 @@ jobs:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 ```
 
-Detection runs once; each image is promoted (or rebuilt) in parallel via a matrix job.
+Detection runs once; each image is released in parallel via a matrix job. Per image:
+
+```
+release (detect strategy + build if rebuild) → scan (image-scan.yml) → promote-copy → update-kustomization
+```
+
+Each image is scanned for fixable CRITICAL/HIGH CVEs **before** crane copy or kustomize update — same gate as single-image `release-promote.yml`.
 
 ---
 
@@ -759,8 +797,8 @@ jobs:
 
 1. Builds Docker image with tags: `COMMIT_SHA`, `latest`, `cache`
 2. Injects `APP_VERSION=<commit-sha>` as a build arg
-3. Scans the image with Trivy (CRITICAL,HIGH, warn mode)
-4. Updates `kustomization.yaml` (image tag) and `config.env` (`APPLICATION_VERSION`)
+3. Scans the pushed image via [`image-scan.yml`](#docker-image-scanning) (CRITICAL/HIGH, warn mode — never blocks dev)
+4. Updates `kustomization.yaml` (image tag) and `config.env` (`APPLICATION_VERSION`) in parallel with the scan
 5. Commits and pushes overlay updates (deploy workflows use `paths-ignore: k8s/**` so this does not retrigger builds)
 6. Sends Slack notification
 
@@ -989,15 +1027,122 @@ jobs:
 
 ---
 
+## E2E Playwright
+
+**`e2e-playwright.yml`** — Runs Playwright tests from the shared `e2e-tests` Docker image against a deployed service, publishes results to Allure, and uploads HTML/Allure artifacts.
+
+### Quick Start
+
+```yaml
+# After dev deploy
+jobs:
+  deploy:
+    uses: NeuralTrust/workflows/.github/workflows/docker-build-deploy.yml@main
+    # ...
+
+  e2e:
+    needs: deploy
+    uses: NeuralTrust/workflows/.github/workflows/e2e-playwright.yml@main
+    with:
+      service: app
+      base_url: https://app.dev.neuraltrust.ai
+      expected_version: ${{ github.sha }}
+    secrets:
+      TWINGATE_SERVICE_KEY: ${{ secrets.TWINGATE_SERVICE_KEY }}
+      ALLURE_USER: ${{ secrets.ALLURE_USER }}
+      ALLURE_PASS: ${{ secrets.ALLURE_PASS }}
+      WIF_PROVIDER: ${{ secrets.DEV_WIF_PROVIDER }}
+      WIF_SERVICE_ACCOUNT: ${{ secrets.DEV_WIF_SERVICE_ACCOUNT }}
+      E2E_SECRETS_JSON: ${{ secrets.E2E_APP_SECRETS_JSON }}
+```
+
+### Runners
+
+| Runner | Use case |
+|--------|----------|
+| `ubuntu-latest` (default) | Public/Twingate URLs — connects via Twingate before tests |
+| `arc-runner-medium` | In-cluster URLs (k8s service DNS) — Twingate disabled automatically |
+
+### Inputs
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `service` | Yes | — | Playwright service name (`app`, `trustgate`, `admin-console`, `data-plane`) |
+| `base_url` | Yes | — | Base URL of the service under test |
+| `expected_version` | No | — | Commit SHA expected in health endpoint (empty = skip version gate) |
+| `health_path` | No | `/api/health` | Health check path for version polling |
+| `image_tag` | No | `develop` | `e2e-tests` image tag in Artifact Registry |
+| `runner` | No | `ubuntu-latest` | GitHub Actions runner label |
+| `twingate_enabled` | No | `true` | Connect Twingate before tests (ignored on ARC runners) |
+| `grep` | No | — | Playwright `--grep` filter (empty = service default) |
+| `allure_project` | No | `service` | Allure `project_id` |
+| `e2e_run_enabled` | No | `true` | Run tests (`false` = list only) |
+| `version_wait_minutes` | No | `20` | Health gate timeout in minutes |
+
+### Secrets
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `ALLURE_USER` | Yes | Allure server credentials |
+| `ALLURE_PASS` | Yes | Allure server credentials |
+| `WIF_PROVIDER` | Yes | GCP WIF provider (pull `e2e-tests` image) |
+| `WIF_SERVICE_ACCOUNT` | Yes | GCP service account email |
+| `TWINGATE_SERVICE_KEY` | No | Twingate service key (public runners) |
+| `E2E_SECRETS_JSON` | No | JSON map of `E2E_*` env vars (overrides individual secrets) |
+| `E2E_USER`, `E2E_PASSWORD`, etc. | No | Individual E2E credentials when not using `E2E_SECRETS_JSON` |
+
+Org/repo variables used: `ALLURE_PUBLIC_URL`, `ALLURE_INTERNAL_URL`, and service-specific `E2E_*` vars (login paths, team selectors, etc.).
+
+---
+
 ## Docker Image Scanning
 
-Both build and release workflows automatically scan the pushed image with **Trivy**:
+Container images are scanned with **Trivy** via [`image-scan.yml`](#image-scan-reusable-workflow). Deploy and release workflows call it automatically; you can also invoke it standalone.
 
-- Scans for `CRITICAL,HIGH` severity vulnerabilities
-- Runs in warn mode (exit code 0) — does not block deployments
-- Results shown in the GitHub Actions job summary
+### Scan modes
 
-No additional configuration needed — image scanning is always enabled.
+| Pipeline stage | Mode | Blocks? | What is scanned |
+|----------------|------|---------|-----------------|
+| **Dev deploy** (`docker-build-deploy.yml`, `multi-image-deploy.yml`) | Warn (`exit_code: 0`) | No | Image just pushed to dev registry |
+| **Prod release** (`release-promote.yml`, `multi-image-release-promote.yml`) | Block (`exit_code: 1`) | Yes | Dev source (promote) or rebuilt prod image (hotfix) |
+
+Both modes scan for **CRITICAL,HIGH** severity and count only **fixable** CVEs (`ignore_unfixed: true`).
+
+### Image Scan (reusable workflow)
+
+**`image-scan.yml`** — Pulls an image from Artifact Registry, scans OS packages and application dependencies, and optionally uploads SARIF to the GitHub Security tab.
+
+```yaml
+jobs:
+  scan:
+    uses: NeuralTrust/workflows/.github/workflows/image-scan.yml@main
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write   # required for SARIF upload
+    with:
+      image_ref: europe-west1-docker.pkg.dev/my-proj/nt-docker/my-svc:abc123
+      exit_code: '1'           # '0' = warn, '1' = block
+    secrets:
+      WIF_PROVIDER: ${{ secrets.DEV_WIF_PROVIDER }}
+      WIF_SERVICE_ACCOUNT: ${{ secrets.DEV_WIF_SERVICE_ACCOUNT }}
+```
+
+### Inputs
+
+| Input | Default | Description |
+|-------|---------|-------------|
+| `image_ref` | — | Full image reference including registry, project, repo, and tag |
+| `severity` | `CRITICAL,HIGH` | Severity levels to scan |
+| `exit_code` | `0` | `0` = warn (never blocks), `1` = block on findings |
+| `ignore_unfixed` | `true` | Only count vulnerabilities with a fix available |
+| `trivyignore_path` | *(auto)* | Path to `.trivyignore`; auto-detected from repo root if present |
+| `upload_sarif` | `true` | Upload SARIF to GitHub Security tab |
+| `registry` | `europe-west1-docker.pkg.dev` | Registry host for docker login |
+
+### Suppressing false positives
+
+Add a `.trivyignore` file at the repo root (same convention as `sast.yml`) to suppress accepted findings. Both deploy and release scans auto-detect it.
 
 ---
 
@@ -1008,6 +1153,7 @@ Deploy and release workflows send Slack notifications on success or failure.
 **Smart release notifications** include the strategy used:
 - "promoted from dev" (for develop→main releases)
 - "rebuilt (hotfix)" (for direct pushes)
+- "Blocked by image scan" (fixable CRITICAL/HIGH CVEs found — see Security tab)
 
 To enable:
 
@@ -1101,13 +1247,13 @@ gcloud artifacts repositories add-iam-policy-binding nt-docker \
 
 ### Workflow Behavior Summary
 
-| Trigger | Docker Tags | Kustomization | config.env | Environment |
-|---------|-------------|---------------|------------|-------------|
-| Push `develop` | `COMMIT_SHA`, `latest`, `cache` | `k8s/overlays/dev` | `APPLICATION_VERSION=<sha>` | Dev |
-| PR to `main` | — (no build) | — | — | — (CI only) |
-| Push `main` | — (no build) | — | — | — (creates release) |
-| GitHub Release (promote) | `v1.2.3`, `SHA`, `latest`, `cache` | `k8s/overlays/prod` | `APPLICATION_VERSION=v1.2.3` | Prod |
-| GitHub Release (rebuild) | `v1.2.3`, `SHA`, `latest`, `cache` | `k8s/overlays/prod` | `APPLICATION_VERSION=v1.2.3` | Prod |
+| Trigger | Docker Tags | Image Scan | Kustomization | config.env | Environment |
+|---------|-------------|------------|---------------|------------|-------------|
+| Push `develop` | `COMMIT_SHA`, `latest`, `cache` | Warn (non-blocking) | `k8s/overlays/dev` | `APPLICATION_VERSION=<sha>` | Dev |
+| PR to `main` | — (no build) | — | — | — | — (CI only) |
+| Push `main` | — (no build) | — | — | — | — (creates release) |
+| GitHub Release (promote) | `v1.2.3`, `SHA`, `latest`, `cache` | Block (dev source) | `k8s/overlays/prod` | `APPLICATION_VERSION=v1.2.3` | Prod |
+| GitHub Release (rebuild) | `v1.2.3`, `SHA`, `latest`, `cache` | Block (prod image) | `k8s/overlays/prod` | `APPLICATION_VERSION=v1.2.3` | Prod |
 
 ---
 

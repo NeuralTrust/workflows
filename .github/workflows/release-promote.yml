@@ -154,6 +154,8 @@ jobs:
       release_tag: ${{ steps.meta.outputs.release_tag }}
       image_ref: ${{ steps.meta.outputs.prod_image_ref }}
       strategy: ${{ steps.strategy.outputs.final }}
+      source_ref: ${{ steps.strategy.outputs.source_ref }}
+      scan_target: ${{ steps.scan_target.outputs.ref }}
 
     permissions:
       contents: read
@@ -323,33 +325,10 @@ jobs:
           echo "- **Strategy:** \`$( [ "$INITIAL" = "promote" ] && echo "${{ steps.detect.outputs.initial }}" || echo "rebuild")\` → \`$(cat "$GITHUB_OUTPUT" | grep '^final=' | cut -d= -f2)\`" >> "$GITHUB_STEP_SUMMARY"
 
       # ================================================================
-      # PROMOTE PATH — copy image from dev to prod
+      # PROMOTE PATH — crane copy is deferred to the promote-copy job,
+      # which runs AFTER the image-scan gate so a vulnerable dev image
+      # never gets tagged with the prod release tag.
       # ================================================================
-      - name: Promote image (dev → prod)
-        if: steps.strategy.outputs.final == 'promote'
-        run: |
-          SOURCE="${{ steps.strategy.outputs.source_ref }}"
-          PROD_BASE="${{ steps.meta.outputs.prod_image_base }}"
-          P="${{ inputs.tag_prefix }}"
-          S="${{ inputs.tag_suffix }}"
-          SHA="${{ github.sha }}"
-          RELEASE_TAG="${{ steps.meta.outputs.release_tag }}"
-
-          echo "============================================"
-          echo "  PROMOTE: dev → prod"
-          echo "============================================"
-          echo "  Source:  ${SOURCE}"
-          echo "  Dest:    ${PROD_BASE}:${RELEASE_TAG}"
-          echo "============================================"
-
-          crane copy "${SOURCE}" "${PROD_BASE}:${RELEASE_TAG}"
-          crane copy "${SOURCE}" "${PROD_BASE}:${P}${SHA}${S}"
-          crane copy "${SOURCE}" "${PROD_BASE}:${P}latest${S}"
-          crane copy "${SOURCE}" "${PROD_BASE}:${P}cache${S}"
-
-          echo "## Image Promoted" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Source:** \`${SOURCE}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Destination:** \`${PROD_BASE}:${RELEASE_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
 
       # ================================================================
       # REBUILD PATH — full Docker build (hotfix / fallback)
@@ -427,12 +406,115 @@ jobs:
           echo "- **Image:** \`${{ steps.meta.outputs.prod_image_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Reason:** Hotfix or direct push (no dev image to promote)" >> "$GITHUB_STEP_SUMMARY"
 
+      # ----------------------------------------------------------------
+      # Resolve scan target — for promote this is the dev source image
+      # (we scan it BEFORE copying to prod tags); for rebuild this is
+      # the prod image we just pushed.
+      # ----------------------------------------------------------------
+      - name: Resolve scan target
+        id: scan_target
+        run: |
+          if [ "${{ steps.strategy.outputs.final }}" = "promote" ]; then
+            REF="${{ steps.strategy.outputs.source_ref }}"
+          else
+            REF="${{ steps.meta.outputs.prod_image_ref }}"
+          fi
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "Scan target: ${REF}"
+
   # ============================================================================
-  # Job 2: Update Kustomization + config.env
+  # Job 2: Image Vulnerability Scan (BLOCK on CRITICAL/HIGH fixable CVEs)
+  # ============================================================================
+  # Scans the image about to be promoted/released. For promote this is the dev
+  # source image (scanned BEFORE crane copy in promote-copy). For rebuild this
+  # is the freshly built prod image. A failure here fails the release.
+  scan:
+    name: Image Vulnerability Scan
+    needs: release
+    uses: ./.github/workflows/image-scan.yml
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+    with:
+      image_ref: ${{ needs.release.outputs.scan_target }}
+      exit_code: '1'
+    secrets:
+      WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
+      WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+  # ============================================================================
+  # Job 3: Promote copy — crane copy dev → prod (promote strategy only)
+  # ============================================================================
+  # Only runs after the scan gate has passed, so a dirty dev image can never
+  # acquire a prod release tag.
+  promote-copy:
+    name: Promote Image (dev → prod)
+    needs: [release, scan]
+    if: needs.release.outputs.strategy == 'promote'
+    runs-on: ${{ inputs.runner }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Install crane
+        run: |
+          curl -sL "https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz" \
+            | tar -xzf - crane
+          chmod +x crane
+          sudo mv crane /usr/local/bin/
+
+      - name: Login to Artifact Registry (crane)
+        run: |
+          echo "${{ steps.auth.outputs.access_token }}" | \
+            crane auth login ${{ inputs.registry }} -u oauth2accesstoken --password-stdin
+
+      - name: Promote image (dev → prod)
+        run: |
+          SOURCE="${{ needs.release.outputs.source_ref }}"
+          PROD_BASE="${{ inputs.registry }}/${{ inputs.gcp_project_id }}/${{ inputs.repository }}/${{ inputs.image_name }}"
+          P="${{ inputs.tag_prefix }}"
+          S="${{ inputs.tag_suffix }}"
+          SHA="${{ github.sha }}"
+          RELEASE_TAG="${{ needs.release.outputs.release_tag }}"
+
+          echo "============================================"
+          echo "  PROMOTE: dev → prod (post-scan)"
+          echo "============================================"
+          echo "  Source:  ${SOURCE}"
+          echo "  Dest:    ${PROD_BASE}:${RELEASE_TAG}"
+          echo "============================================"
+
+          crane copy "${SOURCE}" "${PROD_BASE}:${RELEASE_TAG}"
+          crane copy "${SOURCE}" "${PROD_BASE}:${P}${SHA}${S}"
+          crane copy "${SOURCE}" "${PROD_BASE}:${P}latest${S}"
+          crane copy "${SOURCE}" "${PROD_BASE}:${P}cache${S}"
+
+          echo "## Image Promoted" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Source:** \`${SOURCE}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Destination:** \`${PROD_BASE}:${RELEASE_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
+  # Job 4: Update Kustomization + config.env (gated on scan + promote-copy)
   # ============================================================================
   update-kustomization:
     name: Update Kustomization
-    needs: release
+    needs: [release, scan, promote-copy]
+    if: |
+      always() &&
+      needs.release.result == 'success' &&
+      needs.scan.result == 'success' &&
+      (needs.promote-copy.result == 'success' || needs.promote-copy.result == 'skipped')
     runs-on: ubuntu-latest
 
     permissions:
@@ -523,7 +605,7 @@ jobs:
   # ============================================================================
   notify:
     name: Slack Notification
-    needs: [release, update-kustomization]
+    needs: [release, scan, promote-copy, update-kustomization]
     if: always()
     runs-on: ubuntu-latest
 
@@ -538,10 +620,15 @@ jobs:
           fi
 
           RELEASE_RESULT="${{ needs.release.result }}"
+          SCAN_RESULT="${{ needs.scan.result }}"
+          PROMOTE_COPY_RESULT="${{ needs.promote-copy.result }}"
           KUSTOMIZE_RESULT="${{ needs.update-kustomization.result }}"
           STRATEGY="${{ needs.release.outputs.strategy }}"
 
-          if [ "$RELEASE_RESULT" = "success" ] && ([ "$KUSTOMIZE_RESULT" = "success" ] || [ "$KUSTOMIZE_RESULT" = "skipped" ]); then
+          if [ "$RELEASE_RESULT" = "success" ] \
+             && [ "$SCAN_RESULT" = "success" ] \
+             && ([ "$PROMOTE_COPY_RESULT" = "success" ] || [ "$PROMOTE_COPY_RESULT" = "skipped" ]) \
+             && ([ "$KUSTOMIZE_RESULT" = "success" ] || [ "$KUSTOMIZE_RESULT" = "skipped" ]); then
             COLOR="#36a64f"
             STATUS="Released"
             if [ "$STRATEGY" = "promote" ]; then
@@ -551,6 +638,11 @@ jobs:
               EMOJI=":white_check_mark:"
               METHOD="rebuilt (hotfix)"
             fi
+          elif [ "$SCAN_RESULT" = "failure" ]; then
+            COLOR="#dc3545"
+            STATUS="Blocked by image scan"
+            EMOJI=":no_entry:"
+            METHOD="CRITICAL/HIGH fixable CVEs found"
           else
             COLOR="#dc3545"
             STATUS="Failed"
