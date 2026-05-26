@@ -7,6 +7,9 @@
 # Default runner: ubuntu-latest (public/Twingate URL).
 # Opt-in in-cluster: runner: arc-runner-medium (hits k8s svc URLs, no Twingate).
 #
+# Default: pull stable prod test image (main → prod registry), even for dev URLs.
+# Opt-in develop channel for experimental test changes (develop → dev registry).
+#
 # Usage:
 #   jobs:
 #     e2e:
@@ -16,10 +19,14 @@
 #         service: app
 #         base_url: https://app.dev.neuraltrust.ai
 #         expected_version: ${{ github.sha }}
+#         e2e_tests_channel: prod
+#         image_tag: latest
 #       secrets:
 #         TWINGATE_SERVICE_KEY: ${{ secrets.TWINGATE_SERVICE_KEY }}
 #         ALLURE_USER: ${{ secrets.ALLURE_USER }}
 #         ALLURE_PASS: ${{ secrets.ALLURE_PASS }}
+#         PROD_WIF_PROVIDER: ${{ secrets.PROD_WIF_PROVIDER }}
+#         PROD_WIF_SERVICE_ACCOUNT: ${{ secrets.PROD_WIF_SERVICE_ACCOUNT }}
 #         E2E_SECRETS_JSON: ${{ secrets.E2E_APP_SECRETS_JSON }}
 # ==============================================================================
 
@@ -46,11 +53,16 @@ on:
         required: false
         type: string
         default: '/api/health'
+      e2e_tests_channel:
+        description: 'prod = stable tests (prod registry, default) | develop = experimental test changes (dev registry)'
+        required: false
+        type: string
+        default: 'prod'
       image_tag:
         description: 'e2e-tests image tag in Artifact Registry'
         required: false
         type: string
-        default: 'develop'
+        default: 'latest'
       runner:
         description: 'ubuntu-latest | arc-runner-small | arc-runner-medium | arc-runner-large'
         required: false
@@ -107,10 +119,19 @@ on:
         required: false
       E2E_AUTH_PASSWORD:
         required: false
+      DEV_WIF_PROVIDER:
+        required: false
+      DEV_WIF_SERVICE_ACCOUNT:
+        required: false
+      PROD_WIF_PROVIDER:
+        required: false
+      PROD_WIF_SERVICE_ACCOUNT:
+        required: false
       WIF_PROVIDER:
-        required: true
+        description: 'Deprecated — use DEV_WIF_* / PROD_WIF_* with e2e_tests_channel'
+        required: false
       WIF_SERVICE_ACCOUNT:
-        required: true
+        required: false
       GH_TOKEN:
         required: false
 
@@ -133,6 +154,8 @@ jobs:
       UI_BASE_URL: ${{ inputs.base_url }}
       ALLURE_PROJECT: ${{ inputs.allure_project || inputs.service }}
       E2E_IMAGE_TAG: ${{ inputs.image_tag }}
+      E2E_TESTS_CHANNEL: ${{ inputs.e2e_tests_channel }}
+      E2E_IMAGE_GCP_PROJECT: ${{ inputs.e2e_tests_channel == 'develop' && vars.DEV_GCP_PROJECT_ID || vars.PROD_GCP_PROJECT_ID }}
       IS_ARC_RUNNER: ${{ startsWith(inputs.runner, 'arc-') }}
       ALLURE_URL: ${{ startsWith(inputs.runner, 'arc-') && (vars.ALLURE_INTERNAL_URL || 'http://allure-api.allure.svc.cluster.local:5050') || (vars.ALLURE_PUBLIC_URL || 'https://allure.internal.neuraltrust.ai') }}
       ALLURE_UI_URL: ${{ vars.ALLURE_PUBLIC_URL || 'https://allure.internal.neuraltrust.ai' }}
@@ -143,8 +166,8 @@ jobs:
       - name: Authenticate to GCP (pull e2e-tests image)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ inputs.e2e_tests_channel == 'develop' && (secrets.DEV_WIF_PROVIDER || secrets.WIF_PROVIDER) || (secrets.PROD_WIF_PROVIDER || secrets.WIF_PROVIDER) }}
+          service_account: ${{ inputs.e2e_tests_channel == 'develop' && (secrets.DEV_WIF_SERVICE_ACCOUNT || secrets.WIF_SERVICE_ACCOUNT) || (secrets.PROD_WIF_SERVICE_ACCOUNT || secrets.WIF_SERVICE_ACCOUNT) }}
 
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
@@ -213,10 +236,9 @@ jobs:
 
       - name: Pull e2e-tests image
         id: image
-        env:
-          GCP_PROJECT: ${{ vars.DEV_GCP_PROJECT_ID }}
         run: |
-          IMAGE="${REGISTRY}/${GCP_PROJECT}/${REPOSITORY}/e2e-tests:${E2E_IMAGE_TAG}"
+          IMAGE="${REGISTRY}/${E2E_IMAGE_GCP_PROJECT}/${REPOSITORY}/e2e-tests:${E2E_IMAGE_TAG}"
+          echo "Using e2e-tests channel=${E2E_TESTS_CHANNEL} image=${IMAGE}"
           echo "ref=${IMAGE}" >> "$GITHUB_OUTPUT"
           docker pull "${IMAGE}"
 
@@ -280,12 +302,10 @@ jobs:
 
       - name: List tests only
         if: ${{ !inputs.e2e_run_enabled }}
-        env:
-          GCP_PROJECT: ${{ vars.DEV_GCP_PROJECT_ID }}
         run: |
           docker run --rm \
             -e SERVICE="${SERVICE}" \
-            "${REGISTRY}/${GCP_PROJECT}/${REPOSITORY}/e2e-tests:${E2E_IMAGE_TAG}" \
+            "${REGISTRY}/${E2E_IMAGE_GCP_PROJECT}/${REPOSITORY}/e2e-tests:${E2E_IMAGE_TAG}" \
             bash -c 'npx playwright test --list'
 
       - name: Push results to Allure server

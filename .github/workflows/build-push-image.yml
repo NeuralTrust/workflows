@@ -70,6 +70,11 @@ on:
         required: false
         type: string
         default: ''
+      extra_tags:
+        description: 'Comma-separated extra tags pushed with the image (e.g., develop, staging)'
+        required: false
+        type: string
+        default: ''
       runner:
         description: 'GitHub Actions runner label'
         required: false
@@ -141,6 +146,17 @@ jobs:
             echo "has_semver=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_semver=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          EXTRA="${{ inputs.extra_tags }}"
+          if [ -n "$EXTRA" ]; then
+            IFS=',' read -ra EXTRA_TAGS <<< "$EXTRA"
+            for raw in "${EXTRA_TAGS[@]}"; do
+              tag="$(echo "$raw" | xargs)"
+              if [ -n "$tag" ]; then
+                TAGS="${TAGS},${IMAGE_BASE}:${P}${tag}${S}"
+              fi
+            done
           fi
 
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"

@@ -1047,13 +1047,27 @@ jobs:
       service: app
       base_url: https://app.dev.neuraltrust.ai
       expected_version: ${{ github.sha }}
+      e2e_tests_channel: prod
+      image_tag: latest
     secrets:
       TWINGATE_SERVICE_KEY: ${{ secrets.TWINGATE_SERVICE_KEY }}
       ALLURE_USER: ${{ secrets.ALLURE_USER }}
       ALLURE_PASS: ${{ secrets.ALLURE_PASS }}
-      WIF_PROVIDER: ${{ secrets.DEV_WIF_PROVIDER }}
-      WIF_SERVICE_ACCOUNT: ${{ secrets.DEV_WIF_SERVICE_ACCOUNT }}
+      PROD_WIF_PROVIDER: ${{ secrets.PROD_WIF_PROVIDER }}
+      PROD_WIF_SERVICE_ACCOUNT: ${{ secrets.PROD_WIF_SERVICE_ACCOUNT }}
+      DEV_WIF_PROVIDER: ${{ secrets.DEV_WIF_PROVIDER }}
+      DEV_WIF_SERVICE_ACCOUNT: ${{ secrets.DEV_WIF_SERVICE_ACCOUNT }}
       E2E_SECRETS_JSON: ${{ secrets.E2E_APP_SECRETS_JSON }}
+```
+
+**Stable vs experimental tests:** `base_url` (dev or prod app) is independent of the test image. By default callers use `e2e_tests_channel: prod` and pull `latest` from the **prod** Artifact Registry (built from `e2e-tests` `main`). Set `e2e_tests_channel: develop` (repo var `E2E_TESTS_CHANNEL` in `app`) to validate in-flight test changes from the **dev** registry (built from `e2e-tests` `develop`).
+
+```yaml
+# app — opt into experimental tests while still hitting dev URL
+with:
+  base_url: https://app.dev.neuraltrust.ai
+  e2e_tests_channel: develop   # or vars.E2E_TESTS_CHANNEL=develop
+  image_tag: latest
 ```
 
 ### Runners
@@ -1071,7 +1085,8 @@ jobs:
 | `base_url` | Yes | — | Base URL of the service under test |
 | `expected_version` | No | — | Commit SHA expected in health endpoint (empty = skip version gate) |
 | `health_path` | No | `/api/health` | Health check path for version polling |
-| `image_tag` | No | `develop` | `e2e-tests` image tag in Artifact Registry |
+| `e2e_tests_channel` | No | `prod` | `prod` = stable tests (prod registry) · `develop` = experimental tests (dev registry) |
+| `image_tag` | No | `latest` | `e2e-tests` image tag in Artifact Registry |
 | `runner` | No | `ubuntu-latest` | GitHub Actions runner label |
 | `twingate_enabled` | No | `true` | Connect Twingate before tests (ignored on ARC runners) |
 | `grep` | No | — | Playwright `--grep` filter (empty = service default) |
@@ -1085,8 +1100,11 @@ jobs:
 |--------|----------|-------------|
 | `ALLURE_USER` | Yes | Allure server credentials |
 | `ALLURE_PASS` | Yes | Allure server credentials |
-| `WIF_PROVIDER` | Yes | GCP WIF provider (pull `e2e-tests` image) |
-| `WIF_SERVICE_ACCOUNT` | Yes | GCP service account email |
+| `PROD_WIF_PROVIDER` | No* | GCP WIF for prod registry (stable tests) |
+| `PROD_WIF_SERVICE_ACCOUNT` | No* | GCP service account email |
+| `DEV_WIF_PROVIDER` | No* | GCP WIF for dev registry (experimental tests) |
+| `DEV_WIF_SERVICE_ACCOUNT` | No* | GCP service account email |
+| `WIF_PROVIDER` / `WIF_SERVICE_ACCOUNT` | No | Deprecated fallback when channel-specific WIF is omitted |
 | `TWINGATE_SERVICE_KEY` | No | Twingate service key (public runners) |
 | `E2E_SECRETS_JSON` | No | JSON map of `E2E_*` env vars (overrides individual secrets) |
 | `E2E_USER`, `E2E_PASSWORD`, etc. | No | Individual E2E credentials when not using `E2E_SECRETS_JSON` |
