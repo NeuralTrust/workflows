@@ -245,6 +245,8 @@ jobs:
           E2E_MS_AZURE_TEAM_LOGIN_SELECT: ${{ vars.E2E_MS_AZURE_TEAM_LOGIN_SELECT }}
           E2E_TEAM_SETTINGS_TEAM_ID: ${{ vars.E2E_TEAM_SETTINGS_TEAM_ID }}
           E2E_DELETE_TEAM_DISPLAY_NAME: ${{ vars.E2E_DELETE_TEAM_DISPLAY_NAME }}
+          E2E_GEN_P03_TEAM_DISPLAY_NAME: ${{ vars.E2E_GEN_P03_TEAM_DISPLAY_NAME || vars.E2E_DELETE_TEAM_DISPLAY_NAME }}
+          E2E_DISABLE_GLOBAL_SETUP: '0'
           GREP: ${{ inputs.grep }}
         run: |
           set -euo pipefail
@@ -258,7 +260,8 @@ jobs:
               E2E_ADMIN_USER E2E_ADMIN_PASSWORD E2E_ADMIN_TEAM_LOGIN_SELECT E2E_ADMIN_MY_TEAMS_WORKSPACE_NAME \
               E2E_MEMBER_USER E2E_MEMBER_PASSWORD E2E_MEMBER_TEAM_LOGIN_SELECT E2E_MEMBER_MY_TEAMS_WORKSPACE_NAME \
               E2E_AUTH_USER E2E_AUTH_PASSWORD E2E_AUTH_TEAM_LOGIN_SELECT E2E_AUTH_BRANDING_IMG_NAME \
-              E2E_MS_AZURE_TEAM_LOGIN_SELECT E2E_TEAM_SETTINGS_TEAM_ID E2E_DELETE_TEAM_DISPLAY_NAME; do
+              E2E_MS_AZURE_TEAM_LOGIN_SELECT E2E_TEAM_SETTINGS_TEAM_ID E2E_DELETE_TEAM_DISPLAY_NAME \
+              E2E_GEN_P03_TEAM_DISPLAY_NAME E2E_DISABLE_GLOBAL_SETUP; do
               val="${!key:-}"
               if [ -n "${val}" ]; then
                 echo "${key}=${val}" >> "${ENV_FILE}"
@@ -267,7 +270,6 @@ jobs:
           fi
           echo "UI_BASE_URL=${UI_BASE_URL}" >> "${ENV_FILE}"
           echo "SERVICE=${SERVICE}" >> "${ENV_FILE}"
-          echo "E2E_DISABLE_GLOBAL_SETUP=0" >> "${ENV_FILE}"
 
           docker run --rm \
             --env-file "${ENV_FILE}" \
