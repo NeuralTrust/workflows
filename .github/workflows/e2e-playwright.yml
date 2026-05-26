@@ -134,8 +134,8 @@ jobs:
       ALLURE_PROJECT: ${{ inputs.allure_project || inputs.service }}
       E2E_IMAGE_TAG: ${{ inputs.image_tag }}
       IS_ARC_RUNNER: ${{ startsWith(inputs.runner, 'arc-') }}
-      ALLURE_URL: ${{ startsWith(inputs.runner, 'arc-') && (vars.ALLURE_INTERNAL_URL || 'http://allure-api.allure.svc.cluster.local:5050') || (vars.ALLURE_PUBLIC_URL || 'https://allure.dev.neuraltrust.ai') }}
-      ALLURE_UI_URL: ${{ vars.ALLURE_PUBLIC_URL || 'https://allure.dev.neuraltrust.ai' }}
+      ALLURE_URL: ${{ startsWith(inputs.runner, 'arc-') && (vars.ALLURE_INTERNAL_URL || 'http://allure-api.allure.svc.cluster.local:5050') || (vars.ALLURE_PUBLIC_URL || 'https://allure.internal.neuraltrust.ai') }}
+      ALLURE_UI_URL: ${{ vars.ALLURE_PUBLIC_URL || 'https://allure.internal.neuraltrust.ai' }}
       E2E_RUN_ENABLED: ${{ inputs.e2e_run_enabled }}
       REGISTRY: europe-west1-docker.pkg.dev
       REPOSITORY: nt-docker
