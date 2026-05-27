@@ -315,6 +315,7 @@ jobs:
           ALLURE_PASS: ${{ secrets.ALLURE_PASS }}
         run: |
           docker run --rm \
+            --entrypoint /bin/bash \
             -v "$(pwd)/allure-results:/app/allure-results" \
             -e ALLURE_URL="${ALLURE_URL}" \
             -e ALLURE_USER="${ALLURE_USER}" \
@@ -322,7 +323,7 @@ jobs:
             -e ALLURE_PROJECT="${ALLURE_PROJECT}" \
             -e SERVICE="${SERVICE}" \
             "${{ steps.image.outputs.ref }}" \
-            bash scripts/send-allure.sh || echo "::warning::Allure upload failed (server may not be deployed yet)"
+            scripts/send-allure.sh
 
       - name: Upload Playwright HTML report
         if: always() && steps.run_tests.outcome != 'skipped'
