@@ -315,6 +315,7 @@ jobs:
           ALLURE_PASS: ${{ secrets.ALLURE_PASS }}
         run: |
           docker run --rm \
+            --network host \
             --entrypoint /bin/bash \
             -v "$(pwd)/allure-results:/app/allure-results" \
             -e ALLURE_URL="${ALLURE_URL}" \
