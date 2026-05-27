@@ -294,6 +294,7 @@ jobs:
           echo "SERVICE=${SERVICE}" >> "${ENV_FILE}"
 
           docker run --rm \
+            --network host \
             --env-file "${ENV_FILE}" \
             -e "GREP=${GREP}" \
             -v "$(pwd)/allure-results:/app/allure-results" \
@@ -317,6 +318,7 @@ jobs:
           docker run --rm \
             --network host \
             --entrypoint /bin/bash \
+            -v /etc/ssl/certs:/etc/ssl/certs:ro \
             -v "$(pwd)/allure-results:/app/allure-results" \
             -e ALLURE_URL="${ALLURE_URL}" \
             -e ALLURE_USER="${ALLURE_USER}" \
