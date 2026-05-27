@@ -234,6 +234,31 @@ jobs:
             *) echo "Target not reachable at ${BASE}/ (HTTP ${code})"; exit 1 ;;
           esac
 
+      - name: Verify Allure server reachable
+        # Pre-flight check for the Allure host on the runner (where Twingate is
+        # active). Fails fast with a clear message before we pull the image and
+        # run tests, so we don't burn ~25 min only to lose results at upload.
+        if: env.IS_ARC_RUNNER != 'true'
+        run: |
+          set -euo pipefail
+          ALLURE_BASE="${ALLURE_URL%/}"
+          ALLURE_HOST=$(printf '%s' "${ALLURE_BASE}" | sed -E 's#^[a-z]+://##' | cut -d/ -f1 | cut -d: -f1)
+          echo "Resolving ${ALLURE_HOST}..."
+          if ! getent hosts "${ALLURE_HOST}" >/dev/null; then
+            echo "::error::Could not resolve ${ALLURE_HOST} on the runner."
+            echo "::error::This usually means the Twingate service account is missing access to the Allure resource."
+            echo "::error::Confirm the resource '${ALLURE_HOST}' is in the Twingate Service used by TWINGATE_SERVICE_KEY."
+            exit 1
+          fi
+          code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 30 "${ALLURE_BASE}/allure-docker-service/version" || echo "000")
+          case "$code" in
+            200|301|302|401|403) echo "Allure reachable (HTTP ${code})" ;;
+            *)
+              echo "::warning::Allure pre-flight returned HTTP ${code} for ${ALLURE_BASE}/allure-docker-service/version."
+              echo "::warning::If the upload step also fails with a TLS handshake error, the e2e-tests Twingate service likely doesn't have access to ${ALLURE_HOST}."
+              ;;
+          esac
+
       - name: Pull e2e-tests image
         id: image
         run: |
@@ -293,8 +318,14 @@ jobs:
           echo "UI_BASE_URL=${UI_BASE_URL}" >> "${ENV_FILE}"
           echo "SERVICE=${SERVICE}" >> "${ENV_FILE}"
 
+          # /etc/resolv.conf is mounted so the container uses the host's
+          # systemd-resolved (reachable on 127.0.0.53 thanks to --network host),
+          # which picks up Twingate's split-DNS entries. Without this, Docker
+          # injects 8.8.8.8 and purely internal hostnames (e.g. *.internal.*)
+          # don't resolve.
           docker run --rm \
             --network host \
+            -v /etc/resolv.conf:/etc/resolv.conf:ro \
             --env-file "${ENV_FILE}" \
             -e "GREP=${GREP}" \
             -v "$(pwd)/allure-results:/app/allure-results" \
@@ -315,8 +346,11 @@ jobs:
           ALLURE_USER: ${{ secrets.ALLURE_USER }}
           ALLURE_PASS: ${{ secrets.ALLURE_PASS }}
         run: |
+          # /etc/resolv.conf mount: same rationale as the test step — required
+          # to resolve allure.internal.* via Twingate's split-DNS.
           docker run --rm \
             --network host \
+            -v /etc/resolv.conf:/etc/resolv.conf:ro \
             --entrypoint /bin/bash \
             -v /etc/ssl/certs:/etc/ssl/certs:ro \
             -v "$(pwd)/allure-results:/app/allure-results" \
@@ -325,6 +359,7 @@ jobs:
             -e ALLURE_PASS="${ALLURE_PASS}" \
             -e ALLURE_PROJECT="${ALLURE_PROJECT}" \
             -e SERVICE="${SERVICE}" \
+            -e ALLURE_DEBUG="${ALLURE_DEBUG:-}" \
             "${{ steps.image.outputs.ref }}" \
             scripts/send-allure.sh
 
