@@ -83,6 +83,11 @@ on:
         required: false
         type: string
         default: ''
+      uv_sync_args:
+        description: 'Arguments passed to `uv sync` for Python projects (default installs all extras and groups)'
+        required: false
+        type: string
+        default: '--frozen --all-extras --all-groups'
 
       # ======================================================================
       # Linting
@@ -318,7 +323,7 @@ jobs:
         env:
           UV_INDEX_INTERNAL_USERNAME: ${{ steps.auth.outputs.access_token && 'oauth2accesstoken' || '' }}
           UV_INDEX_INTERNAL_PASSWORD: ${{ steps.auth.outputs.access_token }}
-        run: uv sync --frozen --all-extras --all-groups
+        run: uv sync ${{ inputs.uv_sync_args }}
 
       - name: Run Python lint (default)
         if: inputs.language == 'python' && inputs.lint_command == ''
@@ -599,7 +604,7 @@ jobs:
         env:
           UV_INDEX_INTERNAL_USERNAME: ${{ steps.auth.outputs.access_token && 'oauth2accesstoken' || '' }}
           UV_INDEX_INTERNAL_PASSWORD: ${{ steps.auth.outputs.access_token }}
-        run: uv sync --frozen --all-extras --all-groups
+        run: uv sync ${{ inputs.uv_sync_args }}
 
       # ---- Node ----
       - name: Set up Node
