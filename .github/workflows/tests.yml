@@ -318,14 +318,14 @@ jobs:
         env:
           UV_INDEX_INTERNAL_USERNAME: ${{ steps.auth.outputs.access_token && 'oauth2accesstoken' || '' }}
           UV_INDEX_INTERNAL_PASSWORD: ${{ steps.auth.outputs.access_token }}
-        run: uv pip install --system ".[dev]"
+        run: uv sync --frozen --all-extras --all-groups
 
       - name: Run Python lint (default)
         if: inputs.language == 'python' && inputs.lint_command == ''
         working-directory: ${{ inputs.working_directory }}
         run: |
-          ruff check .
-          ty check .
+          uv run ruff check .
+          uv run ty check .
 
       # ---- Node ----
       - name: Set up Node
@@ -599,7 +599,7 @@ jobs:
         env:
           UV_INDEX_INTERNAL_USERNAME: ${{ steps.auth.outputs.access_token && 'oauth2accesstoken' || '' }}
           UV_INDEX_INTERNAL_PASSWORD: ${{ steps.auth.outputs.access_token }}
-        run: uv pip install --system ".[dev]"
+        run: uv sync --frozen --all-extras --all-groups
 
       # ---- Node ----
       - name: Set up Node
@@ -666,7 +666,7 @@ jobs:
       - name: Run Python tests (default)
         if: inputs.language == 'python' && inputs.test_command == ''
         working-directory: ${{ inputs.working_directory }}
-        run: pytest -v --cov --cov-report=xml:coverage.xml
+        run: uv run pytest -v --cov --cov-report=xml:coverage.xml
 
       - name: Run Node tests (default)
         if: inputs.language == 'node' && inputs.test_command == ''
