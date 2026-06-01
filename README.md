@@ -605,6 +605,7 @@ jobs:
 | `coverage_file` | No | `coverage.txt` | Coverage file path |
 | `working_directory` | No | `.` | Working directory for all commands |
 | `setup_commands` | No | — | Commands to run before tests (e.g., install deps, copy env files) |
+| `uv_sync_args` | No | `--frozen --all-extras --all-groups` | Arguments for `uv sync` (Python only). Override when extras conflict, e.g. `--frozen --extra cpu --extra dev` |
 | `go_private_modules` | No | `false` | Enable private Go module access for `github.com/NeuralTrust/*` |
 | `kreuzberg_enabled` | No | `false` | Install Kreuzberg FFI + Tesseract OCR before tests (Go CGO builds) |
 | `kreuzberg_version` | No | `v4.1.0` | Kreuzberg FFI release version (only when `kreuzberg_enabled: true`) |
