@@ -1,0 +1,78 @@
+---
+description: Guardrails and best practices for authoring NeuralTrust's shared reusable workflows and composite actions
+globs: .github/workflows/**,.github/actions/**
+alwaysApply: false
+---
+
+# Reusable workflows & composite actions — guardrails
+
+This repo is a "CI of CIs": ~35 repos consume these reusable workflows via
+`NeuralTrust/workflows/.github/workflows/<x>.yml@main`. A mistake here breaks
+pipelines org-wide. Before merging, run `actionlint` and `zizmor` locally and
+let `Workflows CI` (actionlint + `reusable-hygiene` + zizmor) pass.
+
+## 1. Reference composite actions by full repo ref — never `./`
+
+A reusable workflow runs in the **caller's** checkout, so `./.github/actions/...`
+resolves against the consumer repo and fails with "Can't find action.yml".
+
+```yaml
+# ❌ BAD — breaks every consumer (this caused a real TrustScan outage)
+- uses: ./.github/actions/docker-build-push
+# ✅ GOOD
+- uses: NeuralTrust/workflows/.github/actions/docker-build-push@main
+```
+
+The IDE warning "Unable to resolve action ...@main" for a not-yet-pushed action
+is a **false positive** — do NOT "fix" it by switching to `./`. The
+`reusable-hygiene` job in `workflows-ci.yml` blocks this regression.
+
+## 2. No shell injection
+
+Never interpolate `${{ inputs.* }}`, `${{ github.* }}`, or any untrusted value
+directly into a `run:` block. Pass via `env:` and reference the quoted var.
+
+```yaml
+# ❌ BAD
+run: echo "Deploying ${{ inputs.image_tag }}"
+# ✅ GOOD
+env:
+  IMAGE_TAG: ${{ inputs.image_tag }}
+run: echo "Deploying \"$IMAGE_TAG\""
+```
+
+For multi-line / untrusted step output use a random heredoc delimiter, never
+`name=${VALUE}`, to prevent `GITHUB_OUTPUT` poisoning.
+
+## 3. Pin third-party actions to release tags
+
+Pin to `@vN` (or exact version), never `@master`/`@latest`/`:latest`.
+Dependabot (`.github/dependabot.yml`) bumps them weekly. `.github/zizmor.yml`
+sets `unpinned-uses: ref-pin` so tag pins aren't flagged.
+
+## 4. Declare least-privilege permissions
+
+Each reusable job declares the `permissions` it needs; the **caller** must grant
+the ceiling (a reusable workflow cannot exceed the caller's token):
+
+| Feature | Permission (caller + reusable job) |
+|---|---|
+| Trivy/DAST SARIF → Security tab | `security-events: write` |
+| GCP WIF / OIDC | `id-token: write` |
+| Push kustomization/changelog | `contents: write` |
+
+`image-scan.yml` intentionally omits `security-events: write` (nested-reusable
+limitation); consumers opt in per-job (see `aiapi/ci.yml`).
+
+## 5. Reliability defaults
+
+- Add `concurrency:` (group per ref, `cancel-in-progress: false` for deploy/release) and `timeout-minutes:` to every job.
+- Commit/push via the `git-commit-push` composite action (rebase + retry), never raw `git push`.
+- Don't rely on **matrix job outputs** (GitHub collapses them) — do per-item work inside the matrix job.
+
+## 6. Changing the consumer contract
+
+- New `inputs:` must be **optional with sensible defaults** (backward compatible).
+- **Before deleting/renaming a reusable workflow**, grep consumers and update them:
+  `grep -rl 'workflows/<name>.yml' ../*/.github/workflows`. A dangling
+  `uses:` reference fails the consumer with "invalid workflow reference".
