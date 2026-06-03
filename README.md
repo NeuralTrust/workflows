@@ -700,6 +700,22 @@ jobs:
       njsscan_enabled: true
 ```
 
+### Required caller permissions
+
+`sast.yml` uploads Trivy results to the **Security tab** via `codeql-action/upload-sarif`. On **private** repos that needs both `security-events: write` **and** `actions: read` (the action reads the workflow-run status through the Actions API; without `actions: read` it fails with `Resource not accessible by integration`). A reusable workflow can't exceed the caller's token, so grant both in the caller:
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+  actions: read          # ← required for SARIF upload on private repos
+jobs:
+  security:
+    uses: NeuralTrust/workflows/.github/workflows/sast.yml@main
+```
+
+The SARIF upload itself is `continue-on-error`, so a missing `actions: read` won't fail CI — it just means findings won't reach the Security tab. The blocking gate is the Trivy table scan (`trivy_exit_code`), which is independent of SARIF upload.
+
 ### Inputs
 
 | Input | Default | Description |
