@@ -1,0 +1,50 @@
+# ==============================================================================
+# Consumer Smoke Test
+# ==============================================================================
+# Actually *calls* a reusable workflow end-to-end, the way a consumer repo does,
+# so that "works when read locally, breaks when invoked" regressions (bad inputs,
+# missing steps, a job that won't even start) are caught here instead of in a
+# downstream repo's pipeline.
+#
+# We exercise sast.yml because it needs no cloud credentials: it checks out this
+# repo and runs Trivy in config mode over the repo's own YAML/Dockerfiles.
+#
+# NOTE on action-path resolution: a same-repo call still runs in THIS repo's
+# checkout, so it cannot reproduce the cross-repo "./.github/actions/..." failure
+# on its own — the `reusable-hygiene` job in workflows-ci.yml is the dedicated
+# guard for that specific class. This smoke test covers everything else: that the
+# reusable workflow is invocable and runs to completion.
+# ==============================================================================
+
+name: Consumer Smoke Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/sast.yml"
+      - ".github/workflows/consumer-smoke.yml"
+  pull_request:
+    paths:
+      - ".github/workflows/sast.yml"
+      - ".github/workflows/consumer-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: consumer-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  call-sast:
+    name: Invoke sast.yml as a consumer
+    permissions:
+      contents: read
+      security-events: write  # exercise the Trivy SARIF upload path too
+    uses: ./.github/workflows/sast.yml
+    with:
+      scan_type: config
+      trivy_scanners: config,secret
+      trivy_exit_code: "1"

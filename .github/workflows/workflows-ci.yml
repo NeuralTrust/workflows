@@ -8,6 +8,9 @@
 #
 #   - actionlint: syntax, shellcheck on run: blocks, expression/type checks
 #                 (BLOCKING — a broken workflow must never reach main)
+#   - hygiene:    reusable-workflow rules that lints can't express — most
+#                 importantly, reusable workflows must reference composite
+#                 actions by full repo ref, never by local ./ path (BLOCKING).
 #   - zizmor:     GitHub Actions security static analysis. Results are uploaded
 #                 to the Security tab (SARIF) as INFORMATIONAL, matching this
 #                 repo's SAST posture (Trivy blocks, others surface as warnings).
@@ -60,6 +63,38 @@ jobs:
           docker run --rm \
             -v "${PWD}:/repo" --workdir /repo \
             rhysd/actionlint:1.7.12 -color
+
+  reusable-hygiene:
+    name: reusable-workflow hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # A reusable workflow runs in the CALLER's checkout, so `uses: ./...`
+      # resolves against the consumer repo, not this one. Composite actions
+      # must therefore be referenced by full repo ref. This is the exact bug
+      # that broke consumer deploys; catch it before it reaches main.
+      - name: Reusable workflows must not reference local action paths
+        run: |
+          set -euo pipefail
+          bad=0
+          for f in .github/workflows/*.yml .github/workflows/*.yaml; do
+            [ -e "$f" ] || continue
+            if grep -q 'workflow_call:' "$f" && grep -nE 'uses:[[:space:]]*\./\.github/actions/' "$f"; then
+              echo "::error file=${f}::Reusable workflow references a local action path (./.github/actions/...). Use NeuralTrust/workflows/.github/actions/<name>@main — local paths resolve against the caller repo and break consumers."
+              bad=1
+            fi
+          done
+          if [ "$bad" -eq 0 ]; then
+            echo "OK: no reusable workflow references local action paths."
+          fi
+          exit "$bad"
 
   zizmor:
     name: zizmor (Actions security)
