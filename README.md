@@ -411,6 +411,15 @@ jobs:
 | `bump_type` | The bump type (`major`, `minor`, `patch`) |
 | `previous_version` | The previous version tag |
 
+### Release notes
+
+The workflow creates a minimal GitHub Release body:
+
+- **What changed** — bump type and AI reason
+- **Commits** — list since the previous tag
+
+It does **not** append installation instructions, container image tables, or an AI semver footer. Repos that need those (e.g. `neuraltrust-platform`) extend the release in a follow-up workflow (`publish-chart.yml` appends **Container images** and **Installation**).
+
 ### Loop Guard
 
 The bump-guard skips this workflow when the head commit message starts with:
