@@ -188,6 +188,11 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      # codeql-action/upload-sarif reads the workflow-run status via the Actions
+      # API; on PRIVATE repos that requires actions:read, else upload fails with
+      # "Resource not accessible by integration". Reusable-workflow permissions are
+      # capped by the caller, so callers must also grant actions:read (see README).
+      actions: read
 
     steps:
       - name: Checkout code
@@ -237,6 +242,10 @@ jobs:
           trivyignores: ${{ steps.trivyignore.outputs.path }}
 
       - name: Upload Trivy SARIF to GitHub Security
+        # Informational (Security tab). The blocking gate is the table scan above,
+        # so a SARIF-upload hiccup (e.g. a consumer that hasn't granted actions:read)
+        # must not fail the PR.
+        continue-on-error: true
         if: always() && hashFiles('trivy-sast.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
@@ -469,7 +478,7 @@ jobs:
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/src" \
-            opensecurity/njsscan:v0.4.3 \
+            opensecurity/njsscan:0.4.3 \
             --exit-warning ${{ inputs.njsscan_args != '.' && inputs.njsscan_args || '/src' }}
 
       - name: Summary

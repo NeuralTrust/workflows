@@ -57,9 +57,15 @@ the ceiling (a reusable workflow cannot exceed the caller's token):
 
 | Feature | Permission (caller + reusable job) |
 |---|---|
-| Trivy/DAST SARIF → Security tab | `security-events: write` |
+| Trivy/DAST SARIF → Security tab | `security-events: write` **+ `actions: read`** (private repos) |
 | GCP WIF / OIDC | `id-token: write` |
 | Push kustomization/changelog | `contents: write` |
+
+`codeql-action/upload-sarif` reads the workflow-run status via the Actions API, so
+on **private** repos it needs `actions: read` in addition to `security-events: write`
+— omitting it fails with `Resource not accessible by integration`. Keep SARIF-upload
+steps `continue-on-error` so the (informational) Security-tab push never blocks the
+PR; the blocking gate is the scan's exit code, not the upload.
 
 `image-scan.yml` intentionally omits `security-events: write` (nested-reusable
 limitation); consumers opt in per-job (see `aiapi/ci.yml`).
