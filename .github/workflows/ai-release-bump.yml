@@ -423,7 +423,8 @@ jobs:
             TARGET_SHA="${{ github.sha }}"
           fi
 
-          # Build release notes
+          # Build release notes. Consuming repos (e.g. neuraltrust-platform
+          # publish-chart.yml) append Container images + Installation after this.
           cat > release_notes.md << EOF
           ## What changed
 
@@ -432,9 +433,6 @@ jobs:
           ### Commits
 
           $(cat commits.txt)
-
-          ---
-          *Version determined automatically by AI using [semver](https://semver.org/).*
           EOF
 
           if [ -n "$PREVIOUS" ]; then
