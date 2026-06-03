@@ -323,8 +323,13 @@ jobs:
           echo "Scan target: ${REF}"
 
       - name: Run Trivy image scan
-        uses: aquasecurity/trivy-action@v0.33.1
+        # SHA-pinned to the only post-incident-safe release (Mar 2026 supply-chain
+        # compromise, CVE-2026-33634): tags 0.0.1–0.34.2 were force-pushed to
+        # malicious commits. Pin trivy itself to a release whose artifacts still
+        # exist — the action's old default (v0.65.0) was deleted and now 404s.
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
+          version: 'v0.71.0'
           scan-type: image
           image-ref: ${{ steps.scan_target.outputs.ref }}
           scanners: vuln
