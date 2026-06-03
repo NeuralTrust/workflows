@@ -1,0 +1,76 @@
+name: Git Commit and Push
+description: Commit selected paths and push with rebase/retry handling.
+
+inputs:
+  branch:
+    description: Branch to push to.
+    required: true
+  message:
+    description: Commit message.
+    required: true
+  paths:
+    description: Newline-separated list of paths to add.
+    required: true
+
+outputs:
+  pushed:
+    description: Whether a commit was pushed.
+    value: ${{ steps.push.outputs.pushed }}
+  sha:
+    description: SHA of the pushed commit, when a commit was created.
+    value: ${{ steps.push.outputs.sha }}
+
+runs:
+  using: composite
+  steps:
+    - name: Commit and push changes
+      id: push
+      shell: bash
+      env:
+        TARGET_BRANCH: ${{ inputs.branch }}
+        COMMIT_MESSAGE: ${{ inputs.message }}
+        PATHS: ${{ inputs.paths }}
+      run: |
+        set -euo pipefail
+
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        # Rebase before staging so generated updates apply to the newest branch tip.
+        git pull --rebase --autostash origin "$TARGET_BRANCH"
+
+        while IFS= read -r path; do
+          [ -z "$path" ] && continue
+          if [ -e "$path" ]; then
+            git add "$path"
+          else
+            echo "::warning::Path not found, skipping: $path"
+          fi
+        done <<< "$PATHS"
+
+        if git diff --staged --quiet; then
+          echo "No changes to commit."
+          echo "pushed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        git commit -m "$COMMIT_MESSAGE"
+        for attempt in 1 2 3; do
+          new_sha="$(git rev-parse HEAD)"
+          if git push origin "HEAD:${TARGET_BRANCH}"; then
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+            echo "sha=${new_sha}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "::warning::Push failed (attempt ${attempt}); rebasing and retrying."
+          git pull --rebase --autostash origin "$TARGET_BRANCH" || {
+            git rebase --abort || true
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+          }
+          sleep $((attempt * 3))
+        done
+
+        exit 1

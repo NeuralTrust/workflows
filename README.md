@@ -12,7 +12,7 @@ Every repo follows the same standardized pipeline:
 └──────────────┘     └────────────────────────────────────────────────────────────────┘
 
 ┌──────────────┐     ┌──────────────────────────────────────────────────────────────┐
-│ PR → main    │────▶│ ci.yml → AI Review + Tests + SAST + Gosec + Auto-Approve     │
+│ PR → main    │────▶│ ci.yml → Tests + SAST/security + metadata validation         │
 └──────────────┘     └──────────────────────────────────────────────────────────────┘
 
 ┌──────────────┐     ┌──────────────────────────────────────────────────┐
@@ -38,7 +38,7 @@ Every repo follows the same standardized pipeline:
 | File | Trigger | What it does |
 |------|---------|-------------|
 | `deploy.yml` | Push to `develop` | Build with COMMIT_SHA → deploy to dev |
-| `ci.yml` | PR to `main` | AI code review + Tests + SAST/security + auto-approve |
+| `ci.yml` | PR to `main` | Tests + SAST/security + PR metadata validation |
 | `auto-release.yml` | Push to `main` | AI determines semver bump → creates GitHub Release |
 | `release.yml` | GitHub Release published | Smart release (promote or rebuild) → deploy to prod |
 
@@ -84,8 +84,6 @@ Every repo follows the same standardized pipeline:
 | [`dast.yml`](#dast) | OWASP ZAP scan of running app (APIs/frontend); JWT or login-based auth |
 | [`seo-check.yml`](#seo-static-audit) | Static Next.js SEO audit (metadata, sitemap/robots presence); job summary |
 | [`seo-live-url.yml`](#seo-live-url) | Live site: homepage / `robots.txt` / sitemap content audit + Lighthouse SEO |
-| [`ai-code-review.yml`](#ai-code-review) | AI-powered PR code review with inline comments |
-| [`auto-approve.yml`](#auto-approve) | Auto-approve PR when all CI checks pass |
 | [`ai-release-bump.yml`](#ai-release-bump) | AI-powered semver classification + GitHub Release creation (also promotes `## [Unreleased]` in CHANGELOG) |
 | [`openspec-changelog.yml`](#openspec-changelog-feed) | Append openspec proposal summaries to `## [Unreleased]` in CHANGELOG on PR merge |
 
@@ -610,6 +608,7 @@ jobs:
 | `test_command` | No | *(auto)* | Custom test command (overrides language default) |
 | `lint_enabled` | No | `true` | Enable linting |
 | `lint_command` | No | *(auto)* | Custom lint command (overrides language default) |
+| `ty_enabled` | No | `false` | Run Astral `ty check` during default Python linting (preview type checker) |
 | `coverage_enabled` | No | `false` | Generate coverage report in job summary |
 | `coverage_file` | No | `coverage.txt` | Coverage file path |
 | `working_directory` | No | `.` | Working directory for all commands |
@@ -708,7 +707,7 @@ jobs:
 | `trivy_severity` | `CRITICAL,HIGH` | Severity levels to scan |
 | `trivy_exit_code` | `1` | Exit code on findings (`1`=fail, `0`=warn) |
 | `scan_type` | `fs` | Trivy scan type (`fs`, `config`, `repo`) |
-| `gitleaks_enabled` | `true` | Enable secret detection |
+| `gitleaks_enabled` | `false` | Enable informational secret detection across full git history |
 | `gosec_enabled` | `false` | Enable Go SAST |
 | `gosec_args` | `./...` | Gosec arguments |
 | `bandit_enabled` | `false` | Enable Python SAST |
@@ -913,7 +912,7 @@ Python library repos follow a slightly different pattern from Docker-based servi
 └──────────────┘     └──────────────────────────────────────────────────────┘
 
 ┌──────────────┐     ┌──────────────────────────────────────────────────────┐
-│ PR → main    │────▶│ ci.yml → AI Review + Lint + SAST + Auto-Approve      │
+│ PR → main    │────▶│ ci.yml → Lint + SAST/security + metadata validation   │
 └──────────────┘     └──────────────────────────────────────────────────────┘
 
 ┌──────────────┐     ┌──────────────────────────────────────────┐
@@ -943,35 +942,6 @@ Python library repos follow a slightly different pattern from Docker-based servi
 |--------|----------|-------------|
 | `WIF_PROVIDER` | Yes | GCP Workload Identity Federation provider |
 | `WIF_SERVICE_ACCOUNT` | Yes | GCP service account email |
-
----
-
-## AI Code Review
-
-**`ai-code-review.yml`** — Reviews PR diffs using OpenAI, posts inline comments.
-
-```yaml
-jobs:
-  review:
-    uses: NeuralTrust/workflows/.github/workflows/ai-code-review.yml@main
-    secrets:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      GH_TOKEN: ${{ secrets.GH_TOKEN }}
-```
-
----
-
-## Auto Approve
-
-**`auto-approve.yml`** — Waits for all CI checks to pass, then auto-approves the PR.
-
-```yaml
-jobs:
-  approve:
-    uses: NeuralTrust/workflows/.github/workflows/auto-approve.yml@main
-    secrets:
-      GH_TOKEN: ${{ secrets.GH_TOKEN }}
-```
 
 ---
 
@@ -1103,6 +1073,11 @@ with:
 | `allure_project` | No | `service` | Allure `project_id` |
 | `e2e_run_enabled` | No | `true` | Run tests (`false` = list only) |
 | `version_wait_minutes` | No | `20` | Health gate timeout in minutes |
+| `dev_gcp_project_id` | No | inferred | Dev GCP project ID for the `develop` e2e-tests image channel (falls back to parsing the dev service account email) |
+| `prod_gcp_project_id` | No | inferred | Prod GCP project ID for the `prod` e2e-tests image channel (falls back to parsing the prod service account email) |
+| `allure_public_url` | No | `https://allure.internal.neuraltrust.ai` | Public Allure URL shown in summaries and used by public runners |
+| `allure_internal_url` | No | `http://allure-api.allure.svc.cluster.local:5050` | Internal Allure URL used by ARC runners |
+| `e2e_vars_json` | No | `{}` | JSON map of non-secret `E2E_*` variables (login paths, team selectors, workspace names, etc.) |
 
 ### Secrets
 
@@ -1119,7 +1094,7 @@ with:
 | `E2E_SECRETS_JSON` | No | JSON map of `E2E_*` env vars (overrides individual secrets) |
 | `E2E_USER`, `E2E_PASSWORD`, etc. | No | Individual E2E credentials when not using `E2E_SECRETS_JSON` |
 
-Org/repo variables used: `ALLURE_PUBLIC_URL`, `ALLURE_INTERNAL_URL`, and service-specific `E2E_*` vars (login paths, team selectors, etc.).
+Pass non-secret service-specific E2E settings via `e2e_vars_json`; pass credentials through `E2E_SECRETS_JSON` or the individual E2E secrets.
 
 ---
 
@@ -1206,7 +1181,34 @@ All repos include a `dependabot.yml` that creates automated PRs for dependency u
 | `docker` | Weekly (Monday) | Updates base image versions |
 | `gomod` / `pip` / `npm` | Weekly (Monday) | Groups minor+patch updates, ignores major |
 
-PRs target the `develop` branch only. Since all changes must be tested before promotion to `main`, dependency updates follow the same flow: merged into `develop` → tested → promoted via PR to `main`. Dependabot PRs trigger the standard CI pipeline (AI review + tests + SAST + auto-approve), so safe updates are merged automatically.
+PRs target the `develop` branch only. Since all changes must be tested before promotion to `main`, dependency updates follow the same flow: merged into `develop` → tested → promoted via PR to `main`. Dependabot PRs trigger the standard CI pipeline (tests + SAST/security + metadata validation), so safe updates follow the same review path as other changes.
+
+---
+
+## Repository Self-Protection ("CI of CIs")
+
+Because every repo in the org consumes these reusable workflows and composite
+actions, a mistake here breaks pipelines org-wide. This repo therefore guards
+its own Actions surface:
+
+| Feature | File | What it does |
+|---------|------|--------------|
+| **Dependabot** | [`.github/dependabot.yml`](.github/dependabot.yml) | Weekly `github-actions` updates across `.github/workflows/**` and `.github/actions/**`. Minor/patch grouped into one PR. |
+| **Workflows CI** | [`.github/workflows/workflows-ci.yml`](.github/workflows/workflows-ci.yml) | Runs on any change to `.github/**`. **actionlint** (blocking) catches broken syntax/shell; **zizmor** (informational) audits for Actions security issues and uploads SARIF to the Security tab. |
+| **OpenSSF Scorecard** | [`.github/workflows/scorecard.yml`](.github/workflows/scorecard.yml) | Scheduled supply-chain posture check (branch protection, token scopes, pinned deps, dangerous patterns) → Security tab. |
+| **CODEOWNERS** | [`.github/CODEOWNERS`](.github/CODEOWNERS) | Requires owner review for changes under `.github/` when branch protection enforces it. |
+| **zizmor policy** | [`.github/zizmor.yml`](.github/zizmor.yml) | Accepts release-tag (`ref-pin`) pins so intentional `@vN` pins maintained by Dependabot are not flagged as `unpinned-uses`. |
+
+**zizmor posture:** matching the SAST workflow (`Trivy` blocks, other scanners
+are informational), zizmor is non-blocking for now and surfaces findings in the
+Security tab. There is a backlog of `template-injection` findings in the legacy
+deploy workflows (`${{ inputs.* }}` / `${{ github.ref_name }}` interpolated
+directly into `run:` blocks); once those are moved to `env:` vars, flip the
+zizmor step to blocking by adding a `uvx zizmor --min-severity high .` gate.
+
+**To enable the gates fully** (recommended), turn on branch protection for
+`main` with: require PR review, require "Workflows CI" status check, and require
+review from Code Owners.
 
 ---
 
@@ -1248,8 +1250,8 @@ Prerequisites: `gcloud`, `gh`, and `jq` must be installed and authenticated.
 | `DEV_WIF_SERVICE_ACCOUNT` | GCP SA email (dev project) | Identity for dev deployments. Format: `<SA_NAME>@<PROJECT_ID>.iam.gserviceaccount.com` |
 | `PROD_WIF_PROVIDER` | GCP WIF provider path (prod project) | Authenticates prod releases to GCP. Same format as above |
 | `PROD_WIF_SERVICE_ACCOUNT` | GCP SA email (prod project) | Identity for prod releases. Same format as above |
-| `GH_TOKEN` | GitHub **PAT** with `contents: write` + `pull_requests: write` | Single PAT for all GitHub operations: creating releases, pushing kustomization commits, AI code review comments, PR approvals, and private Go module access. Must be a PAT (not `GITHUB_TOKEN`) so release events can trigger downstream workflows |
-| `OPENAI_API_KEY` | OpenAI API key | Powers AI code review and AI semver bump |
+| `GH_TOKEN` | GitHub **PAT** with `contents: write` | Single PAT for creating releases, pushing kustomization/changelog commits, and private Go module access. Must be a PAT (not `GITHUB_TOKEN`) so release events can trigger downstream workflows |
+| `OPENAI_API_KEY` | OpenAI API key | Powers AI semver bump |
 | `SLACK_WEBHOOK_URL` | Slack Incoming Webhook URL *(optional)* | Deploy/release/smoke-test notifications. Can be overridden per-repo with a repo-level secret for different Slack channels |
 
 > **Note:** Callers explicitly reference the correct org secret by name — `deploy.yml` uses `DEV_*` secrets, `release.yml` uses `PROD_*` secrets. The reusable workflows accept generic `WIF_PROVIDER` / `WIF_SERVICE_ACCOUNT` inputs and are unchanged.
@@ -1292,4 +1294,9 @@ gcloud artifacts repositories add-iam-policy-binding nt-docker \
 
 | Action | Description |
 |--------|-------------|
+| [`docker-build-push`](.github/actions/docker-build-push/action.yml) | Build and push a Docker image (buildx) with shared tag/cache/secrets handling. Shared by all build/release workflows. |
+| [`kustomize-set-images`](.github/actions/kustomize-set-images/action.yml) | Update image names/tags in `kustomization.yaml` via `kustomize edit set image` (pinned binary) instead of fragile `sed`. |
+| [`git-commit-push`](.github/actions/git-commit-push/action.yml) | Commit selected paths and push with `pull --rebase` + retry to avoid overlay-update races. Outputs the pushed commit SHA. |
+| [`free-disk-space`](.github/actions/free-disk-space/action.yml) | Free runner disk space for large Docker builds. |
+| [`setup-crane`](.github/actions/setup-crane/action.yml) | Install a pinned `crane` binary for image promotion (`crane copy`). |
 | [`setup-kreuzberg`](.github/actions/setup-kreuzberg/action.yml) | Install Kreuzberg FFI + Tesseract OCR for Go CGO builds. Used by `tests.yml` when `kreuzberg_enabled: true`. |

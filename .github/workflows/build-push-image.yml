@@ -105,10 +105,11 @@ jobs:
   build-push:
     name: Build & Push ${{ inputs.image_name }}
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
 
     outputs:
-      image_ref: ${{ steps.meta.outputs.image_ref }}
-      image_tag: ${{ steps.meta.outputs.image_tag }}
+      image_ref: ${{ steps.build.outputs.image_ref }}
+      image_tag: ${{ steps.build.outputs.image_tag }}
 
     permissions:
       contents: read
@@ -118,52 +119,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
-      - name: Compute image metadata
-        id: meta
-        run: |
-          IMAGE_BASE="${{ inputs.registry }}/${{ inputs.gcp_project_id }}/${{ inputs.repository }}/${{ inputs.image_name }}"
-          SHA="${{ github.sha }}"
-          P="${{ inputs.tag_prefix }}"
-          S="${{ inputs.tag_suffix }}"
-
-          IMAGE_TAG="${P}${SHA}${S}"
-          echo "image_base=${IMAGE_BASE}" >> "$GITHUB_OUTPUT"
-          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
-          echo "image_ref=${IMAGE_BASE}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
-          echo "cache_ref=${IMAGE_BASE}:${P}cache${S}" >> "$GITHUB_OUTPUT"
-          echo "latest_ref=${IMAGE_BASE}:${P}latest${S}" >> "$GITHUB_OUTPUT"
-
-          # Build comma-separated tags list
-          TAGS="${IMAGE_BASE}:${IMAGE_TAG}"
-          TAGS="${TAGS},${IMAGE_BASE}:${P}latest${S}"
-          TAGS="${TAGS},${IMAGE_BASE}:${P}cache${S}"
-
-          # Add semver tag if this is a tag push
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            TAG_NAME="${{ github.ref_name }}"
-            SEMVER_TAG="${P}${TAG_NAME}${S}"
-            TAGS="${TAGS},${IMAGE_BASE}:${SEMVER_TAG}"
-            echo "has_semver=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_semver=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          EXTRA="${{ inputs.extra_tags }}"
-          if [ -n "$EXTRA" ]; then
-            IFS=',' read -ra EXTRA_TAGS <<< "$EXTRA"
-            for raw in "${EXTRA_TAGS[@]}"; do
-              tag="$(echo "$raw" | xargs)"
-              if [ -n "$tag" ]; then
-                TAGS="${TAGS},${IMAGE_BASE}:${P}${tag}${S}"
-              fi
-            done
-          fi
-
-          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Authenticate to Google Cloud
         id: auth
         uses: google-github-actions/auth@v3
@@ -172,80 +127,33 @@ jobs:
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
           token_format: access_token
 
-      - name: Login to Artifact Registry
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ inputs.registry }}
-          username: oauth2accesstoken
-          password: ${{ steps.auth.outputs.access_token }}
-
-      - name: Prepare build args
-        id: build-args
-        run: |
-          # Compute APP_VERSION: tag name (for tag pushes) or commit SHA
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            APP_VERSION="${{ github.ref_name }}"
-          else
-            APP_VERSION="${{ github.sha }}"
-          fi
-
-          # Start with APP_VERSION
-          ARGS="APP_VERSION=${APP_VERSION}"
-
-          # Append user-provided build args
-          if [ -n "$INPUT_ARGS" ]; then
-            ARGS="${ARGS}"$'\n'"${INPUT_ARGS}"
-          fi
-
-          # Append secret build args
-          if [ -n "$SECRET_ARGS" ]; then
-            ARGS="${ARGS}"$'\n'"${SECRET_ARGS}"
-          fi
-
-          # Use EOF delimiter for multiline output
-          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-          echo "args<<${EOF}" >> "$GITHUB_OUTPUT"
-          echo "${ARGS}" >> "$GITHUB_OUTPUT"
-          echo "${EOF}" >> "$GITHUB_OUTPUT"
-        env:
-          INPUT_ARGS: ${{ inputs.build_args }}
-          SECRET_ARGS: ${{ secrets.BUILD_SECRETS }}
-
-      - name: Prepare Docker secrets
-        id: docker-secrets
-        run: |
-          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-          echo "value<<${EOF}" >> "$GITHUB_OUTPUT"
-          echo "GCP_ACCESS_TOKEN=${{ steps.auth.outputs.access_token }}" >> "$GITHUB_OUTPUT"
-          if [ -n "$DOCKER_SECRETS" ]; then
-            echo "$DOCKER_SECRETS" >> "$GITHUB_OUTPUT"
-          fi
-          echo "${EOF}" >> "$GITHUB_OUTPUT"
-        env:
-          DOCKER_SECRETS: ${{ secrets.DOCKER_SECRETS }}
-
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+        id: build
+        uses: ./.github/actions/docker-build-push
         with:
+          image_name: ${{ inputs.image_name }}
+          gcp_project_id: ${{ inputs.gcp_project_id }}
+          registry: ${{ inputs.registry }}
+          repository: ${{ inputs.repository }}
+          dockerfile: ${{ inputs.dockerfile }}
           context: ${{ inputs.context }}
-          file: ${{ inputs.context }}/${{ inputs.dockerfile }}
-          target: ${{ inputs.build_target || '' }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          build-args: ${{ steps.build-args.outputs.args }}
-          cache-from: |
-            type=registry,ref=${{ steps.meta.outputs.cache_ref }}
-            type=registry,ref=${{ steps.meta.outputs.latest_ref }}
-          secrets: ${{ steps.docker-secrets.outputs.value }}
-          cache-to: type=inline
-          provenance: false
+          build_target: ${{ inputs.build_target }}
+          build_args: ${{ inputs.build_args }}
+          build_secrets: ${{ secrets.BUILD_SECRETS }}
+          docker_secrets: ${{ secrets.DOCKER_SECRETS }}
+          access_token: ${{ steps.auth.outputs.access_token }}
+          app_version: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+          tag_prefix: ${{ inputs.tag_prefix }}
+          tag_suffix: ${{ inputs.tag_suffix }}
+          extra_tags: ${{ inputs.extra_tags }}
+          include_git_tag: 'true'
 
       - name: Summary
         run: |
           echo "## Docker Image Built & Pushed" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Image:** \`${{ steps.meta.outputs.image_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Latest:** \`${{ steps.meta.outputs.latest_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
-          if [[ "${{ steps.meta.outputs.has_semver }}" == "true" ]]; then
+          echo "- **Image:** \`${{ steps.build.outputs.image_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Latest:** \`${{ steps.build.outputs.latest_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${{ steps.build.outputs.has_git_tag }}" == "true" ]]; then
             echo "- **Semver:** \`${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"
           fi

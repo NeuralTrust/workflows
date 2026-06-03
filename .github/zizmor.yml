@@ -1,0 +1,17 @@
+# ==============================================================================
+# zizmor configuration — https://docs.zizmor.sh/configuration/
+# ==============================================================================
+# zizmor statically audits this repo's own workflows/actions for GitHub Actions
+# security issues (template injection, credential leakage, excessive
+# permissions, impostor refs, etc.).
+#
+# This repo deliberately pins third-party actions to release tags (e.g. @v5)
+# and relies on Dependabot to keep them current, rather than full commit-SHA
+# pins. Tell zizmor that tag/branch ("ref") pins satisfy the unpinned-uses
+# audit so it does not flag every intentional tag pin as a finding.
+# ==============================================================================
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "*": ref-pin

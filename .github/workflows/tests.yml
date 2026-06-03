@@ -102,6 +102,11 @@ on:
         required: false
         type: string
         default: ''
+      ty_enabled:
+        description: 'Run Astral ty in the default Python lint command (preview type checker)'
+        required: false
+        type: boolean
+        default: false
 
       # ======================================================================
       # Coverage
@@ -232,6 +237,7 @@ jobs:
   lint:
     name: Lint (${{ inputs.language }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: inputs.lint_enabled
     permissions:
       contents: read
@@ -289,11 +295,11 @@ jobs:
 
       - name: Run Go lint (default)
         if: inputs.language == 'go' && inputs.lint_command == ''
-        working-directory: ${{ inputs.working_directory }}
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.9.0
-          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
-          golangci-lint run --timeout=10m ./...
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.9.0
+          working-directory: ${{ inputs.working_directory }}
+          args: --timeout=10m ./...
 
       # ---- Python ----
       - name: Set up Python
@@ -331,12 +337,14 @@ jobs:
         run: |
           uv run ruff check .
           uv run ruff format --check .
-          uv run ty check .
+          if [ "${{ inputs.ty_enabled }}" = "true" ]; then
+            uv run ty check .
+          fi
 
       # ---- Node ----
       - name: Set up Node
         if: inputs.language == 'node'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ inputs.language_version }}
           cache: 'npm'
@@ -397,6 +405,7 @@ jobs:
   test:
     name: Test (${{ inputs.language }})
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     if: inputs.test_enabled
     permissions:
       contents: read
@@ -610,7 +619,7 @@ jobs:
       # ---- Node ----
       - name: Set up Node
         if: inputs.language == 'node'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ inputs.language_version }}
           cache: 'npm'

@@ -1,0 +1,196 @@
+name: Docker Build and Push
+description: Build and push a Docker image to Artifact Registry with shared NeuralTrust tagging.
+
+inputs:
+  image_name:
+    description: Docker image name in the registry.
+    required: true
+  gcp_project_id:
+    description: GCP project ID that owns the Artifact Registry.
+    required: true
+  registry:
+    description: Artifact Registry host.
+    required: false
+    default: europe-west1-docker.pkg.dev
+  repository:
+    description: Artifact Registry repository name.
+    required: false
+    default: nt-docker
+  dockerfile:
+    description: Path to Dockerfile relative to context.
+    required: false
+    default: Dockerfile
+  context:
+    description: Docker build context path.
+    required: false
+    default: .
+  build_target:
+    description: Docker build target for multi-stage builds.
+    required: false
+    default: ''
+  build_args:
+    description: Newline-separated non-secret build args.
+    required: false
+    default: ''
+  build_secrets:
+    description: Newline-separated secret build args.
+    required: false
+    default: ''
+  docker_secrets:
+    description: Newline-separated Docker build secrets.
+    required: false
+    default: ''
+  access_token:
+    description: GCP access token for Artifact Registry login and Docker build secrets.
+    required: true
+  app_version:
+    description: APP_VERSION build arg value.
+    required: true
+  primary_tag:
+    description: Primary Docker tag before optional prefix/suffix. Defaults to the commit SHA.
+    required: false
+    default: ''
+  tag_prefix:
+    description: Prefix for all image tags.
+    required: false
+    default: ''
+  tag_suffix:
+    description: Suffix for all image tags.
+    required: false
+    default: ''
+  extra_tags:
+    description: Comma-separated extra tags to push.
+    required: false
+    default: ''
+  include_git_tag:
+    description: Also tag with the git ref name when running on a tag ref.
+    required: false
+    default: 'false'
+
+outputs:
+  image_base:
+    description: Base image reference without tag.
+    value: ${{ steps.meta.outputs.image_base }}
+  image_ref:
+    description: Full image reference with primary tag.
+    value: ${{ steps.meta.outputs.image_ref }}
+  image_tag:
+    description: Primary image tag.
+    value: ${{ steps.meta.outputs.image_tag }}
+  cache_ref:
+    description: Cache image reference.
+    value: ${{ steps.meta.outputs.cache_ref }}
+  latest_ref:
+    description: Latest image reference.
+    value: ${{ steps.meta.outputs.latest_ref }}
+  tags:
+    description: Comma-separated Docker tags passed to buildx.
+    value: ${{ steps.meta.outputs.tags }}
+  has_git_tag:
+    description: Whether a git ref tag was added.
+    value: ${{ steps.meta.outputs.has_git_tag }}
+
+runs:
+  using: composite
+  steps:
+    - name: Compute image metadata
+      id: meta
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        GCP_PROJECT_ID: ${{ inputs.gcp_project_id }}
+        REPOSITORY: ${{ inputs.repository }}
+        IMAGE_NAME: ${{ inputs.image_name }}
+        PRIMARY_TAG: ${{ inputs.primary_tag }}
+        TAG_PREFIX: ${{ inputs.tag_prefix }}
+        TAG_SUFFIX: ${{ inputs.tag_suffix }}
+        EXTRA_TAGS: ${{ inputs.extra_tags }}
+        INCLUDE_GIT_TAG: ${{ inputs.include_git_tag }}
+      run: |
+        set -euo pipefail
+
+        image_base="${REGISTRY}/${GCP_PROJECT_ID}/${REPOSITORY}/${IMAGE_NAME}"
+        primary="${PRIMARY_TAG:-$GITHUB_SHA}"
+        image_tag="${TAG_PREFIX}${primary}${TAG_SUFFIX}"
+        cache_ref="${image_base}:${TAG_PREFIX}cache${TAG_SUFFIX}"
+        latest_ref="${image_base}:${TAG_PREFIX}latest${TAG_SUFFIX}"
+
+        tags="${image_base}:${image_tag},${latest_ref},${cache_ref}"
+        has_git_tag=false
+
+        if [ "$INCLUDE_GIT_TAG" = "true" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+          git_tag="${TAG_PREFIX}${GITHUB_REF_NAME}${TAG_SUFFIX}"
+          tags="${tags},${image_base}:${git_tag}"
+          has_git_tag=true
+        fi
+
+        if [ -n "$EXTRA_TAGS" ]; then
+          IFS=',' read -ra extra <<< "$EXTRA_TAGS"
+          for raw in "${extra[@]}"; do
+            tag="$(printf '%s' "$raw" | xargs)"
+            if [ -n "$tag" ]; then
+              tags="${tags},${image_base}:${TAG_PREFIX}${tag}${TAG_SUFFIX}"
+            fi
+          done
+        fi
+
+        echo "image_base=${image_base}" >> "$GITHUB_OUTPUT"
+        echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
+        echo "image_ref=${image_base}:${image_tag}" >> "$GITHUB_OUTPUT"
+        echo "cache_ref=${cache_ref}" >> "$GITHUB_OUTPUT"
+        echo "latest_ref=${latest_ref}" >> "$GITHUB_OUTPUT"
+        echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+        echo "has_git_tag=${has_git_tag}" >> "$GITHUB_OUTPUT"
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
+
+    - name: Login to Artifact Registry
+      uses: docker/login-action@v4
+      with:
+        registry: ${{ inputs.registry }}
+        username: oauth2accesstoken
+        password: ${{ inputs.access_token }}
+
+    - name: Prepare build args
+      id: build-args
+      shell: bash
+      env:
+        APP_VERSION: ${{ inputs.app_version }}
+        INPUT_ARGS: ${{ inputs.build_args }}
+        SECRET_ARGS: ${{ inputs.build_secrets }}
+      run: |
+        set -euo pipefail
+
+        args="APP_VERSION=${APP_VERSION}"
+
+        if [ -n "$INPUT_ARGS" ]; then
+          args="${args}"$'\n'"${INPUT_ARGS}"
+        fi
+
+        if [ -n "$SECRET_ARGS" ]; then
+          args="${args}"$'\n'"${SECRET_ARGS}"
+        fi
+
+        eof="$(dd if=/dev/urandom bs=15 count=1 status=none | base64)"
+        echo "args<<${eof}" >> "$GITHUB_OUTPUT"
+        echo "${args}" >> "$GITHUB_OUTPUT"
+        echo "${eof}" >> "$GITHUB_OUTPUT"
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v6
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.context }}/${{ inputs.dockerfile }}
+        target: ${{ inputs.build_target }}
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        build-args: ${{ steps.build-args.outputs.args }}
+        cache-from: |
+          type=registry,ref=${{ steps.meta.outputs.cache_ref }}
+          type=registry,ref=${{ steps.meta.outputs.latest_ref }}
+        secrets: |
+          GCP_ACCESS_TOKEN=${{ inputs.access_token }}
+          ${{ inputs.docker_secrets }}
+        cache-to: type=inline
+        provenance: false

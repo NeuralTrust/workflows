@@ -1,0 +1,60 @@
+# ==============================================================================
+# OpenSSF Scorecard — supply-chain posture for this CI repo
+# ==============================================================================
+# Scorecard audits repo-level security hygiene that lints can't see: branch
+# protection, token permissions, pinned dependencies, dangerous workflow
+# patterns, code review enforcement, and more. Results land in the Security
+# tab so regressions are visible over time.
+#
+# NOTES:
+#   - `publish_results` is disabled by default so this is safe on private /
+#     internal repos. If this repo is (or becomes) PUBLIC, set it to true to
+#     publish to the OpenSSF API and enable a Scorecard badge.
+#   - SARIF upload to the Security tab requires GitHub code scanning
+#     (GitHub Advanced Security on private repos).
+# ==============================================================================
+
+name: OpenSSF Scorecard
+
+on:
+  branch_protection_rule:
+  schedule:
+    - cron: "27 6 * * 1"  # Mondays 06:27 UTC
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: read-all
+
+concurrency:
+  group: scorecard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      security-events: write  # upload SARIF to the Security tab
+      id-token: write         # required only when publish_results is true
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@v2.4.3
+        with:
+          results_file: scorecard.sarif
+          results_format: sarif
+          publish_results: false
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: scorecard.sarif
+          category: scorecard

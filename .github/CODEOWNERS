@@ -1,0 +1,17 @@
+# ==============================================================================
+# CODEOWNERS — required review for the shared CI surface
+# ==============================================================================
+# A change to anything under .github/ ripples out to every repo that consumes
+# these reusable workflows, so those paths require explicit owner review.
+# Enforced only when the matching branch protection rule has
+# "Require review from Code Owners" enabled.
+#
+# Owned by the @NeuralTrust/platform team. Members of that team are managed in
+# GitHub org settings, so this file does not need editing when people join/leave.
+# ==============================================================================
+
+# Reusable workflows and composite actions — the security-critical surface.
+/.github/workflows/   @NeuralTrust/platform
+/.github/actions/     @NeuralTrust/platform
+/.github/dependabot.yml   @NeuralTrust/platform
+/.github/CODEOWNERS       @NeuralTrust/platform

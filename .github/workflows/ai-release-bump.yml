@@ -94,10 +94,15 @@ on:
         description: 'The previous version tag'
         value: ${{ jobs.bump.outputs.previous_version }}
 
+concurrency:
+  group: auto-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   bump:
     name: AI Semver Bump
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     outputs:
       new_version: ${{ steps.version.outputs.new_version }}
@@ -193,7 +198,17 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          COMMITS_CONTENT=$(cat commits.txt | jq -Rs .)
+          write_output() {
+            local name="$1"
+            local value="$2"
+            local eof
+            eof=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+            {
+              echo "${name}<<${eof}"
+              printf '%s\n' "$value"
+              echo "${eof}"
+            } >> "$GITHUB_OUTPUT"
+          }
 
           cat > request.json << 'REQEOF'
           {
@@ -237,7 +252,7 @@ jobs:
             ERROR=$(echo "$RESPONSE" | jq -r '.error.message')
             echo "::warning::OpenAI API error: $ERROR — defaulting to ${{ inputs.default_bump }}"
             echo "bump_type=${{ inputs.default_bump }}" >> "$GITHUB_OUTPUT"
-            echo "reason=OpenAI API error, defaulting to ${{ inputs.default_bump }}" >> "$GITHUB_OUTPUT"
+            write_output "reason" "OpenAI API error, defaulting to ${{ inputs.default_bump }}"
             exit 0
           fi
 
@@ -247,7 +262,7 @@ jobs:
           if ! echo "$AI_RESPONSE" | jq empty 2>/dev/null; then
             echo "::warning::Invalid AI response — defaulting to ${{ inputs.default_bump }}"
             echo "bump_type=${{ inputs.default_bump }}" >> "$GITHUB_OUTPUT"
-            echo "reason=Invalid AI response, defaulting to ${{ inputs.default_bump }}" >> "$GITHUB_OUTPUT"
+            write_output "reason" "Invalid AI response, defaulting to ${{ inputs.default_bump }}"
             exit 0
           fi
 
@@ -264,9 +279,10 @@ jobs:
               ;;
           esac
 
-          echo "AI classification: $BUMP_TYPE — $REASON"
+          LOG_REASON=$(printf '%s' "$REASON" | sed 's/^::/: :/')
+          echo "AI classification: $BUMP_TYPE — $LOG_REASON"
           echo "bump_type=${BUMP_TYPE}" >> "$GITHUB_OUTPUT"
-          echo "reason=${REASON}" >> "$GITHUB_OUTPUT"
+          write_output "reason" "$REASON"
 
       - name: Compute new version
         id: version
@@ -389,36 +405,25 @@ jobs:
       - name: Commit and push version files
         id: commit-version
         if: steps.bump-guard.outputs.skip != 'true' && steps.commits.outputs.has_commits == 'true' && inputs.dry_run == false
-        run: |
-          if git diff --quiet; then
-            echo "No tracked file changes (version files + changelog); skipping commit."
-            echo "pushed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "chore: bump version to ${{ steps.version.outputs.new_version }}"
-          git push
-
-          NEW_SHA=$(git rev-parse HEAD)
-          echo "sha=${NEW_SHA}" >> "$GITHUB_OUTPUT"
-          echo "pushed=true" >> "$GITHUB_OUTPUT"
-          echo "Committed version update: ${NEW_SHA}"
+        uses: ./.github/actions/git-commit-push
+        with:
+          branch: ${{ github.ref_name }}
+          message: "chore: bump version to ${{ steps.version.outputs.new_version }}"
+          paths: |
+            .
 
       - name: Create GitHub Release
         if: steps.bump-guard.outputs.skip != 'true' && steps.commits.outputs.has_commits == 'true' && inputs.dry_run == false
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          VERSION: ${{ steps.version.outputs.new_version }}
+          BUMP: ${{ steps.ai.outputs.bump_type }}
+          REASON: ${{ steps.ai.outputs.reason }}
+          PREVIOUS: ${{ steps.latest-tag.outputs.tag }}
+          VERSION_COMMIT_SHA: ${{ steps.commit-version.outputs.sha }}
         run: |
-          VERSION="${{ steps.version.outputs.new_version }}"
-          BUMP="${{ steps.ai.outputs.bump_type }}"
-          REASON="${{ steps.ai.outputs.reason }}"
-          PREVIOUS="${{ steps.latest-tag.outputs.tag }}"
-
           # Use the version-commit SHA if we pushed one, otherwise the original SHA
-          TARGET_SHA="${{ steps.commit-version.outputs.sha }}"
+          TARGET_SHA="${VERSION_COMMIT_SHA}"
           if [ -z "$TARGET_SHA" ] || [ "$TARGET_SHA" = "" ]; then
             TARGET_SHA="${{ github.sha }}"
           fi
