@@ -1,0 +1,97 @@
+# ==============================================================================
+# Workflows CI — the "CI of CIs"
+# ==============================================================================
+# Every other NeuralTrust repo consumes the reusable workflows and composite
+# actions in this repo, so a mistake here breaks pipelines org-wide. This
+# workflow lints and security-audits this repo's own Actions surface on every
+# change to .github/.
+#
+#   - actionlint: syntax, shellcheck on run: blocks, expression/type checks
+#                 (BLOCKING — a broken workflow must never reach main)
+#   - zizmor:     GitHub Actions security static analysis. Results are uploaded
+#                 to the Security tab (SARIF) as INFORMATIONAL, matching this
+#                 repo's SAST posture (Trivy blocks, others surface as warnings).
+#                 The unpinned-uses audit is relaxed to "ref-pin" via
+#                 .github/zizmor.yml since the repo pins to release tags and
+#                 lets Dependabot bump them. Flip the gate step below to blocking
+#                 once the pre-existing template-injection findings are cleared.
+# ==============================================================================
+
+name: Workflows CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - ".github/actions/**"
+      - ".github/zizmor.yml"
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".github/actions/**"
+      - ".github/zizmor.yml"
+  workflow_dispatch:
+
+# Least privilege by default; jobs opt into more where required.
+permissions:
+  contents: read
+
+concurrency:
+  group: workflows-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Run actionlint
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "${PWD}:/repo" --workdir /repo \
+            rhysd/actionlint:1.7.12 -color
+
+  zizmor:
+    name: zizmor (Actions security)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write  # upload SARIF to the Security tab
+      actions: read           # read workflow run metadata (private repos)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      # Informational: never fails the job, but every finding lands in the
+      # Security tab via the SARIF upload below.
+      - name: Run zizmor (SARIF, informational)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          uvx zizmor@1.25.2 \
+            --config .github/zizmor.yml \
+            --format sarif --output zizmor.sarif .
+
+      - name: Upload zizmor SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor

@@ -1,0 +1,80 @@
+name: Kustomize Set Images
+description: Update image names and tags in a kustomization overlay.
+
+inputs:
+  overlay_dir:
+    description: Directory containing kustomization.yaml.
+    required: true
+  images:
+    description: JSON array of image configs.
+    required: true
+  image_tag:
+    description: Default image tag to apply.
+    required: true
+  registry:
+    description: Docker registry host.
+    required: true
+  gcp_project_id:
+    description: GCP project ID.
+    required: true
+  repository:
+    description: Artifact Registry repository name.
+    required: true
+  kustomize_version:
+    description: Kustomize release version.
+    required: false
+    default: v5.6.0
+
+runs:
+  using: composite
+  steps:
+    - name: Install kustomize
+      shell: bash
+      env:
+        KUSTOMIZE_VERSION: ${{ inputs.kustomize_version }}
+      run: |
+        set -euo pipefail
+        tmp_dir="$(mktemp -d)"
+        trap 'rm -rf "$tmp_dir"' EXIT
+        curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+          -o "${tmp_dir}/kustomize.tar.gz"
+        tar -xzf "${tmp_dir}/kustomize.tar.gz" -C "${tmp_dir}" kustomize
+        chmod +x "${tmp_dir}/kustomize"
+        sudo mv "${tmp_dir}/kustomize" /usr/local/bin/kustomize
+        kustomize version
+
+    - name: Update kustomization images
+      shell: bash
+      env:
+        OVERLAY_DIR: ${{ inputs.overlay_dir }}
+        IMAGES_JSON: ${{ inputs.images }}
+        IMAGE_TAG: ${{ inputs.image_tag }}
+        REGISTRY: ${{ inputs.registry }}
+        GCP_PROJECT_ID: ${{ inputs.gcp_project_id }}
+        REPOSITORY: ${{ inputs.repository }}
+      run: |
+        set -euo pipefail
+
+        kustomization_file="${OVERLAY_DIR}/kustomization.yaml"
+        if [ ! -f "$kustomization_file" ]; then
+          echo "::warning::${kustomization_file} not found. Skipping kustomization update."
+          exit 0
+        fi
+
+        echo "$IMAGES_JSON" | jq -e 'type == "array"' > /dev/null
+
+        pushd "$OVERLAY_DIR" > /dev/null
+        echo "$IMAGES_JSON" | jq -c '.[]' | while IFS= read -r img; do
+          kustomize_name="$(echo "$img" | jq -r '.kustomize_name')"
+          image_name="$(echo "$img" | jq -r '.image_name')"
+          tag_override="$(echo "$img" | jq -r '.tag_override // empty')"
+          effective_tag="${tag_override:-$IMAGE_TAG}"
+          new_name="${REGISTRY}/${GCP_PROJECT_ID}/${REPOSITORY}/${image_name}"
+
+          echo "Updating ${kustomize_name} -> ${new_name}:${effective_tag}"
+          kustomize edit set image "${kustomize_name}=${new_name}:${effective_tag}"
+        done
+        popd > /dev/null
+
+        echo "Updated ${kustomization_file}:"
+        sed -n '1,220p' "$kustomization_file"

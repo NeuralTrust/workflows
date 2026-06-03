@@ -1,0 +1,33 @@
+# ==============================================================================
+# Dependabot — supply-chain maintenance for this CI repo
+# ==============================================================================
+# This repo is a "CI of CIs": every other NeuralTrust repo consumes these
+# reusable workflows and composite actions. Keeping the third-party actions
+# referenced here current (and getting alerted to advisories) protects the
+# entire org's pipeline supply chain.
+#
+# Scope: github-actions across the whole repo ("/") covers both
+# .github/workflows/*.yml and the composite actions under .github/actions/*.
+# ==============================================================================
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Madrid
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: chore
+      include: scope
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      # Batch low-risk updates into a single PR to reduce review churn.
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch

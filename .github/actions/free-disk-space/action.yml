@@ -1,0 +1,18 @@
+name: Free Disk Space
+description: Free runner disk space for large Docker builds.
+
+runs:
+  using: composite
+  steps:
+    - name: Free disk space
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "==> Disk before cleanup:"
+        df -h /
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost \
+          /usr/share/swift /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/graalvm \
+          /usr/local/share/chromium /usr/local/lib/node_modules
+        sudo docker image prune --all --force || true
+        echo "==> Disk after cleanup:"
+        df -h /

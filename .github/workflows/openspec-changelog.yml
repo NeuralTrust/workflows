@@ -75,6 +75,7 @@ jobs:
   feed:
     name: Feed CHANGELOG from openspec proposals
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     permissions:
       contents: write
@@ -311,18 +312,12 @@ jobs:
 
       - name: Commit and push CHANGELOG update
         if: steps.update.outputs.changed == 'true'
-        env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          COMMIT_PREFIX: ${{ inputs.commit_message_prefix }}
-        run: |
-          if git diff --quiet --cached; then
-            echo "No staged changes; nothing to commit."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -m "${COMMIT_PREFIX} add entry for #${PR_NUMBER}"
-          git push
+        uses: ./.github/actions/git-commit-push
+        with:
+          branch: main
+          message: ${{ inputs.commit_message_prefix }} add entry for #${{ github.event.pull_request.number }}
+          paths: |
+            ${{ inputs.changelog_path }}
 
       - name: Summary
         if: always()

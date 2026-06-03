@@ -97,6 +97,10 @@ on:
         required: false
         description: 'Newline-separated Docker build secrets (e.g. for mount-type secrets in Dockerfile)'
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # ============================================================================
   # Job 0: Detect strategy (runs once, shared by matrix)
@@ -104,6 +108,7 @@ jobs:
   detect:
     name: Detect release strategy
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     outputs:
       strategy: ${{ steps.strategy.outputs.final }}
@@ -184,19 +189,12 @@ jobs:
     name: Release ${{ matrix.image.name }} (${{ github.ref_name }})
     needs: detect
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
 
     strategy:
       matrix:
         image: ${{ fromJson(inputs.images) }}
       fail-fast: false
-
-    outputs:
-      release_tag: ${{ steps.meta.outputs.release_tag }}
-      prod_image_base: ${{ steps.meta.outputs.prod_image_base }}
-      prod_image_ref: ${{ steps.meta.outputs.prod_image_ref }}
-      strategy: ${{ steps.strategy.outputs.final }}
-      source_ref: ${{ steps.strategy.outputs.source_ref }}
-      scan_target: ${{ steps.scan_target.outputs.ref }}
 
     permissions:
       contents: read
@@ -205,15 +203,7 @@ jobs:
     steps:
       - name: Free disk space
         if: inputs.free_disk_space && needs.detect.outputs.strategy == 'rebuild'
-        run: |
-          echo "==> Disk before cleanup:"
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost \
-            /usr/share/swift /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/graalvm \
-            /usr/local/share/chromium /usr/local/lib/node_modules
-          sudo docker image prune --all --force || true
-          echo "==> Disk after cleanup:"
-          df -h /
+        uses: ./.github/actions/free-disk-space
 
       - name: Checkout code
         uses: actions/checkout@v5
@@ -250,15 +240,13 @@ jobs:
           token_format: access_token
 
       - name: Install crane
-        run: |
-          curl -sL "https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz" \
-            | tar -xzf - crane
-          chmod +x crane
-          sudo mv crane /usr/local/bin/
+        uses: ./.github/actions/setup-crane
 
       - name: Login to Artifact Registry (crane)
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
         run: |
-          echo "${{ steps.auth.outputs.access_token }}" | \
+          echo "$ACCESS_TOKEN" | \
             crane auth login ${{ inputs.registry }} -u oauth2accesstoken --password-stdin
 
       - name: Resolve per-image strategy
@@ -293,71 +281,26 @@ jobs:
           fi
 
       # ---- REBUILD PATH ----
-      - name: Set up Docker Buildx
-        if: steps.strategy.outputs.final == 'rebuild'
-        uses: docker/setup-buildx-action@v4
-
-      - name: Login to Artifact Registry (Docker)
-        if: steps.strategy.outputs.final == 'rebuild'
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ inputs.registry }}
-          username: oauth2accesstoken
-          password: ${{ steps.auth.outputs.access_token }}
-
-      - name: Prepare build args
-        if: steps.strategy.outputs.final == 'rebuild'
-        id: build-args
-        run: |
-          APP_VERSION="${{ github.ref_name }}"
-          ARGS="APP_VERSION=${APP_VERSION}"
-
-          if [ -n "$IMAGE_ARGS" ]; then
-            ARGS="${ARGS}"$'\n'"${IMAGE_ARGS}"
-          fi
-
-          if [ -n "$SECRET_ARGS" ]; then
-            ARGS="${ARGS}"$'\n'"${SECRET_ARGS}"
-          fi
-
-          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-          echo "args<<${EOF}" >> "$GITHUB_OUTPUT"
-          echo "${ARGS}" >> "$GITHUB_OUTPUT"
-          echo "${EOF}" >> "$GITHUB_OUTPUT"
-        env:
-          IMAGE_ARGS: ${{ matrix.image.build_args }}
-          SECRET_ARGS: ${{ secrets.BUILD_SECRETS }}
-
-      - name: Prepare Docker secrets
-        if: steps.strategy.outputs.final == 'rebuild'
-        id: docker-secrets
-        run: |
-          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-          echo "value<<${EOF}" >> "$GITHUB_OUTPUT"
-          echo "GCP_ACCESS_TOKEN=${{ steps.auth.outputs.access_token }}" >> "$GITHUB_OUTPUT"
-          if [ -n "$DOCKER_SECRETS" ]; then
-            echo "$DOCKER_SECRETS" >> "$GITHUB_OUTPUT"
-          fi
-          echo "${EOF}" >> "$GITHUB_OUTPUT"
-        env:
-          DOCKER_SECRETS: ${{ secrets.DOCKER_SECRETS }}
-
       - name: Build and push Docker image
         if: steps.strategy.outputs.final == 'rebuild'
-        uses: docker/build-push-action@v6
+        uses: ./.github/actions/docker-build-push
         with:
+          image_name: ${{ matrix.image.name }}
+          gcp_project_id: ${{ inputs.gcp_project_id }}
+          registry: ${{ inputs.registry }}
+          repository: ${{ inputs.repository }}
           context: ${{ matrix.image.context || '.' }}
-          file: ${{ matrix.image.context || '.' }}/${{ matrix.image.dockerfile || 'Dockerfile' }}
-          target: ${{ matrix.image.target || '' }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          build-args: ${{ steps.build-args.outputs.args }}
-          cache-from: |
-            type=registry,ref=${{ steps.meta.outputs.prod_cache_ref }}
-            type=registry,ref=${{ steps.meta.outputs.prod_latest_ref }}
-          secrets: ${{ steps.docker-secrets.outputs.value }}
-          cache-to: type=inline
-          provenance: false
+          dockerfile: ${{ matrix.image.dockerfile || 'Dockerfile' }}
+          build_target: ${{ matrix.image.target || '' }}
+          build_args: ${{ matrix.image.build_args }}
+          build_secrets: ${{ secrets.BUILD_SECRETS }}
+          docker_secrets: ${{ secrets.DOCKER_SECRETS }}
+          access_token: ${{ steps.auth.outputs.access_token }}
+          app_version: ${{ github.ref_name }}
+          primary_tag: ${{ github.ref_name }}
+          tag_prefix: ${{ matrix.image.tag_prefix }}
+          tag_suffix: ${{ matrix.image.tag_suffix }}
+          extra_tags: ${{ github.sha }}
 
       - name: Rebuild summary
         if: steps.strategy.outputs.final == 'rebuild'
@@ -379,6 +322,44 @@ jobs:
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
           echo "Scan target: ${REF}"
 
+      - name: Run Trivy image scan
+        uses: aquasecurity/trivy-action@v0.33.1
+        with:
+          scan-type: image
+          image-ref: ${{ steps.scan_target.outputs.ref }}
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: os,library
+
+      - name: Promote image (dev → prod)
+        if: steps.strategy.outputs.final == 'promote'
+        env:
+          SOURCE: ${{ steps.strategy.outputs.source_ref }}
+          PROD_BASE: ${{ steps.meta.outputs.prod_image_base }}
+          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
+          TAG_PREFIX: ${{ matrix.image.tag_prefix }}
+          TAG_SUFFIX: ${{ matrix.image.tag_suffix }}
+          SHA: ${{ github.sha }}
+        run: |
+          echo "============================================"
+          echo "  PROMOTE: dev → prod (post-scan)"
+          echo "============================================"
+          echo "  Source:  ${SOURCE}"
+          echo "  Dest:    ${PROD_BASE}:${RELEASE_TAG}"
+          echo "============================================"
+
+          crane copy "${SOURCE}" "${PROD_BASE}:${RELEASE_TAG}"
+          crane copy "${SOURCE}" "${PROD_BASE}:${TAG_PREFIX}${SHA}${TAG_SUFFIX}"
+          crane copy "${SOURCE}" "${PROD_BASE}:${TAG_PREFIX}latest${TAG_SUFFIX}"
+          crane copy "${SOURCE}" "${PROD_BASE}:${TAG_PREFIX}cache${TAG_SUFFIX}"
+
+          echo "## Image Promoted" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Source:** \`${SOURCE}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Destination:** \`${PROD_BASE}:${RELEASE_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+
       # ---- Summary ----
       - name: Job summary
         if: always()
@@ -389,103 +370,16 @@ jobs:
           echo "- **Scan target:** \`${{ steps.scan_target.outputs.ref }}\`" >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
-  # Job 2: Image Vulnerability Scan (BLOCK on CRITICAL/HIGH fixable CVEs)
-  # ============================================================================
-  scan:
-    name: Image Scan (${{ matrix.image.name }})
-    needs: release
-    strategy:
-      matrix:
-        image: ${{ fromJson(inputs.images) }}
-      fail-fast: false
-    uses: ./.github/workflows/image-scan.yml
-    permissions:
-      contents: read
-      id-token: write
-    with:
-      image_ref: ${{ needs.release.outputs.scan_target }}
-      exit_code: '1'
-      upload_sarif: false
-    secrets:
-      WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
-      WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-
-  # ============================================================================
-  # Job 3: Promote copy — crane copy dev → prod (promote strategy only)
-  # ============================================================================
-  promote-copy:
-    name: Promote ${{ matrix.image.name }} (dev → prod)
-    needs: [release, scan]
-    if: needs.release.outputs.strategy == 'promote'
-    runs-on: ${{ inputs.runner }}
-
-    strategy:
-      matrix:
-        image: ${{ fromJson(inputs.images) }}
-      fail-fast: false
-
-    permissions:
-      contents: read
-      id-token: write
-
-    steps:
-      - name: Authenticate to Google Cloud
-        id: auth
-        uses: google-github-actions/auth@v3
-        with:
-          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
-          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-          token_format: access_token
-
-      - name: Install crane
-        run: |
-          curl -sL "https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz" \
-            | tar -xzf - crane
-          chmod +x crane
-          sudo mv crane /usr/local/bin/
-
-      - name: Login to Artifact Registry (crane)
-        run: |
-          echo "${{ steps.auth.outputs.access_token }}" | \
-            crane auth login ${{ inputs.registry }} -u oauth2accesstoken --password-stdin
-
-      - name: Promote image (dev → prod)
-        run: |
-          SOURCE="${{ needs.release.outputs.source_ref }}"
-          PROD_BASE="${{ needs.release.outputs.prod_image_base }}"
-          P="${{ matrix.image.tag_prefix }}"
-          S="${{ matrix.image.tag_suffix }}"
-          SHA="${{ github.sha }}"
-          RELEASE_TAG="${{ needs.release.outputs.release_tag }}"
-
-          echo "============================================"
-          echo "  PROMOTE: dev → prod (post-scan)"
-          echo "============================================"
-          echo "  Source:  ${SOURCE}"
-          echo "  Dest:    ${PROD_BASE}:${RELEASE_TAG}"
-          echo "============================================"
-
-          crane copy "${SOURCE}" "${PROD_BASE}:${RELEASE_TAG}"
-          crane copy "${SOURCE}" "${PROD_BASE}:${P}${SHA}${S}"
-          crane copy "${SOURCE}" "${PROD_BASE}:${P}latest${S}"
-          crane copy "${SOURCE}" "${PROD_BASE}:${P}cache${S}"
-
-          echo "## Image Promoted" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Source:** \`${SOURCE}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Destination:** \`${PROD_BASE}:${RELEASE_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
-
-  # ============================================================================
-  # Job 4: Update Kustomization + config.env
+  # Job 2: Update Kustomization + config.env
   # ============================================================================
   update-kustomization:
     name: Update Kustomization (${{ github.ref_name }})
-    needs: [detect, release, scan, promote-copy]
+    needs: [detect, release]
     if: |
       always() &&
-      needs.release.result == 'success' &&
-      needs.scan.result == 'success' &&
-      (needs.promote-copy.result == 'success' || needs.promote-copy.result == 'skipped')
+      needs.release.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     permissions:
       contents: write
@@ -499,31 +393,14 @@ jobs:
           fetch-depth: 0
 
       - name: Update kustomization.yaml
-        run: |
-          OVERLAY_DIR="${{ inputs.overlay_path }}"
-          KUSTOMIZATION_FILE="${OVERLAY_DIR}/kustomization.yaml"
-
-          if [ ! -f "$KUSTOMIZATION_FILE" ]; then
-            echo "::warning::${KUSTOMIZATION_FILE} not found. Skipping."
-            exit 0
-          fi
-
-          RELEASE_TAG="${{ github.ref_name }}"
-          REGISTRY="${{ inputs.registry }}"
-          PROJECT="${{ inputs.gcp_project_id }}"
-          REPO="${{ inputs.repository }}"
-
-          echo "Updating images in ${KUSTOMIZATION_FILE}:"
-          echo '${{ inputs.kustomize_images }}' | jq -c '.[]' | while IFS= read -r img; do
-            KUSTOMIZE_NAME=$(echo "$img" | jq -r '.kustomize_name')
-            IMAGE_NAME=$(echo "$img" | jq -r '.image_name')
-            NEW_NAME="${REGISTRY}/${PROJECT}/${REPO}/${IMAGE_NAME}"
-
-            echo "  ${KUSTOMIZE_NAME} -> ${NEW_NAME}:${RELEASE_TAG}"
-
-            sed -i "/name: ${KUSTOMIZE_NAME}/,/newTag:/ s|newTag:.*|newTag: ${RELEASE_TAG}|" "$KUSTOMIZATION_FILE"
-            sed -i "/name: ${KUSTOMIZE_NAME}/,/newName:/ s|newName:.*|newName: ${NEW_NAME}|" "$KUSTOMIZATION_FILE"
-          done
+        uses: ./.github/actions/kustomize-set-images
+        with:
+          overlay_dir: ${{ inputs.overlay_path }}
+          images: ${{ inputs.kustomize_images }}
+          image_tag: ${{ github.ref_name }}
+          registry: ${{ inputs.registry }}
+          gcp_project_id: ${{ inputs.gcp_project_id }}
+          repository: ${{ inputs.repository }}
 
       - name: Update APPLICATION_VERSION in config.env
         run: |
@@ -547,31 +424,34 @@ jobs:
             echo "Added APPLICATION_VERSION to ${CONFIG_FILE}"
           fi
 
+      - name: Compute commit message
+        id: commit-message
+        env:
+          PREFIX: ${{ inputs.commit_message_prefix }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          STRATEGY: ${{ needs.detect.outputs.strategy }}
+          OVERLAY_DIR: ${{ inputs.overlay_path }}
+        run: |
+          if [ -n "$PREFIX" ]; then
+            echo "message=${STRATEGY} ${PREFIX} ${RELEASE_TAG} in ${OVERLAY_DIR}" >> "$GITHUB_OUTPUT"
+          else
+            echo "message=${STRATEGY} ${RELEASE_TAG} in ${OVERLAY_DIR}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Commit and push changes
+        uses: ./.github/actions/git-commit-push
+        with:
+          branch: main
+          message: ${{ steps.commit-message.outputs.message }}
+          paths: |
+            ${{ inputs.overlay_path }}/kustomization.yaml
+            ${{ inputs.overlay_path }}/${{ inputs.config_env_file }}
+
+      - name: Release deployment summary
         run: |
           OVERLAY_DIR="${{ inputs.overlay_path }}"
           RELEASE_TAG="${{ github.ref_name }}"
-          PREFIX="${{ inputs.commit_message_prefix }}"
           STRATEGY="${{ needs.detect.outputs.strategy }}"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add "${OVERLAY_DIR}/kustomization.yaml" "${OVERLAY_DIR}/${{ inputs.config_env_file }}"
-
-          if git diff --staged --quiet; then
-            echo "No changes to commit."
-            exit 0
-          fi
-
-          if [ -n "$PREFIX" ]; then
-            COMMIT_MSG="${STRATEGY} ${PREFIX} ${RELEASE_TAG} in ${OVERLAY_DIR}"
-          else
-            COMMIT_MSG="${STRATEGY} ${RELEASE_TAG} in ${OVERLAY_DIR}"
-          fi
-
-          git commit -m "$COMMIT_MSG"
-          git push origin main
 
           echo "## Release Deployed" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Release:** \`${RELEASE_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
@@ -579,13 +459,14 @@ jobs:
           echo "- **Overlay:** \`${OVERLAY_DIR}\`" >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
-  # Job 5: Slack Notification
+  # Job 3: Slack Notification
   # ============================================================================
   notify:
     name: Slack Notification
-    needs: [detect, release, scan, promote-copy, update-kustomization]
+    needs: [detect, release, update-kustomization]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Send Slack notification
@@ -598,14 +479,10 @@ jobs:
           fi
 
           RELEASE_RESULT="${{ needs.release.result }}"
-          SCAN_RESULT="${{ needs.scan.result }}"
-          PROMOTE_COPY_RESULT="${{ needs.promote-copy.result }}"
           KUSTOMIZE_RESULT="${{ needs.update-kustomization.result }}"
           STRATEGY="${{ needs.detect.outputs.strategy }}"
 
           if [ "$RELEASE_RESULT" = "success" ] \
-             && [ "$SCAN_RESULT" = "success" ] \
-             && ([ "$PROMOTE_COPY_RESULT" = "success" ] || [ "$PROMOTE_COPY_RESULT" = "skipped" ]) \
              && ([ "$KUSTOMIZE_RESULT" = "success" ] || [ "$KUSTOMIZE_RESULT" = "skipped" ]); then
             COLOR="#36a64f"
             STATUS="Released"
@@ -616,11 +493,11 @@ jobs:
               EMOJI=":white_check_mark:"
               METHOD="rebuilt (hotfix)"
             fi
-          elif [ "$SCAN_RESULT" = "failure" ]; then
+          elif [ "$RELEASE_RESULT" = "failure" ]; then
             COLOR="#dc3545"
-            STATUS="Blocked by image scan"
+            STATUS="Release failed"
             EMOJI=":no_entry:"
-            METHOD="CRITICAL/HIGH fixable CVEs found — see Security tab"
+            METHOD="Build, scan, or promote failed"
           else
             COLOR="#dc3545"
             STATUS="Failed"

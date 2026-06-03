@@ -118,6 +118,7 @@ jobs:
     name: DAST (ZAP)
     runs-on: ubuntu-latest
     continue-on-error: true
+    timeout-minutes: 45
 
     permissions:
       contents: read
@@ -149,7 +150,10 @@ jobs:
             echo "::error::Failed to extract JWT from login response (path: $JWT_RESPONSE_PATH)"
             exit 1
           fi
-          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "token<<${EOF}" >> "$GITHUB_OUTPUT"
+          echo "$TOKEN" >> "$GITHUB_OUTPUT"
+          echo "${EOF}" >> "$GITHUB_OUTPUT"
 
       - name: Prepare ZAP auth config (JWT)
         id: zap_auth

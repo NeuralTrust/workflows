@@ -130,6 +130,7 @@ jobs:
   scan:
     name: Trivy Image Scan
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 25
 
     permissions:
       contents: read
@@ -173,7 +174,8 @@ jobs:
 
       - name: Run Trivy image scan (table)
         id: trivy_table
-        uses: aquasecurity/trivy-action@master
+        if: ${{ !inputs.upload_sarif }}
+        uses: aquasecurity/trivy-action@v0.33.1
         with:
           scan-type: 'image'
           image-ref: ${{ inputs.image_ref }}
@@ -186,8 +188,8 @@ jobs:
           trivyignores: ${{ steps.trivyignore.outputs.path }}
 
       - name: Run Trivy image scan (SARIF)
-        if: always() && inputs.upload_sarif
-        uses: aquasecurity/trivy-action@master
+        if: inputs.upload_sarif
+        uses: aquasecurity/trivy-action@v0.33.1
         with:
           scan-type: 'image'
           image-ref: ${{ inputs.image_ref }}
@@ -195,7 +197,7 @@ jobs:
           severity: ${{ inputs.severity }}
           format: 'sarif'
           output: 'trivy-image.sarif'
-          exit-code: '0'
+          exit-code: ${{ inputs.exit_code }}
           ignore-unfixed: ${{ inputs.ignore_unfixed }}
           vuln-type: 'os,library'
           trivyignores: ${{ steps.trivyignore.outputs.path }}

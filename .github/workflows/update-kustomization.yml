@@ -83,6 +83,7 @@ jobs:
   update-kustomization:
     name: Update Kustomization
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     # Run on branch pushes (develop/main) or when overlay_path is explicitly set (release workflows)
     if: >-
@@ -117,66 +118,41 @@ jobs:
           fi
 
       - name: Update kustomization.yaml
+        uses: ./.github/actions/kustomize-set-images
+        with:
+          overlay_dir: ${{ steps.overlay.outputs.dir }}
+          images: ${{ inputs.images }}
+          image_tag: ${{ inputs.image_tag }}
+          registry: ${{ inputs.registry }}
+          gcp_project_id: ${{ inputs.gcp_project_id }}
+          repository: ${{ inputs.repository }}
+
+      - name: Compute commit message
+        id: commit-message
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          PREFIX: ${{ inputs.commit_message_prefix }}
+          OVERLAY_DIR: ${{ steps.overlay.outputs.dir }}
         run: |
-          OVERLAY_DIR="${{ steps.overlay.outputs.dir }}"
-          KUSTOMIZATION_FILE="${OVERLAY_DIR}/kustomization.yaml"
-
-          if [ ! -f "$KUSTOMIZATION_FILE" ]; then
-            echo "::warning::${KUSTOMIZATION_FILE} not found. Skipping kustomization update."
-            exit 0
+          SHORT_SHA="${IMAGE_TAG:0:12}"
+          if [ -n "$PREFIX" ]; then
+            echo "message=update ${PREFIX} image tag to ${SHORT_SHA} in ${OVERLAY_DIR}" >> "$GITHUB_OUTPUT"
+          else
+            echo "message=update image tag to ${SHORT_SHA} in ${OVERLAY_DIR}" >> "$GITHUB_OUTPUT"
           fi
-
-          IMAGE_TAG="${{ inputs.image_tag }}"
-          REGISTRY="${{ inputs.registry }}"
-          PROJECT="${{ inputs.gcp_project_id }}"
-          REPO="${{ inputs.repository }}"
-
-          echo "Updating images in ${KUSTOMIZATION_FILE}:"
-          echo '${{ inputs.images }}' | jq -c '.[]' | while IFS= read -r img; do
-            KUSTOMIZE_NAME=$(echo "$img" | jq -r '.kustomize_name')
-            IMAGE_NAME=$(echo "$img" | jq -r '.image_name')
-            TAG_OVERRIDE=$(echo "$img" | jq -r '.tag_override // empty')
-            EFFECTIVE_TAG="${TAG_OVERRIDE:-$IMAGE_TAG}"
-            NEW_NAME="${REGISTRY}/${PROJECT}/${REPO}/${IMAGE_NAME}"
-
-            echo "  ${KUSTOMIZE_NAME} -> ${NEW_NAME}:${EFFECTIVE_TAG}"
-
-            # Update newTag for this image block
-            sed -i "/name: ${KUSTOMIZE_NAME}/,/newTag:/ s|newTag:.*|newTag: ${EFFECTIVE_TAG}|" "$KUSTOMIZATION_FILE"
-
-            # Update newName for this image block
-            sed -i "/name: ${KUSTOMIZE_NAME}/,/newName:/ s|newName:.*|newName: ${NEW_NAME}|" "$KUSTOMIZATION_FILE"
-          done
-
-          echo ""
-          echo "Updated ${KUSTOMIZATION_FILE}:"
-          cat "$KUSTOMIZATION_FILE"
 
       - name: Commit and push changes
+        uses: ./.github/actions/git-commit-push
+        with:
+          branch: ${{ inputs.target_branch || github.ref_name }}
+          message: ${{ steps.commit-message.outputs.message }}
+          paths: |
+            ${{ steps.overlay.outputs.dir }}/kustomization.yaml
+
+      - name: Kustomization summary
         run: |
           OVERLAY_DIR="${{ steps.overlay.outputs.dir }}"
           IMAGE_TAG="${{ inputs.image_tag }}"
-          SHORT_SHA="${IMAGE_TAG:0:12}"
-          PREFIX="${{ inputs.commit_message_prefix }}"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add "${OVERLAY_DIR}/kustomization.yaml"
-
-          if git diff --staged --quiet; then
-            echo "No changes to commit."
-            exit 0
-          fi
-
-          if [ -n "$PREFIX" ]; then
-            COMMIT_MSG="update ${PREFIX} image tag to ${SHORT_SHA} in ${OVERLAY_DIR}"
-          else
-            COMMIT_MSG="update image tag to ${SHORT_SHA} in ${OVERLAY_DIR}"
-          fi
-
-          git commit -m "$COMMIT_MSG"
-          git push origin HEAD:${{ inputs.target_branch || github.ref_name }}
 
           echo "## Kustomization Updated" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,26 @@
+name: Setup Crane
+description: Install a pinned go-containerregistry crane binary.
+
+inputs:
+  version:
+    description: go-containerregistry release version.
+    required: false
+    default: v0.20.6
+
+runs:
+  using: composite
+  steps:
+    - name: Install crane
+      shell: bash
+      env:
+        CRANE_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        tmp_dir="$(mktemp -d)"
+        trap 'rm -rf "$tmp_dir"' EXIT
+        curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
+          -o "${tmp_dir}/go-containerregistry.tar.gz"
+        tar -xzf "${tmp_dir}/go-containerregistry.tar.gz" -C "${tmp_dir}" crane
+        chmod +x "${tmp_dir}/crane"
+        sudo mv "${tmp_dir}/crane" /usr/local/bin/crane
+        crane version

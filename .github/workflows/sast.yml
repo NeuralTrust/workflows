@@ -135,7 +135,7 @@ on:
         description: 'Gosec version to install (e.g., 2.21.4)'
         required: false
         type: string
-        default: 'latest'
+        default: '2.22.8'
 
       # ======================================================================
       # Bandit (Python)
@@ -183,6 +183,7 @@ jobs:
   trivy:
     name: Vulnerability Scan (Trivy)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     permissions:
       contents: read
@@ -204,7 +205,7 @@ jobs:
           fi
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@v0.33.1
         with:
           scan-type: ${{ inputs.scan_type }}
           scan-ref: '.'
@@ -214,6 +215,27 @@ jobs:
           exit-code: ${{ inputs.trivy_exit_code }}
           ignore-unfixed: true
           trivyignores: ${{ steps.trivyignore.outputs.path }}
+
+      - name: Run Trivy SARIF report
+        if: always()
+        uses: aquasecurity/trivy-action@v0.33.1
+        with:
+          scan-type: ${{ inputs.scan_type }}
+          scan-ref: '.'
+          scanners: ${{ inputs.trivy_scanners }}
+          severity: ${{ inputs.trivy_severity }}
+          format: 'sarif'
+          output: 'trivy-sast.sarif'
+          exit-code: '0'
+          ignore-unfixed: true
+          trivyignores: ${{ steps.trivyignore.outputs.path }}
+
+      - name: Upload Trivy SARIF to GitHub Security
+        if: always() && hashFiles('trivy-sast.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-sast.sarif
+          category: trivy-sast
 
       - name: Summary
         if: always()
@@ -230,6 +252,7 @@ jobs:
   pip-audit:
     name: Python Dep Audit (pip-audit)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: inputs.pip_audit_enabled
     continue-on-error: true
 
@@ -290,6 +313,7 @@ jobs:
     runs-on: ubuntu-latest
     if: inputs.gitleaks_enabled
     continue-on-error: true
+    timeout-minutes: 20
 
     permissions:
       contents: read
@@ -304,7 +328,7 @@ jobs:
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/repo" \
-            zricethezav/gitleaks:latest \
+            zricethezav/gitleaks:v8.28.0 \
             detect \
             --source /repo \
             --verbose \
@@ -326,6 +350,7 @@ jobs:
     runs-on: ubuntu-latest
     if: inputs.gosec_enabled
     continue-on-error: true
+    timeout-minutes: 20
 
     permissions:
       contents: read
@@ -365,6 +390,7 @@ jobs:
     runs-on: ubuntu-latest
     if: inputs.bandit_enabled
     continue-on-error: true
+    timeout-minutes: 20
 
     permissions:
       contents: read
@@ -424,6 +450,7 @@ jobs:
     runs-on: ubuntu-latest
     if: inputs.njsscan_enabled
     continue-on-error: true
+    timeout-minutes: 20
 
     permissions:
       contents: read
@@ -436,7 +463,7 @@ jobs:
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/src" \
-            opensecurity/njsscan:latest \
+            opensecurity/njsscan:v0.4.3 \
             --exit-warning ${{ inputs.njsscan_args != '.' && inputs.njsscan_args || '/src' }}
 
       - name: Summary
