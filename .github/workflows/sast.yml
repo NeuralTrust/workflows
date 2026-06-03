@@ -247,7 +247,7 @@ jobs:
         # must not fail the PR.
         continue-on-error: true
         if: always() && hashFiles('trivy-sast.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-sast.sarif
           category: trivy-sast
