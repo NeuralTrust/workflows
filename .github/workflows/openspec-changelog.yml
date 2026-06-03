@@ -312,7 +312,7 @@ jobs:
 
       - name: Commit and push CHANGELOG update
         if: steps.update.outputs.changed == 'true'
-        uses: ./.github/actions/git-commit-push
+        uses: NeuralTrust/workflows/.github/actions/git-commit-push@main
         with:
           branch: main
           message: ${{ inputs.commit_message_prefix }} add entry for #${{ github.event.pull_request.number }}

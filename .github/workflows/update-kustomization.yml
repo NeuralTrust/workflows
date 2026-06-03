@@ -118,7 +118,7 @@ jobs:
           fi
 
       - name: Update kustomization.yaml
-        uses: ./.github/actions/kustomize-set-images
+        uses: NeuralTrust/workflows/.github/actions/kustomize-set-images@main
         with:
           overlay_dir: ${{ steps.overlay.outputs.dir }}
           images: ${{ inputs.images }}
@@ -142,7 +142,7 @@ jobs:
           fi
 
       - name: Commit and push changes
-        uses: ./.github/actions/git-commit-push
+        uses: NeuralTrust/workflows/.github/actions/git-commit-push@main
         with:
           branch: ${{ inputs.target_branch || github.ref_name }}
           message: ${{ steps.commit-message.outputs.message }}

@@ -129,7 +129,7 @@ jobs:
 
       - name: Build and push Docker image
         id: build
-        uses: ./.github/actions/docker-build-push
+        uses: NeuralTrust/workflows/.github/actions/docker-build-push@main
         with:
           image_name: ${{ inputs.image_name }}
           gcp_project_id: ${{ inputs.gcp_project_id }}

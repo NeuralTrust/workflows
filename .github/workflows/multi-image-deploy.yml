@@ -120,7 +120,7 @@ jobs:
     steps:
       - name: Free disk space
         if: inputs.free_disk_space
-        uses: ./.github/actions/free-disk-space
+        uses: NeuralTrust/workflows/.github/actions/free-disk-space@main
 
       - name: Checkout code
         uses: actions/checkout@v5
@@ -134,7 +134,7 @@ jobs:
           token_format: access_token
 
       - name: Build and push Docker image
-        uses: ./.github/actions/docker-build-push
+        uses: NeuralTrust/workflows/.github/actions/docker-build-push@main
         with:
           image_name: ${{ matrix.image.name }}
           gcp_project_id: ${{ inputs.gcp_project_id }}
@@ -207,7 +207,7 @@ jobs:
           esac
 
       - name: Update kustomization.yaml
-        uses: ./.github/actions/kustomize-set-images
+        uses: NeuralTrust/workflows/.github/actions/kustomize-set-images@main
         with:
           overlay_dir: ${{ steps.overlay.outputs.dir }}
           images: ${{ inputs.kustomize_images }}
@@ -251,7 +251,7 @@ jobs:
           fi
 
       - name: Commit and push changes
-        uses: ./.github/actions/git-commit-push
+        uses: NeuralTrust/workflows/.github/actions/git-commit-push@main
         with:
           branch: ${{ github.ref_name }}
           message: ${{ steps.commit-message.outputs.message }}

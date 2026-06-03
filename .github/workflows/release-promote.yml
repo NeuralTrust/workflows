@@ -169,7 +169,7 @@ jobs:
     steps:
       - name: Free disk space
         if: inputs.free_disk_space
-        uses: ./.github/actions/free-disk-space
+        uses: NeuralTrust/workflows/.github/actions/free-disk-space@main
 
       - name: Checkout code
         uses: actions/checkout@v5
@@ -271,7 +271,7 @@ jobs:
           token_format: access_token
 
       - name: Install crane
-        uses: ./.github/actions/setup-crane
+        uses: NeuralTrust/workflows/.github/actions/setup-crane@main
 
       - name: Login to Artifact Registry (crane)
         env:
@@ -330,7 +330,7 @@ jobs:
       # ================================================================
       - name: Build and push Docker image
         if: steps.strategy.outputs.final == 'rebuild'
-        uses: ./.github/actions/docker-build-push
+        uses: NeuralTrust/workflows/.github/actions/docker-build-push@main
         with:
           image_name: ${{ inputs.image_name }}
           gcp_project_id: ${{ inputs.gcp_project_id }}
@@ -419,7 +419,7 @@ jobs:
           token_format: access_token
 
       - name: Install crane
-        uses: ./.github/actions/setup-crane
+        uses: NeuralTrust/workflows/.github/actions/setup-crane@main
 
       - name: Login to Artifact Registry (crane)
         env:
@@ -479,7 +479,7 @@ jobs:
           fetch-depth: 0
 
       - name: Update kustomization.yaml
-        uses: ./.github/actions/kustomize-set-images
+        uses: NeuralTrust/workflows/.github/actions/kustomize-set-images@main
         with:
           overlay_dir: ${{ inputs.overlay_path }}
           images: |
@@ -515,7 +515,7 @@ jobs:
           cat "$CONFIG_FILE"
 
       - name: Commit and push changes
-        uses: ./.github/actions/git-commit-push
+        uses: NeuralTrust/workflows/.github/actions/git-commit-push@main
         with:
           branch: main
           message: ${{ needs.release.outputs.strategy }} ${{ inputs.image_name }} ${{ needs.release.outputs.release_tag }} in ${{ inputs.overlay_path }}
