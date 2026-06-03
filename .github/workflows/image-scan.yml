@@ -175,8 +175,9 @@ jobs:
       - name: Run Trivy image scan (table)
         id: trivy_table
         if: ${{ !inputs.upload_sarif }}
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
+          version: v0.70.0
           scan-type: 'image'
           image-ref: ${{ inputs.image_ref }}
           scanners: ${{ inputs.scanners }}
@@ -189,8 +190,9 @@ jobs:
 
       - name: Run Trivy image scan (SARIF)
         if: inputs.upload_sarif
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
+          version: v0.70.0
           scan-type: 'image'
           image-ref: ${{ inputs.image_ref }}
           scanners: ${{ inputs.scanners }}
