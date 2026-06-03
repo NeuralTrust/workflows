@@ -405,7 +405,7 @@ jobs:
       - name: Commit and push version files
         id: commit-version
         if: steps.bump-guard.outputs.skip != 'true' && steps.commits.outputs.has_commits == 'true' && inputs.dry_run == false
-        uses: ./.github/actions/git-commit-push
+        uses: NeuralTrust/workflows/.github/actions/git-commit-push@main
         with:
           branch: ${{ github.ref_name }}
           message: "chore: bump version to ${{ steps.version.outputs.new_version }}"
