@@ -124,7 +124,11 @@ jobs:
             --config .github/zizmor.yml \
             --format sarif --output zizmor.sarif .
 
+      # Best-effort: needs code scanning (GitHub Advanced Security) enabled on this
+      # repo. Where it isn't, upload logs "Code Security must be enabled" — keep this
+      # informational, never fail Workflows CI on it.
       - name: Upload zizmor SARIF
+        continue-on-error: true
         if: always() && hashFiles('zizmor.sarif') != ''
         uses: github/codeql-action/upload-sarif@v4
         with:

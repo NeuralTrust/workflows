@@ -716,6 +716,8 @@ jobs:
 
 The SARIF upload itself is `continue-on-error`, so a missing `actions: read` won't fail CI — it just means findings won't reach the Security tab. The blocking gate is the Trivy table scan (`trivy_exit_code`), which is independent of SARIF upload.
 
+> **Heads up:** even with both permissions, the Security-tab upload only works if **GitHub Advanced Security / code scanning is enabled on the repo**. Where it isn't, the upload logs `Code Security must be enabled for this repository` and is skipped (it never fails CI, thanks to `continue-on-error`). Findings are still visible in the **job log** (table scan). Enabling code scanning is an org/admin setting, not something the workflow can grant.
+
 ### Inputs
 
 | Input | Default | Description |
@@ -1131,6 +1133,8 @@ Both modes scan for **CRITICAL,HIGH** severity and count only **fixable** CVEs (
 
 **`image-scan.yml`** — Pulls an image from Artifact Registry, scans OS packages and application dependencies, and optionally uploads SARIF to the GitHub Security tab.
 
+Findings are **always printed as a table in the job log** and the blocking gate lives there (`exit_code`), so a blocked promote always shows *which* CVEs caused it. SARIF upload is best-effort: it needs `security-events: write` + `actions: read` **and** code scanning enabled on the repo; where that's missing it logs `Code Security must be enabled` and is skipped without failing the scan.
+
 ```yaml
 jobs:
   scan:
@@ -1139,6 +1143,7 @@ jobs:
       contents: read
       id-token: write
       security-events: write   # required for SARIF upload
+      actions: read            # required for SARIF upload on private repos
     with:
       image_ref: europe-west1-docker.pkg.dev/my-proj/nt-docker/my-svc:abc123
       exit_code: '1'           # '0' = warn, '1' = block
