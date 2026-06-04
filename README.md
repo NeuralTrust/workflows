@@ -143,7 +143,7 @@ Before any prod tag is applied or kustomization is updated, the release image is
 | **Promote** | Dev source image (by commit SHA) | Crane copy runs **after** scan passes — a dirty dev image never gets a prod release tag |
 | **Rebuild** | Freshly built prod image | Kustomize update runs **after** scan passes |
 
-Dev deploys use the same scanner in **warn mode** (`exit_code: 0`) — findings appear in the job summary and GitHub Security tab but never block deployment.
+Dev deploys use the same scanner in **warn mode** (`exit_code: 0`) — findings appear in the job log and step summary (and the `trivy-image-sarif` run artifact) but never block deployment.
 
 ### How detection works
 
@@ -700,23 +700,25 @@ jobs:
       njsscan_enabled: true
 ```
 
-### Required caller permissions
+### Where findings go (no GitHub Advanced Security)
 
-`sast.yml` uploads Trivy results to the **Security tab** via `codeql-action/upload-sarif`. On **private** repos that needs both `security-events: write` **and** `actions: read` (the action reads the workflow-run status through the Actions API; without `actions: read` it fails with `Resource not accessible by integration`). A reusable workflow can't exceed the caller's token, so grant both in the caller:
+We don't have GitHub Advanced Security, so the **Security tab / code scanning is unavailable** on private repos. `sast.yml` therefore does **not** push SARIF to the Security tab. Instead:
+
+- **Job log** — the Trivy **table** scan prints findings inline (this is also the blocking gate, via `trivy_exit_code`).
+- **Step summary** — a short markdown summary per scanner.
+- **Run artifact** — the full SARIF is saved as the `trivy-sast-sarif` artifact (3-day retention), downloadable from the run's *Artifacts* section.
+
+No special permissions are required — `contents: read` is enough:
 
 ```yaml
 permissions:
   contents: read
-  security-events: write
-  actions: read          # ← required for SARIF upload on private repos
 jobs:
   security:
     uses: NeuralTrust/workflows/.github/workflows/sast.yml@main
 ```
 
-The SARIF upload itself is `continue-on-error`, so a missing `actions: read` won't fail CI — it just means findings won't reach the Security tab. The blocking gate is the Trivy table scan (`trivy_exit_code`), which is independent of SARIF upload.
-
-> **Heads up:** even with both permissions, the Security-tab upload only works if **GitHub Advanced Security / code scanning is enabled on the repo**. Where it isn't, the upload logs `Code Security must be enabled for this repository` and is skipped (it never fails CI, thanks to `continue-on-error`). Findings are still visible in the **job log** (table scan). Enabling code scanning is an org/admin setting, not something the workflow can grant.
+> Older callers that still grant `security-events: write` / `actions: read` for the (removed) Security-tab upload are harmless — those scopes are simply unused now and can be dropped.
 
 ### Inputs
 
@@ -1131,9 +1133,9 @@ Both modes scan for **CRITICAL,HIGH** severity and count only **fixable** CVEs (
 
 ### Image Scan (reusable workflow)
 
-**`image-scan.yml`** — Pulls an image from Artifact Registry, scans OS packages and application dependencies, and optionally uploads SARIF to the GitHub Security tab.
+**`image-scan.yml`** — Pulls an image from Artifact Registry, scans OS packages and application dependencies, prints findings to the job log, and saves the SARIF as a downloadable run artifact.
 
-Findings are **always printed as a table in the job log** and the blocking gate lives there (`exit_code`), so a blocked promote always shows *which* CVEs caused it. SARIF upload is best-effort: it needs `security-events: write` + `actions: read` **and** code scanning enabled on the repo; where that's missing it logs `Code Security must be enabled` and is skipped without failing the scan.
+Findings are **always printed as a table in the job log** and the blocking gate lives there (`exit_code`), so a blocked promote always shows *which* CVEs caused it. The SARIF report is saved as the `trivy-image-sarif` run artifact (3-day retention) — there's no Security-tab upload (we don't have GitHub Advanced Security). Only `contents: read` + `id-token: write` (to pull the image) are needed.
 
 ```yaml
 jobs:
@@ -1141,9 +1143,7 @@ jobs:
     uses: NeuralTrust/workflows/.github/workflows/image-scan.yml@main
     permissions:
       contents: read
-      id-token: write
-      security-events: write   # required for SARIF upload
-      actions: read            # required for SARIF upload on private repos
+      id-token: write          # GCP WIF auth to pull the image
     with:
       image_ref: europe-west1-docker.pkg.dev/my-proj/nt-docker/my-svc:abc123
       exit_code: '1'           # '0' = warn, '1' = block
@@ -1162,7 +1162,7 @@ jobs:
 | `ignore_unfixed` | `true` | Only count vulnerabilities with a fix available |
 | `scanners` | `vuln` | Trivy scanners (`vuln` only by default; avoids secret false positives in dependency test fixtures) |
 | `trivyignore_path` | *(auto)* | Path to `.trivyignore`; auto-detected from repo root if present |
-| `upload_sarif` | `true` | Upload SARIF to GitHub Security tab |
+| `upload_sarif` | `true` | Save the SARIF report as a downloadable run artifact (`trivy-image-sarif`). Name kept for backward compatibility — no longer a Security-tab upload |
 | `registry` | `europe-west1-docker.pkg.dev` | Registry host for docker login |
 
 ### Suppressing false positives
@@ -1180,7 +1180,7 @@ Deploy and release workflows send Slack notifications on success or failure.
 **Smart release notifications** include the strategy used:
 - "promoted from dev" (for develop→main releases)
 - "rebuilt (hotfix)" (for direct pushes)
-- "Blocked by image scan" (fixable CRITICAL/HIGH CVEs found — see Security tab)
+- "Blocked by image scan" (fixable CRITICAL/HIGH CVEs found — see the job log / `trivy-image-sarif` artifact)
 
 To enable:
 
@@ -1215,14 +1215,14 @@ its own Actions surface:
 | Feature | File | What it does |
 |---------|------|--------------|
 | **Dependabot** | [`.github/dependabot.yml`](.github/dependabot.yml) | Weekly `github-actions` updates across `.github/workflows/**` and `.github/actions/**`. Minor/patch grouped into one PR. |
-| **Workflows CI** | [`.github/workflows/workflows-ci.yml`](.github/workflows/workflows-ci.yml) | Runs on any change to `.github/**`. **actionlint** (blocking) catches broken syntax/shell; **zizmor** (informational) audits for Actions security issues and uploads SARIF to the Security tab. |
-| **OpenSSF Scorecard** | [`.github/workflows/scorecard.yml`](.github/workflows/scorecard.yml) | Scheduled supply-chain posture check (branch protection, token scopes, pinned deps, dangerous patterns) → Security tab. |
+| **Workflows CI** | [`.github/workflows/workflows-ci.yml`](.github/workflows/workflows-ci.yml) | Runs on any change to `.github/**`. **actionlint** (blocking) catches broken syntax/shell; **zizmor** (informational) audits for Actions security issues and saves SARIF as a run artifact. |
+| **OpenSSF Scorecard** | [`.github/workflows/scorecard.yml`](.github/workflows/scorecard.yml) | Scheduled supply-chain posture check (branch protection, token scopes, pinned deps, dangerous patterns); SARIF saved as a run artifact. |
 | **CODEOWNERS** | [`.github/CODEOWNERS`](.github/CODEOWNERS) | Requires owner review for changes under `.github/` when branch protection enforces it. |
 | **zizmor policy** | [`.github/zizmor.yml`](.github/zizmor.yml) | Accepts release-tag (`ref-pin`) pins so intentional `@vN` pins maintained by Dependabot are not flagged as `unpinned-uses`. |
 
 **zizmor posture:** matching the SAST workflow (`Trivy` blocks, other scanners
 are informational), zizmor is non-blocking for now and surfaces findings in the
-Security tab. There is a backlog of `template-injection` findings in the legacy
+job log / `zizmor-sarif` run artifact. There is a backlog of `template-injection` findings in the legacy
 deploy workflows (`${{ inputs.* }}` / `${{ github.ref_name }}` interpolated
 directly into `run:` blocks); once those are moved to `env:` vars, flip the
 zizmor step to blocking by adding a `uvx zizmor --min-severity high .` gate.

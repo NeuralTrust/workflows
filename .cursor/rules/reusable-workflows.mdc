@@ -57,27 +57,25 @@ the ceiling (a reusable workflow cannot exceed the caller's token):
 
 | Feature | Permission (caller + reusable job) |
 |---|---|
-| Trivy/DAST SARIF → Security tab | `security-events: write` **+ `actions: read`** (private repos) |
 | GCP WIF / OIDC | `id-token: write` |
 | Push kustomization/changelog | `contents: write` |
+| Save scan report (artifact) | none beyond `contents: read` |
 
-`codeql-action/upload-sarif` reads the workflow-run status via the Actions API, so
-on **private** repos it needs `actions: read` in addition to `security-events: write`
-— omitting it fails with `Resource not accessible by integration`. But permissions
-alone aren't enough: the Security tab also requires **GitHub Advanced Security /
-code scanning enabled on the repo** — otherwise upload fails with `Code Security
-must be enabled for this repository` (a `JOB_STATUS_CONFIGURATION_ERROR`). That's an
-org/admin toggle, not something a workflow can grant.
+**No GitHub Advanced Security.** We don't have GHAS, so the **Security tab / code
+scanning is unavailable** on private repos. Do **not** use
+`codeql-action/upload-sarif` — it fails with `Code Security must be enabled for
+this repository` (`JOB_STATUS_CONFIGURATION_ERROR`). Security scanners surface
+findings via:
 
-So **every SARIF-upload step must be `continue-on-error: true`** — the Security-tab
-push is informational and must degrade gracefully where GHAS is off. The blocking
-gate is the scan's **table-format step** (`exit-code = exit_code`), never the SARIF
-step. Always run a `format: table` scan so findings are visible in the job log even
-when SARIF upload is unavailable; force the SARIF step to `exit-code: '0'` and
-`if: always()` so it still produces the report after the gate fails.
+1. **`format: table`** scan printed to the job log — this is also the **blocking gate**
+   (`exit-code = exit_code`), never a SARIF step.
+2. The **step summary**.
+3. The SARIF file saved with **`actions/upload-artifact`** (short `retention-days`,
+   e.g. 3) — downloadable, needs no special scopes.
 
-`image-scan.yml` intentionally omits `security-events: write` (nested-reusable
-limitation); consumers opt in per-job (see `aiapi/ci.yml`).
+Generate SARIF with `exit-code: '0'` and `if: always()` so the report is still
+produced after the gate fails, then upload it as an artifact. `security-events: write`
+and `actions: read` are **not** needed anywhere — drop them from new callers.
 
 ## 5. Reliability defaults
 

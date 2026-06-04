@@ -185,14 +185,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
+    # SARIF is saved as a downloadable workflow artifact (below), not pushed to the
+    # GitHub Security tab — that path needs GitHub Advanced Security, which we don't
+    # have. Artifact upload uses the default token, so no extra scopes are required.
     permissions:
       contents: read
-      security-events: write
-      # codeql-action/upload-sarif reads the workflow-run status via the Actions
-      # API; on PRIVATE repos that requires actions:read, else upload fails with
-      # "Resource not accessible by integration". Reusable-workflow permissions are
-      # capped by the caller, so callers must also grant actions:read (see README).
-      actions: read
 
     steps:
       - name: Checkout code
@@ -241,16 +238,17 @@ jobs:
           ignore-unfixed: true
           trivyignores: ${{ steps.trivyignore.outputs.path }}
 
-      - name: Upload Trivy SARIF to GitHub Security
-        # Informational (Security tab). The blocking gate is the table scan above,
-        # so a SARIF-upload hiccup (e.g. a consumer that hasn't granted actions:read)
-        # must not fail the PR.
-        continue-on-error: true
+      - name: Save Trivy SARIF report as artifact
+        # No GitHub Advanced Security, so SARIF can't go to the Security tab. Save it
+        # as a downloadable artifact instead (no GHAS / extra scopes needed). Short
+        # retention keeps storage negligible. Findings are also visible in the table
+        # scan log above and the step summary.
         if: always() && hashFiles('trivy-sast.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v4
+        uses: actions/upload-artifact@v4
         with:
-          sarif_file: trivy-sast.sarif
-          category: trivy-sast
+          name: trivy-sast-sarif
+          path: trivy-sast.sarif
+          retention-days: 3
 
       - name: Summary
         if: always()
@@ -261,6 +259,8 @@ jobs:
             echo "- **Severity:** ${{ inputs.trivy_severity }}"
             echo "- **Scan type:** ${{ inputs.scan_type }}"
             echo "- **Scanners:** ${{ inputs.trivy_scanners }}"
+            echo ""
+            echo "Findings are in the scan logs above; the SARIF report is saved as the \`trivy-sast-sarif\` run artifact."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================

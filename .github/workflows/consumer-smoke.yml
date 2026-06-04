@@ -41,8 +41,7 @@ jobs:
   call-sast:
     name: Invoke sast.yml as a consumer
     permissions:
-      contents: read
-      security-events: write  # exercise the Trivy SARIF upload path too
+      contents: read  # sast.yml saves SARIF as an artifact; no extra scopes needed
     uses: ./.github/workflows/sast.yml
     with:
       scan_type: config
