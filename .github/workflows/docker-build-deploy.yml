@@ -146,7 +146,7 @@ jobs:
         uses: NeuralTrust/workflows/.github/actions/free-disk-space@main
 
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Authenticate to Google Cloud
         id: auth
@@ -208,7 +208,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           token: ${{ secrets.GH_TOKEN }}
           ref: ${{ github.ref_name }}

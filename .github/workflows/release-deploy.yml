@@ -137,7 +137,7 @@ jobs:
         uses: NeuralTrust/workflows/.github/actions/free-disk-space@main
 
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Compute release tag
         id: release-tag
@@ -191,7 +191,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           token: ${{ secrets.GH_TOKEN }}
           ref: main
