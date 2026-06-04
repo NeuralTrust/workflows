@@ -14,14 +14,14 @@
 #                   Used as the prod promote gate.
 #
 # Findings are uploaded as SARIF to the GitHub Security tab when
-# `upload_sarif: true` (default). The top-level calling workflow must grant
-# `security-events: write` for SARIF upload to succeed.
+# `upload_sarif: true` (default). The calling workflow must grant
+# `security-events: write` and `actions: read` for SARIF upload to succeed.
 #
-# IMPORTANT: When this workflow is called from another reusable workflow
-# (nested call), set `upload_sarif: false` — nested reusable jobs are
-# restricted to the permissions the top-level consumer workflow grants, and
-# most callers do not include `security-events: write`. The blocking table
-# scan works fine with only `contents: read` and `id-token: write`.
+# This workflow intentionally does not set job-level permissions. Reusable
+# workflow token permissions are passed by the caller and can only be
+# downgraded by the called workflow; setting permissions here would remove
+# caller scopes that `upload-sarif` needs. The non-SARIF scan works with only
+# `contents: read` and `id-token: write`.
 #
 # A `.trivyignore` file at the repo root is auto-detected and used to suppress
 # accepted false-positives (same convention as sast.yml).
@@ -34,6 +34,7 @@
 #         contents: read
 #         id-token: write
 #         security-events: write   # required for SARIF upload
+#         actions: read            # required by upload-sarif run metadata lookup
 #       with:
 #         image_ref: europe-west1-docker.pkg.dev/proj/repo/svc:sha-123abc
 #         exit_code: '1'           # '0' = warn, '1' = block
@@ -46,8 +47,8 @@
 #       permissions:
 #         contents: read
 #         id-token: write
-#         # do NOT add security-events: write here — nested reusables are
-#         # restricted to what the top-level consumer workflow grants
+#         # add security-events: write and actions: read only when upload_sarif
+#         # is true and the top-level consumer workflow grants those scopes
 #       with:
 #         image_ref: europe-west1-docker.pkg.dev/proj/repo/svc:v1.2.3
 #         exit_code: '1'
@@ -104,7 +105,8 @@ on:
       upload_sarif:
         description: >
           Upload SARIF results to the GitHub Security tab. Requires
-          `security-events: write` permission on the calling job.
+          `security-events: write` and `actions: read` permissions on the
+          calling job.
         required: false
         type: boolean
         default: true
@@ -131,16 +133,6 @@ jobs:
     name: Trivy Image Scan
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 25
-
-    permissions:
-      contents: read
-      id-token: write
-      # security-events: write is intentionally omitted — this workflow is
-      # often called as a nested reusable, and GitHub restricts nested jobs
-      # to the permissions the top-level consumer workflow grants. Most
-      # callers do not include security-events: write, which would cause a
-      # parse-time validation failure. The SARIF upload step below handles
-      # the missing permission gracefully via continue-on-error.
 
     steps:
       - name: Checkout code
@@ -210,8 +202,7 @@ jobs:
 
       - name: Upload SARIF to GitHub Security
         if: always() && inputs.upload_sarif && hashFiles('trivy-image.sarif') != ''
-        continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: 'trivy-image.sarif'
           category: 'trivy-image'
