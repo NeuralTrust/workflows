@@ -270,10 +270,12 @@ jobs:
         env:
           TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          echo "GOPRIVATE=github.com/NeuralTrust/*" >> $GITHUB_ENV
-          echo "GONOPROXY=github.com/NeuralTrust/*" >> $GITHUB_ENV
-          echo "GONOSUMDB=github.com/NeuralTrust/*" >> $GITHUB_ENV
-          echo "GIT_TERMINAL_PROMPT=0" >> $GITHUB_ENV
+          {
+            echo "GOPRIVATE=github.com/NeuralTrust/*"
+            echo "GONOPROXY=github.com/NeuralTrust/*"
+            echo "GONOSUMDB=github.com/NeuralTrust/*"
+            echo "GIT_TERMINAL_PROMPT=0"
+          } >> "$GITHUB_ENV"
           git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"
           git config --global credential.helper store
           echo "https://${TOKEN}@github.com" > ~/.git-credentials
@@ -394,10 +396,12 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## Lint (${{ inputs.language }})" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Language:** ${{ inputs.language }} ${{ inputs.language_version }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Custom command:** ${{ inputs.lint_command != '' && 'Yes' || 'Default' }}" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Lint (${{ inputs.language }})"
+            echo ""
+            echo "- **Language:** ${{ inputs.language }} ${{ inputs.language_version }}"
+            echo "- **Custom command:** ${{ inputs.lint_command != '' && 'Yes' || 'Default' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
   # Test
@@ -520,30 +524,38 @@ jobs:
         if: inputs.postgres_enabled || inputs.clickhouse_enabled || inputs.redis_enabled || inputs.kafka_enabled
         run: |
           if [ "${{ inputs.postgres_enabled }}" = "true" ]; then
-            echo "POSTGRES_HOST=localhost" >> $GITHUB_ENV
-            echo "POSTGRES_PORT=5432" >> $GITHUB_ENV
-            echo "POSTGRES_USER=${{ inputs.postgres_user }}" >> $GITHUB_ENV
-            echo "POSTGRES_PASSWORD=${{ inputs.postgres_password }}" >> $GITHUB_ENV
-            echo "POSTGRES_DB=${{ inputs.postgres_db }}" >> $GITHUB_ENV
-            echo "DATABASE_URL=postgresql://${{ inputs.postgres_user }}:${{ inputs.postgres_password }}@localhost:5432/${{ inputs.postgres_db }}?sslmode=disable" >> $GITHUB_ENV
+            {
+              echo "POSTGRES_HOST=localhost"
+              echo "POSTGRES_PORT=5432"
+              echo "POSTGRES_USER=${{ inputs.postgres_user }}"
+              echo "POSTGRES_PASSWORD=${{ inputs.postgres_password }}"
+              echo "POSTGRES_DB=${{ inputs.postgres_db }}"
+              echo "DATABASE_URL=postgresql://${{ inputs.postgres_user }}:${{ inputs.postgres_password }}@localhost:5432/${{ inputs.postgres_db }}?sslmode=disable"
+            } >> "$GITHUB_ENV"
           fi
 
           if [ "${{ inputs.clickhouse_enabled }}" = "true" ]; then
-            echo "CLICKHOUSE_HOST=localhost" >> $GITHUB_ENV
-            echo "CLICKHOUSE_PORT=9000" >> $GITHUB_ENV
-            echo "CLICKHOUSE_HTTP_PORT=8123" >> $GITHUB_ENV
-            echo "CLICKHOUSE_URL=http://localhost:8123" >> $GITHUB_ENV
+            {
+              echo "CLICKHOUSE_HOST=localhost"
+              echo "CLICKHOUSE_PORT=9000"
+              echo "CLICKHOUSE_HTTP_PORT=8123"
+              echo "CLICKHOUSE_URL=http://localhost:8123"
+            } >> "$GITHUB_ENV"
           fi
 
           if [ "${{ inputs.redis_enabled }}" = "true" ]; then
-            echo "REDIS_HOST=localhost" >> $GITHUB_ENV
-            echo "REDIS_PORT=6379" >> $GITHUB_ENV
-            echo "REDIS_URL=redis://localhost:6379" >> $GITHUB_ENV
+            {
+              echo "REDIS_HOST=localhost"
+              echo "REDIS_PORT=6379"
+              echo "REDIS_URL=redis://localhost:6379"
+            } >> "$GITHUB_ENV"
           fi
 
           if [ "${{ inputs.kafka_enabled }}" = "true" ]; then
-            echo "KAFKA_SERVER=localhost:9092" >> $GITHUB_ENV
-            echo "KAFKA_BOOTSTRAP_SERVERS=localhost:9092" >> $GITHUB_ENV
+            {
+              echo "KAFKA_SERVER=localhost:9092"
+              echo "KAFKA_BOOTSTRAP_SERVERS=localhost:9092"
+            } >> "$GITHUB_ENV"
           fi
 
       # ================================================================
@@ -563,10 +575,12 @@ jobs:
         env:
           TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          echo "GOPRIVATE=github.com/NeuralTrust/*" >> $GITHUB_ENV
-          echo "GONOPROXY=github.com/NeuralTrust/*" >> $GITHUB_ENV
-          echo "GONOSUMDB=github.com/NeuralTrust/*" >> $GITHUB_ENV
-          echo "GIT_TERMINAL_PROMPT=0" >> $GITHUB_ENV
+          {
+            echo "GOPRIVATE=github.com/NeuralTrust/*"
+            echo "GONOPROXY=github.com/NeuralTrust/*"
+            echo "GONOSUMDB=github.com/NeuralTrust/*"
+            echo "GIT_TERMINAL_PROMPT=0"
+          } >> "$GITHUB_ENV"
           git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"
           git config --global credential.helper store
           echo "https://${TOKEN}@github.com" > ~/.git-credentials
@@ -658,7 +672,7 @@ jobs:
             echo "Exporting test secrets..."
             while IFS= read -r line; do
               [ -z "$line" ] && continue
-              echo "$line" >> $GITHUB_ENV
+              echo "$line" >> "$GITHUB_ENV"
             done <<< "$SECRETS_PAYLOAD"
             echo "Test secrets exported"
           fi
@@ -712,20 +726,24 @@ jobs:
             exit 0
           fi
 
-          echo "## Coverage Report" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Coverage Report"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
 
           # Go coverage (.txt format from -coverprofile)
           if [[ "$COV_FILE" == *.txt ]]; then
             TOTAL=$(go tool cover -func="$COV_FILE" | grep '^total:' | awk '{print $NF}')
-            echo "**Total coverage: ${TOTAL}**" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "<details><summary>Per-function breakdown</summary>" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            go tool cover -func="$COV_FILE" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "**Total coverage: ${TOTAL}**"
+              echo ""
+              echo "<details><summary>Per-function breakdown</summary>"
+              echo ""
+              echo '```'
+              go tool cover -func="$COV_FILE"
+              echo '```'
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
           # Python/XML coverage (from pytest-cov --cov-report=xml)
@@ -758,13 +776,15 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## Test (${{ inputs.language }})" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Language:** ${{ inputs.language }} ${{ inputs.language_version }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Custom command:** ${{ inputs.test_command != '' && 'Yes' || 'Default' }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Services:**" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - PostgreSQL: ${{ inputs.postgres_enabled && format('{0} (v{1})', '✓', inputs.postgres_version) || '—' }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - ClickHouse: ${{ inputs.clickhouse_enabled && format('{0} (v{1})', '✓', inputs.clickhouse_version) || '—' }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - Redis: ${{ inputs.redis_enabled && format('{0} (v{1})', '✓', inputs.redis_version) || '—' }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - Kafka: ${{ inputs.kafka_enabled && format('{0} (v{1})', '✓', inputs.kafka_version) || '—' }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Coverage:** ${{ inputs.coverage_enabled && '✓' || '—' }}" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Test (${{ inputs.language }})"
+            echo ""
+            echo "- **Language:** ${{ inputs.language }} ${{ inputs.language_version }}"
+            echo "- **Custom command:** ${{ inputs.test_command != '' && 'Yes' || 'Default' }}"
+            echo "- **Services:**"
+            echo "  - PostgreSQL: ${{ inputs.postgres_enabled && format('{0} (v{1})', '✓', inputs.postgres_version) || '—' }}"
+            echo "  - ClickHouse: ${{ inputs.clickhouse_enabled && format('{0} (v{1})', '✓', inputs.clickhouse_version) || '—' }}"
+            echo "  - Redis: ${{ inputs.redis_enabled && format('{0} (v{1})', '✓', inputs.redis_version) || '—' }}"
+            echo "  - Kafka: ${{ inputs.kafka_enabled && format('{0} (v{1})', '✓', inputs.kafka_version) || '—' }}"
+            echo "- **Coverage:** ${{ inputs.coverage_enabled && '✓' || '—' }}"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -247,7 +247,7 @@ jobs:
         # must not fail the PR.
         continue-on-error: true
         if: always() && hashFiles('trivy-sast.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-sast.sarif
           category: trivy-sast
@@ -255,11 +255,13 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## Trivy Vulnerability Scan" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Severity:** ${{ inputs.trivy_severity }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Scan type:** ${{ inputs.scan_type }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Scanners:** ${{ inputs.trivy_scanners }}" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Trivy Vulnerability Scan"
+            echo ""
+            echo "- **Severity:** ${{ inputs.trivy_severity }}"
+            echo "- **Scan type:** ${{ inputs.scan_type }}"
+            echo "- **Scanners:** ${{ inputs.trivy_scanners }}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
   # pip-audit: Python Dependency CVE Scanner (OSV database)
@@ -309,16 +311,18 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## pip-audit Python Dependency Audit" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Checked Python dependencies against the OSV vulnerability database." >> "$GITHUB_STEP_SUMMARY"
-          if [ -n "${{ inputs.pip_audit_path }}" ]; then
-            echo "- **Source:** \`${{ inputs.pip_audit_path }}\`" >> "$GITHUB_STEP_SUMMARY"
-          elif [ -f "uv.lock" ]; then
-            echo "- **Source:** \`uv.lock\` (exported)" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- **Source:** \`requirements.txt\` / installed environment" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          {
+            echo "## pip-audit Python Dependency Audit"
+            echo ""
+            echo "Checked Python dependencies against the OSV vulnerability database."
+            if [ -n "${{ inputs.pip_audit_path }}" ]; then
+              echo "- **Source:** \`${{ inputs.pip_audit_path }}\`"
+            elif [ -f "uv.lock" ]; then
+              echo "- **Source:** \`uv.lock\` (exported)"
+            else
+              echo "- **Source:** \`requirements.txt\` / installed environment"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
   # Gitleaks: Secret Detection (all languages)
@@ -353,9 +357,11 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## Gitleaks Secret Detection" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Scanned full git history for secrets and credentials." >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Gitleaks Secret Detection"
+            echo ""
+            echo "Scanned full git history for secrets and credentials."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
   # Gosec: Go Source Code SAST
@@ -393,9 +399,11 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## Gosec Go Security Scanner" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Args:** \`${{ inputs.gosec_args }}\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Gosec Go Security Scanner"
+            echo ""
+            echo "- **Args:** \`${{ inputs.gosec_args }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
   # Bandit: Python Source Code SAST
@@ -430,32 +438,32 @@ jobs:
           if [ -n "${{ inputs.bandit_args }}" ]; then
             # Full override: use caller-supplied args verbatim
             bandit ${{ inputs.bandit_args }}
+          elif [ -f "pyproject.toml" ]; then
+            bandit -c pyproject.toml -r "${{ inputs.bandit_path }}" \
+              --severity-level=medium --confidence-level=medium -f screen
           else
-            # Auto-construct from bandit_path; use pyproject.toml config if present
-            CONFIG_FLAG=""
-            if [ -f "pyproject.toml" ]; then
-              CONFIG_FLAG="-c pyproject.toml"
-            fi
-            bandit $CONFIG_FLAG -r "${{ inputs.bandit_path }}" \
+            bandit -r "${{ inputs.bandit_path }}" \
               --severity-level=medium --confidence-level=medium -f screen
           fi
 
       - name: Summary
         if: always()
         run: |
-          echo "## Bandit Python Security Scanner" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          if [ -n "${{ inputs.bandit_args }}" ]; then
-            echo "- **Args (override):** \`${{ inputs.bandit_args }}\`" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- **Path:** \`${{ inputs.bandit_path }}\`" >> "$GITHUB_STEP_SUMMARY"
-          fi
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Scanned Python source code for:" >> "$GITHUB_STEP_SUMMARY"
-          echo "- SQL injection, command injection" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Insecure functions (\`eval\`, \`exec\`, \`pickle\`)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Hardcoded passwords and secrets" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Weak cryptography" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Bandit Python Security Scanner"
+            echo ""
+            if [ -n "${{ inputs.bandit_args }}" ]; then
+              echo "- **Args (override):** \`${{ inputs.bandit_args }}\`"
+            else
+              echo "- **Path:** \`${{ inputs.bandit_path }}\`"
+            fi
+            echo ""
+            echo "Scanned Python source code for:"
+            echo "- SQL injection, command injection"
+            echo "- Insecure functions (\`eval\`, \`exec\`, \`pickle\`)"
+            echo "- Hardcoded passwords and secrets"
+            echo "- Weak cryptography"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
   # njsscan: Node/JS Source Code SAST
@@ -484,12 +492,14 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## njsscan Node.js Security Scanner" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Args:** \`${{ inputs.njsscan_args }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Scanned JavaScript/Node.js source code for:" >> "$GITHUB_STEP_SUMMARY"
-          echo "- XSS, prototype pollution" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Insecure regex, eval injection" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Command injection, path traversal" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Hardcoded secrets" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## njsscan Node.js Security Scanner"
+            echo ""
+            echo "- **Args:** \`${{ inputs.njsscan_args }}\`"
+            echo ""
+            echo "Scanned JavaScript/Node.js source code for:"
+            echo "- XSS, prototype pollution"
+            echo "- Insecure regex, eval injection"
+            echo "- Command injection, path traversal"
+            echo "- Hardcoded secrets"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -154,8 +154,10 @@ jobs:
           OVERLAY_DIR="${{ steps.overlay.outputs.dir }}"
           IMAGE_TAG="${{ inputs.image_tag }}"
 
-          echo "## Kustomization Updated" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Overlay:** \`${OVERLAY_DIR}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Tag:** \`${IMAGE_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Branch:** \`${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Kustomization Updated"
+            echo ""
+            echo "- **Overlay:** \`${OVERLAY_DIR}\`"
+            echo "- **Tag:** \`${IMAGE_TAG}\`"
+            echo "- **Branch:** \`${{ github.ref_name }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
