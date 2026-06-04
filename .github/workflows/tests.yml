@@ -297,7 +297,7 @@ jobs:
 
       - name: Run Go lint (default)
         if: inputs.language == 'go' && inputs.lint_command == ''
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
           working-directory: ${{ inputs.working_directory }}
