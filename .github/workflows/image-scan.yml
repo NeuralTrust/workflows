@@ -13,9 +13,12 @@
 #   - "1" (block) → any matching CRITICAL/HIGH fixable CVE fails the job.
 #                   Used as the prod promote gate.
 #
-# Findings are uploaded as SARIF to the GitHub Security tab when
-# `upload_sarif: true` (default). The calling workflow must grant
-# `security-events: write` and `actions: read` for SARIF upload to succeed.
+# Findings are always printed as a table in the job log (and the gate blocks
+# there), and are additionally uploaded as SARIF to the GitHub Security tab when
+# `upload_sarif: true` (default). SARIF upload is best-effort (continue-on-error):
+# it needs `security-events: write` + `actions: read` AND GitHub Advanced Security
+# / code scanning enabled on the repo. Where that isn't the case the upload is
+# skipped (logs "Code Security must be enabled") without failing the scan.
 #
 # This workflow intentionally does not set job-level permissions. Reusable
 # workflow token permissions are passed by the caller and can only be
@@ -164,9 +167,13 @@ jobs:
           username: oauth2accesstoken
           password: ${{ steps.auth.outputs.access_token }}
 
+      # Human-readable scan — ALWAYS runs, so findings are visible in the job log,
+      # and it is the blocking gate (exit-code = inputs.exit_code). Keeping the gate
+      # here (not on the SARIF step) means a developer can always see *which* CVEs
+      # blocked the promote, even when SARIF upload is unavailable (e.g. the repo
+      # has no GitHub Advanced Security / code scanning enabled).
       - name: Run Trivy image scan (table)
         id: trivy_table
-        if: ${{ !inputs.upload_sarif }}
         # SHA-pinned to the only post-incident-safe release (Mar 2026 supply-chain
         # compromise, CVE-2026-33634): tags 0.0.1–0.34.2 were force-pushed to
         # malicious commits. Pin trivy itself to a release whose artifacts still
@@ -184,8 +191,11 @@ jobs:
           vuln-type: 'os,library'
           trivyignores: ${{ steps.trivyignore.outputs.path }}
 
+      # SARIF generation for the Security tab. exit-code is forced to 0 (the gate is
+      # the table step above) and this runs even if that gate failed (always()) so
+      # the report is still produced. Upload below is best-effort.
       - name: Run Trivy image scan (SARIF)
-        if: inputs.upload_sarif
+        if: always() && inputs.upload_sarif
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           version: 'v0.71.0'
@@ -195,12 +205,17 @@ jobs:
           severity: ${{ inputs.severity }}
           format: 'sarif'
           output: 'trivy-image.sarif'
-          exit-code: ${{ inputs.exit_code }}
+          exit-code: '0'
           ignore-unfixed: ${{ inputs.ignore_unfixed }}
           vuln-type: 'os,library'
           trivyignores: ${{ steps.trivyignore.outputs.path }}
 
       - name: Upload SARIF to GitHub Security
+        # Best-effort: the Security-tab upload needs GitHub Advanced Security /
+        # code scanning enabled on the repo (plus actions:read). Where it isn't
+        # enabled the upload errors with "Code Security must be enabled" — that must
+        # not fail the scan, since the blocking gate is the table step above.
+        continue-on-error: true
         if: always() && inputs.upload_sarif && hashFiles('trivy-image.sarif') != ''
         uses: github/codeql-action/upload-sarif@v4
         with:

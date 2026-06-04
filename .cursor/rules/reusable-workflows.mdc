@@ -63,9 +63,18 @@ the ceiling (a reusable workflow cannot exceed the caller's token):
 
 `codeql-action/upload-sarif` reads the workflow-run status via the Actions API, so
 on **private** repos it needs `actions: read` in addition to `security-events: write`
-— omitting it fails with `Resource not accessible by integration`. Keep SARIF-upload
-steps `continue-on-error` so the (informational) Security-tab push never blocks the
-PR; the blocking gate is the scan's exit code, not the upload.
+— omitting it fails with `Resource not accessible by integration`. But permissions
+alone aren't enough: the Security tab also requires **GitHub Advanced Security /
+code scanning enabled on the repo** — otherwise upload fails with `Code Security
+must be enabled for this repository` (a `JOB_STATUS_CONFIGURATION_ERROR`). That's an
+org/admin toggle, not something a workflow can grant.
+
+So **every SARIF-upload step must be `continue-on-error: true`** — the Security-tab
+push is informational and must degrade gracefully where GHAS is off. The blocking
+gate is the scan's **table-format step** (`exit-code = exit_code`), never the SARIF
+step. Always run a `format: table` scan so findings are visible in the job log even
+when SARIF upload is unavailable; force the SARIF step to `exit-code: '0'` and
+`if: always()` so it still produces the report after the gate fails.
 
 `image-scan.yml` intentionally omits `security-events: write` (nested-reusable
 limitation); consumers opt in per-job (see `aiapi/ci.yml`).
