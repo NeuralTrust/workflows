@@ -218,12 +218,14 @@ jobs:
           PROD_BASE="${{ inputs.registry }}/${{ inputs.gcp_project_id }}/${{ inputs.repository }}/${{ matrix.image.name }}"
           DEV_BASE="${{ inputs.registry }}/${{ inputs.dev_gcp_project_id }}/${{ inputs.repository }}/${{ matrix.image.name }}"
 
-          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
-          echo "prod_image_base=${PROD_BASE}" >> "$GITHUB_OUTPUT"
-          echo "prod_image_ref=${PROD_BASE}:${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
-          echo "prod_cache_ref=${PROD_BASE}:${P}cache${S}" >> "$GITHUB_OUTPUT"
-          echo "prod_latest_ref=${PROD_BASE}:${P}latest${S}" >> "$GITHUB_OUTPUT"
-          echo "dev_image_base=${DEV_BASE}" >> "$GITHUB_OUTPUT"
+          {
+            echo "release_tag=${RELEASE_TAG}"
+            echo "prod_image_base=${PROD_BASE}"
+            echo "prod_image_ref=${PROD_BASE}:${RELEASE_TAG}"
+            echo "prod_cache_ref=${PROD_BASE}:${P}cache${S}"
+            echo "prod_latest_ref=${PROD_BASE}:${P}latest${S}"
+            echo "dev_image_base=${DEV_BASE}"
+          } >> "$GITHUB_OUTPUT"
 
           TAGS="${PROD_BASE}:${RELEASE_TAG}"
           TAGS="${TAGS},${PROD_BASE}:${P}${{ github.sha }}${S}"
@@ -361,18 +363,22 @@ jobs:
           crane copy "${SOURCE}" "${PROD_BASE}:${TAG_PREFIX}latest${TAG_SUFFIX}"
           crane copy "${SOURCE}" "${PROD_BASE}:${TAG_PREFIX}cache${TAG_SUFFIX}"
 
-          echo "## Image Promoted" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Source:** \`${SOURCE}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Destination:** \`${PROD_BASE}:${RELEASE_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Image Promoted"
+            echo "- **Source:** \`${SOURCE}\`"
+            echo "- **Destination:** \`${PROD_BASE}:${RELEASE_TAG}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # ---- Summary ----
       - name: Job summary
         if: always()
         run: |
-          echo "## ${{ matrix.image.name }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Strategy:** \`${{ steps.strategy.outputs.final }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Image:** \`${{ steps.meta.outputs.prod_image_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Scan target:** \`${{ steps.scan_target.outputs.ref }}\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## ${{ matrix.image.name }}"
+            echo "- **Strategy:** \`${{ steps.strategy.outputs.final }}\`"
+            echo "- **Image:** \`${{ steps.meta.outputs.prod_image_ref }}\`"
+            echo "- **Scan target:** \`${{ steps.scan_target.outputs.ref }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
   # Job 2: Update Kustomization + config.env
@@ -458,10 +464,12 @@ jobs:
           RELEASE_TAG="${{ github.ref_name }}"
           STRATEGY="${{ needs.detect.outputs.strategy }}"
 
-          echo "## Release Deployed" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Release:** \`${RELEASE_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Strategy:** \`${STRATEGY}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Overlay:** \`${OVERLAY_DIR}\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Release Deployed"
+            echo "- **Release:** \`${RELEASE_TAG}\`"
+            echo "- **Strategy:** \`${STRATEGY}\`"
+            echo "- **Overlay:** \`${OVERLAY_DIR}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
   # Job 3: Slack Notification
@@ -488,7 +496,7 @@ jobs:
           STRATEGY="${{ needs.detect.outputs.strategy }}"
 
           if [ "$RELEASE_RESULT" = "success" ] \
-             && ([ "$KUSTOMIZE_RESULT" = "success" ] || [ "$KUSTOMIZE_RESULT" = "skipped" ]); then
+             && { [ "$KUSTOMIZE_RESULT" = "success" ] || [ "$KUSTOMIZE_RESULT" = "skipped" ]; }; then
             COLOR="#36a64f"
             STATUS="Released"
             if [ "$STRATEGY" = "promote" ]; then

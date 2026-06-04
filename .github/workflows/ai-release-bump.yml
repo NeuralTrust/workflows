@@ -179,8 +179,10 @@ jobs:
           fi
 
           echo "Found $COMMIT_COUNT commits since last release."
-          echo "has_commits=true" >> "$GITHUB_OUTPUT"
-          echo "count=${COMMIT_COUNT}" >> "$GITHUB_OUTPUT"
+          {
+            echo "has_commits=true"
+            echo "count=${COMMIT_COUNT}"
+          } >> "$GITHUB_OUTPUT"
 
           # Write commits to file (for the OpenAI request and release notes)
           echo "$COMMITS" > commits.txt
@@ -188,9 +190,11 @@ jobs:
           # Also set as output (truncated for safety)
           TRUNCATED=$(echo "$COMMITS" | head -100)
           EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-          echo "log<<${EOF}" >> "$GITHUB_OUTPUT"
-          echo "${TRUNCATED}" >> "$GITHUB_OUTPUT"
-          echo "${EOF}" >> "$GITHUB_OUTPUT"
+          {
+            echo "log<<${EOF}"
+            echo "${TRUNCATED}"
+            echo "${EOF}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: AI determines semver bump
         id: ai
@@ -452,12 +456,14 @@ jobs:
             --notes-file release_notes.md \
             --target "$TARGET_SHA"
 
-          echo "## Release Created" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Version:** \`${VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Bump:** ${BUMP}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Reason:** ${REASON}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Previous:** \`${PREVIOUS:-none}\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Release Created"
+            echo ""
+            echo "- **Version:** \`${VERSION}\`"
+            echo "- **Bump:** ${BUMP}"
+            echo "- **Reason:** ${REASON}"
+            echo "- **Previous:** \`${PREVIOUS:-none}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Skip — no new commits
         if: steps.bump-guard.outputs.skip != 'true' && steps.commits.outputs.has_commits != 'true'
