@@ -151,9 +151,11 @@ jobs:
             exit 1
           fi
           EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
-          echo "token<<${EOF}" >> "$GITHUB_OUTPUT"
-          echo "$TOKEN" >> "$GITHUB_OUTPUT"
-          echo "${EOF}" >> "$GITHUB_OUTPUT"
+          {
+            echo "token<<${EOF}"
+            echo "$TOKEN"
+            echo "${EOF}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Prepare ZAP auth config (JWT)
         id: zap_auth
@@ -189,8 +191,10 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## DAST (OWASP ZAP)" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Target:** \`${{ inputs.target_url }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Auth:** ${{ inputs.auth_method }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Severity threshold (reserved):** ${{ inputs.severity_threshold }}" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## DAST (OWASP ZAP)"
+            echo ""
+            echo "- **Target:** \`${{ inputs.target_url }}\`"
+            echo "- **Auth:** ${{ inputs.auth_method }}"
+            echo "- **Severity threshold (reserved):** ${{ inputs.severity_threshold }}"
+          } >> "$GITHUB_STEP_SUMMARY"

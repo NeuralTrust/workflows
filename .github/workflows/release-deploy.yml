@@ -243,11 +243,13 @@ jobs:
         run: |
           OVERLAY_DIR="${{ inputs.overlay_path }}"
 
-          echo "## Release Deployed" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Release:** \`${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Image:** \`${{ needs.build-push.outputs.image_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Overlay:** \`${OVERLAY_DIR}\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Release Deployed"
+            echo ""
+            echo "- **Release:** \`${{ github.ref_name }}\`"
+            echo "- **Image:** \`${{ needs.build-push.outputs.image_ref }}\`"
+            echo "- **Overlay:** \`${OVERLAY_DIR}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
   # Job 3: Slack Notification

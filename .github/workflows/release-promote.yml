@@ -204,9 +204,11 @@ jobs:
             DEV_SHA=$(echo "$DEV_PR" | jq -r '.head.sha')
             echo "Found merged PR #${PR_NUM} from ${{ inputs.dev_branch }} → main"
             echo "Develop tip SHA: ${DEV_SHA}"
-            echo "initial=promote" >> "$GITHUB_OUTPUT"
-            echo "dev_sha=${DEV_SHA}" >> "$GITHUB_OUTPUT"
-            echo "pr_number=${PR_NUM}" >> "$GITHUB_OUTPUT"
+            {
+              echo "initial=promote"
+              echo "dev_sha=${DEV_SHA}"
+              echo "pr_number=${PR_NUM}"
+            } >> "$GITHUB_OUTPUT"
           else
             # Fallback: check merge commit parents, but ONLY promote if the
             # second parent actually belongs to the dev branch.
@@ -245,12 +247,14 @@ jobs:
           PROD_BASE="${{ inputs.registry }}/${{ inputs.gcp_project_id }}/${{ inputs.repository }}/${{ inputs.image_name }}"
           DEV_BASE="${{ inputs.registry }}/${{ inputs.dev_gcp_project_id }}/${{ inputs.repository }}/${{ inputs.image_name }}"
 
-          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
-          echo "prod_image_base=${PROD_BASE}" >> "$GITHUB_OUTPUT"
-          echo "prod_image_ref=${PROD_BASE}:${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
-          echo "prod_cache_ref=${PROD_BASE}:${P}cache${S}" >> "$GITHUB_OUTPUT"
-          echo "prod_latest_ref=${PROD_BASE}:${P}latest${S}" >> "$GITHUB_OUTPUT"
-          echo "dev_image_base=${DEV_BASE}" >> "$GITHUB_OUTPUT"
+          {
+            echo "release_tag=${RELEASE_TAG}"
+            echo "prod_image_base=${PROD_BASE}"
+            echo "prod_image_ref=${PROD_BASE}:${RELEASE_TAG}"
+            echo "prod_cache_ref=${PROD_BASE}:${P}cache${S}"
+            echo "prod_latest_ref=${PROD_BASE}:${P}latest${S}"
+            echo "dev_image_base=${DEV_BASE}"
+          } >> "$GITHUB_OUTPUT"
 
           # Tags for prod registry
           TAGS="${PROD_BASE}:${RELEASE_TAG}"
@@ -352,9 +356,11 @@ jobs:
       - name: Rebuild summary
         if: steps.strategy.outputs.final == 'rebuild'
         run: |
-          echo "## Image Built (Rebuild)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Image:** \`${{ steps.meta.outputs.prod_image_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Reason:** Hotfix or direct push (no dev image to promote)" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Image Built (Rebuild)"
+            echo "- **Image:** \`${{ steps.meta.outputs.prod_image_ref }}\`"
+            echo "- **Reason:** Hotfix or direct push (no dev image to promote)"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # ----------------------------------------------------------------
       # Resolve scan target — for promote this is the dev source image
@@ -449,9 +455,11 @@ jobs:
           crane copy "${SOURCE}" "${PROD_BASE}:${P}latest${S}"
           crane copy "${SOURCE}" "${PROD_BASE}:${P}cache${S}"
 
-          echo "## Image Promoted" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Source:** \`${SOURCE}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Destination:** \`${PROD_BASE}:${RELEASE_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Image Promoted"
+            echo "- **Source:** \`${SOURCE}\`"
+            echo "- **Destination:** \`${PROD_BASE}:${RELEASE_TAG}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
   # Job 4: Update Kustomization + config.env (gated on scan + promote-copy)
@@ -528,10 +536,12 @@ jobs:
           OVERLAY_DIR="${{ inputs.overlay_path }}"
           STRATEGY="${{ needs.release.outputs.strategy }}"
 
-          echo "## Deployment Updated" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Strategy:** \`${STRATEGY}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Image:** \`${{ needs.release.outputs.image_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Overlay:** \`${OVERLAY_DIR}\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Deployment Updated"
+            echo "- **Strategy:** \`${STRATEGY}\`"
+            echo "- **Image:** \`${{ needs.release.outputs.image_ref }}\`"
+            echo "- **Overlay:** \`${OVERLAY_DIR}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
   # Job 3: Slack Notification
@@ -561,8 +571,8 @@ jobs:
 
           if [ "$RELEASE_RESULT" = "success" ] \
              && [ "$SCAN_RESULT" = "success" ] \
-             && ([ "$PROMOTE_COPY_RESULT" = "success" ] || [ "$PROMOTE_COPY_RESULT" = "skipped" ]) \
-             && ([ "$KUSTOMIZE_RESULT" = "success" ] || [ "$KUSTOMIZE_RESULT" = "skipped" ]); then
+             && { [ "$PROMOTE_COPY_RESULT" = "success" ] || [ "$PROMOTE_COPY_RESULT" = "skipped" ]; } \
+             && { [ "$KUSTOMIZE_RESULT" = "success" ] || [ "$KUSTOMIZE_RESULT" = "skipped" ]; }; then
             COLOR="#36a64f"
             STATUS="Released"
             if [ "$STRATEGY" = "promote" ]; then
