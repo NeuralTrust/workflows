@@ -3,15 +3,14 @@
 # ==============================================================================
 # Scorecard audits repo-level security hygiene that lints can't see: branch
 # protection, token permissions, pinned dependencies, dangerous workflow
-# patterns, code review enforcement, and more. Results land in the Security
-# tab so regressions are visible over time.
+# patterns, code review enforcement, and more.
 #
 # NOTES:
 #   - `publish_results` is disabled by default so this is safe on private /
 #     internal repos. If this repo is (or becomes) PUBLIC, set it to true to
 #     publish to the OpenSSF API and enable a Scorecard badge.
-#   - SARIF upload to the Security tab requires GitHub code scanning
-#     (GitHub Advanced Security on private repos).
+#   - We don't have GitHub Advanced Security, so the SARIF can't go to the
+#     Security tab — it's saved as a downloadable run artifact instead.
 # ==============================================================================
 
 name: OpenSSF Scorecard
@@ -36,10 +35,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      security-events: write  # upload SARIF to the Security tab
       id-token: write         # required only when publish_results is true
       contents: read
-      actions: read
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -53,8 +50,12 @@ jobs:
           results_format: sarif
           publish_results: false
 
-      - name: Upload SARIF
-        uses: github/codeql-action/upload-sarif@v4
+      # No GitHub Advanced Security → save SARIF as a downloadable artifact instead
+      # of pushing to the Security tab. Short retention keeps storage negligible.
+      - name: Save Scorecard SARIF report as artifact
+        if: always() && hashFiles('scorecard.sarif') != ''
+        uses: actions/upload-artifact@v4
         with:
-          sarif_file: scorecard.sarif
-          category: scorecard
+          name: scorecard-sarif
+          path: scorecard.sarif
+          retention-days: 3

@@ -11,9 +11,9 @@
 #   - hygiene:    reusable-workflow rules that lints can't express — most
 #                 importantly, reusable workflows must reference composite
 #                 actions by full repo ref, never by local ./ path (BLOCKING).
-#   - zizmor:     GitHub Actions security static analysis. Results are uploaded
-#                 to the Security tab (SARIF) as INFORMATIONAL, matching this
-#                 repo's SAST posture (Trivy blocks, others surface as warnings).
+#   - zizmor:     GitHub Actions security static analysis (INFORMATIONAL). Findings
+#                 print to the log and the SARIF is saved as a run artifact (we have
+#                 no GitHub Advanced Security, so the Security tab isn't available).
 #                 The unpinned-uses audit is relaxed to "ref-pin" via
 #                 .github/zizmor.yml since the repo pins to release tags and
 #                 lets Dependabot bump them. Flip the gate step below to blocking
@@ -102,8 +102,6 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-      security-events: write  # upload SARIF to the Security tab
-      actions: read           # read workflow run metadata (private repos)
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -113,8 +111,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
-      # Informational: never fails the job, but every finding lands in the
-      # Security tab via the SARIF upload below.
+      # Informational: never fails the job. zizmor also prints findings to the log;
+      # the SARIF below is saved as an artifact for later inspection.
       - name: Run zizmor (SARIF, informational)
         continue-on-error: true
         env:
@@ -124,13 +122,12 @@ jobs:
             --config .github/zizmor.yml \
             --format sarif --output zizmor.sarif .
 
-      # Best-effort: needs code scanning (GitHub Advanced Security) enabled on this
-      # repo. Where it isn't, upload logs "Code Security must be enabled" — keep this
-      # informational, never fail Workflows CI on it.
-      - name: Upload zizmor SARIF
-        continue-on-error: true
+      # We don't have GitHub Advanced Security, so SARIF can't go to the Security
+      # tab. Save it as a downloadable artifact instead. Short retention.
+      - name: Save zizmor SARIF report as artifact
         if: always() && hashFiles('zizmor.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v4
+        uses: actions/upload-artifact@v4
         with:
-          sarif_file: zizmor.sarif
-          category: zizmor
+          name: zizmor-sarif
+          path: zizmor.sarif
+          retention-days: 3
