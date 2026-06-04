@@ -215,15 +215,17 @@ jobs:
             MODE="block"
           fi
 
-          echo "## Trivy Image Scan" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Image:** \`${{ inputs.image_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Severity:** \`${{ inputs.severity }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Scanners:** \`${{ inputs.scanners }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Fixable only:** \`${{ inputs.ignore_unfixed }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Mode:** \`${MODE}\` (exit_code=${{ inputs.exit_code }})" >> "$GITHUB_STEP_SUMMARY"
-          if [ -n "${{ steps.trivyignore.outputs.path }}" ]; then
-            echo "- **Ignore file:** \`${{ steps.trivyignore.outputs.path }}\`" >> "$GITHUB_STEP_SUMMARY"
-          fi
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Full findings are available in the scan logs above and (when enabled) under the repository \`Security\` tab." >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Trivy Image Scan"
+            echo ""
+            echo "- **Image:** \`${{ inputs.image_ref }}\`"
+            echo "- **Severity:** \`${{ inputs.severity }}\`"
+            echo "- **Scanners:** \`${{ inputs.scanners }}\`"
+            echo "- **Fixable only:** \`${{ inputs.ignore_unfixed }}\`"
+            echo "- **Mode:** \`${MODE}\` (exit_code=${{ inputs.exit_code }})"
+            if [ -n "${{ steps.trivyignore.outputs.path }}" ]; then
+              echo "- **Ignore file:** \`${{ steps.trivyignore.outputs.path }}\`"
+            fi
+            echo ""
+            echo "Full findings are available in the scan logs above and (when enabled) under the repository \`Security\` tab."
+          } >> "$GITHUB_STEP_SUMMARY"

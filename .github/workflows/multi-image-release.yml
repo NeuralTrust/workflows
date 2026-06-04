@@ -214,9 +214,11 @@ jobs:
           OVERLAY_DIR="${{ inputs.overlay_path }}"
           RELEASE_TAG="${{ github.ref_name }}"
 
-          echo "## Release Deployed" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Release:** \`${RELEASE_TAG}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Overlay:** \`${OVERLAY_DIR}\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Release Deployed"
+            echo "- **Release:** \`${RELEASE_TAG}\`"
+            echo "- **Overlay:** \`${OVERLAY_DIR}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
   # Job 3: Slack Notification
@@ -241,7 +243,7 @@ jobs:
           BUILD="${{ needs.build.result }}"
           KUSTOMIZE="${{ needs.update-kustomization.result }}"
 
-          if [ "$BUILD" = "success" ] && ([ "$KUSTOMIZE" = "success" ] || [ "$KUSTOMIZE" = "skipped" ]); then
+          if [ "$BUILD" = "success" ] && { [ "$KUSTOMIZE" = "success" ] || [ "$KUSTOMIZE" = "skipped" ]; }; then
             COLOR="#36a64f"
             STATUS="Released"
             EMOJI=":white_check_mark:"

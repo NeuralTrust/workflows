@@ -150,10 +150,12 @@ jobs:
 
       - name: Summary
         run: |
-          echo "## Docker Image Built & Pushed" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Image:** \`${{ steps.build.outputs.image_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Latest:** \`${{ steps.build.outputs.latest_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
-          if [[ "${{ steps.build.outputs.has_git_tag }}" == "true" ]]; then
-            echo "- **Semver:** \`${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          {
+            echo "## Docker Image Built & Pushed"
+            echo ""
+            echo "- **Image:** \`${{ steps.build.outputs.image_ref }}\`"
+            echo "- **Latest:** \`${{ steps.build.outputs.latest_ref }}\`"
+            if [[ "${{ steps.build.outputs.has_git_tag }}" == "true" ]]; then
+              echo "- **Semver:** \`${{ github.ref_name }}\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

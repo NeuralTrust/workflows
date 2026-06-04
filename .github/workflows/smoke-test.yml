@@ -125,10 +125,12 @@ jobs:
                 echo ""
                 echo "Response: ${RESPONSE}"
                 echo ""
-                echo "result=success" >> "$GITHUB_OUTPUT"
-                echo "response=${RESPONSE}" >> "$GITHUB_OUTPUT"
-                echo "http_code=${HTTP_CODE}" >> "$GITHUB_OUTPUT"
-                echo "elapsed=${ELAPSED}" >> "$GITHUB_OUTPUT"
+                {
+                  echo "result=success"
+                  echo "response=${RESPONSE}"
+                  echo "http_code=${HTTP_CODE}"
+                  echo "elapsed=${ELAPSED}"
+                } >> "$GITHUB_OUTPUT"
                 exit 0
               else
                 echo "[${TIMESTAMP}] Service responding (HTTP ${HTTP_CODE}) but version not matched yet"
@@ -156,18 +158,22 @@ jobs:
             echo "  Expected: ${EXPECTED}"
             echo "  Response: ${RESPONSE}"
             echo ""
-            echo "result=warning" >> "$GITHUB_OUTPUT"
-            echo "response=${RESPONSE}" >> "$GITHUB_OUTPUT"
-            echo "http_code=${HTTP_CODE}" >> "$GITHUB_OUTPUT"
-            echo "elapsed=${ELAPSED}" >> "$GITHUB_OUTPUT"
+            {
+              echo "result=warning"
+              echo "response=${RESPONSE}"
+              echo "http_code=${HTTP_CODE}"
+              echo "elapsed=${ELAPSED}"
+            } >> "$GITHUB_OUTPUT"
           else
             echo "🚨 PROBLEM: Service not responding at all!"
             echo "  HTTP code: ${HTTP_CODE}"
             echo ""
-            echo "result=problem" >> "$GITHUB_OUTPUT"
-            echo "response=" >> "$GITHUB_OUTPUT"
-            echo "http_code=${HTTP_CODE}" >> "$GITHUB_OUTPUT"
-            echo "elapsed=${ELAPSED}" >> "$GITHUB_OUTPUT"
+            {
+              echo "result=problem"
+              echo "response="
+              echo "http_code=${HTTP_CODE}"
+              echo "elapsed=${ELAPSED}"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - name: Send Slack notification
@@ -195,19 +201,19 @@ jobs:
               COLOR="#36a64f"
               EMOJI=":white_check_mark:"
               TITLE="Smoke Test Passed"
-              MSG="New version \`${SHORT_VERSION}\` is live on *${ENV}*"
+              MSG="New version \`${SHORT_VERSION}\` is live on *${ENV}* (${ELAPSED}s)"
               ;;
             warning)
               COLOR="#ff9900"
               EMOJI=":warning:"
               TITLE="Smoke Test Warning"
-              MSG="Service healthy on *${ENV}* but still running *old version* after ${{ inputs.timeout_minutes }}min. Expected \`${SHORT_VERSION}\`. FluxCD sync may be delayed."
+              MSG="Service healthy on *${ENV}* but still running *old version* after ${ELAPSED}s (timeout ${{ inputs.timeout_minutes }}min). Expected \`${SHORT_VERSION}\`. FluxCD sync may be delayed."
               ;;
             problem)
               COLOR="#dc3545"
               EMOJI=":rotating_light:"
               TITLE="Smoke Test FAILED"
-              MSG="Service *not responding* on *${ENV}* after ${{ inputs.timeout_minutes }}min! Health endpoint: \`${URL}\`"
+              MSG="Service *not responding* on *${ENV}* after ${ELAPSED}s (timeout ${{ inputs.timeout_minutes }}min)! Health endpoint: \`${URL}\`"
               ;;
             *)
               COLOR="#808080"
@@ -285,25 +291,27 @@ jobs:
         if: always()
         run: |
           RESULT="${{ steps.poll.outputs.result }}"
-          echo "## Smoke Test (${{ inputs.environment }})" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Smoke Test (${{ inputs.environment }})"
+            echo ""
 
-          case "$RESULT" in
-            success)
-              echo "**Result:** ✅ New version deployed and verified" >> "$GITHUB_STEP_SUMMARY"
-              ;;
-            warning)
-              echo "**Result:** ⚠️ Service healthy but old version still running" >> "$GITHUB_STEP_SUMMARY"
-              echo "" >> "$GITHUB_STEP_SUMMARY"
-              echo "> FluxCD sync or rolling update may still be in progress." >> "$GITHUB_STEP_SUMMARY"
-              ;;
-            problem)
-              echo "**Result:** 🚨 Service not responding" >> "$GITHUB_STEP_SUMMARY"
-              ;;
-          esac
+            case "$RESULT" in
+              success)
+                echo "**Result:** ✅ New version deployed and verified"
+                ;;
+              warning)
+                echo "**Result:** ⚠️ Service healthy but old version still running"
+                echo ""
+                echo "> FluxCD sync or rolling update may still be in progress."
+                ;;
+              problem)
+                echo "**Result:** 🚨 Service not responding"
+                ;;
+            esac
 
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **URL:** \`${{ inputs.health_url }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Expected:** \`${{ inputs.expected_version }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Timeout:** ${{ inputs.timeout_minutes }} min" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **HTTP Code:** \`${{ steps.poll.outputs.http_code }}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo ""
+            echo "- **URL:** \`${{ inputs.health_url }}\`"
+            echo "- **Expected:** \`${{ inputs.expected_version }}\`"
+            echo "- **Timeout:** ${{ inputs.timeout_minutes }} min"
+            echo "- **HTTP Code:** \`${{ steps.poll.outputs.http_code }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
