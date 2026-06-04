@@ -71,7 +71,7 @@ findings via:
    (`exit-code = exit_code`), never a SARIF step.
 2. The **step summary**.
 3. The SARIF file saved with **`actions/upload-artifact`** (short `retention-days`,
-   e.g. 3) — downloadable, needs no special scopes.
+   e.g. 7) — downloadable, needs no special scopes.
 
 Generate SARIF with `exit-code: '0'` and `if: always()` so the report is still
 produced after the gate fails, then upload it as an artifact. `security-events: write`

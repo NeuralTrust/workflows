@@ -706,7 +706,7 @@ We don't have GitHub Advanced Security, so the **Security tab / code scanning is
 
 - **Job log** — the Trivy **table** scan prints findings inline (this is also the blocking gate, via `trivy_exit_code`).
 - **Step summary** — a short markdown summary per scanner.
-- **Run artifact** — the full SARIF is saved as the `trivy-sast-sarif` artifact (3-day retention), downloadable from the run's *Artifacts* section.
+- **Run artifact** — the full SARIF is saved as the `trivy-sast-sarif` artifact (7-day retention), downloadable from the run's *Artifacts* section.
 
 No special permissions are required — `contents: read` is enough:
 
@@ -1135,7 +1135,7 @@ Both modes scan for **CRITICAL,HIGH** severity and count only **fixable** CVEs (
 
 **`image-scan.yml`** — Pulls an image from Artifact Registry, scans OS packages and application dependencies, prints findings to the job log, and saves the SARIF as a downloadable run artifact.
 
-Findings are **always printed as a table in the job log** and the blocking gate lives there (`exit_code`), so a blocked promote always shows *which* CVEs caused it. The SARIF report is saved as the `trivy-image-sarif` run artifact (3-day retention) — there's no Security-tab upload (we don't have GitHub Advanced Security). Only `contents: read` + `id-token: write` (to pull the image) are needed.
+Findings are **always printed as a table in the job log** and the blocking gate lives there (`exit_code`), so a blocked promote always shows *which* CVEs caused it. The SARIF report is saved as the `trivy-image-sarif` run artifact (7-day retention) — there's no Security-tab upload (we don't have GitHub Advanced Security). Only `contents: read` + `id-token: write` (to pull the image) are needed.
 
 ```yaml
 jobs:

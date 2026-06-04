@@ -763,7 +763,7 @@ jobs:
         with:
           name: coverage-${{ inputs.coverage_file }}
           path: ${{ inputs.working_directory }}/${{ inputs.coverage_file }}
-          retention-days: 14
+          retention-days: 7
 
       # ================================================================
       # Cleanup

@@ -58,4 +58,4 @@ jobs:
         with:
           name: scorecard-sarif
           path: scorecard.sarif
-          retention-days: 3
+          retention-days: 7
