@@ -130,4 +130,4 @@ jobs:
         with:
           name: zizmor-sarif
           path: zizmor.sarif
-          retention-days: 3
+          retention-days: 7

@@ -198,7 +198,7 @@ jobs:
         with:
           name: trivy-image-sarif
           path: 'trivy-image.sarif'
-          retention-days: 3
+          retention-days: 7
 
       - name: Summary
         if: always()
