@@ -82,6 +82,14 @@ and `actions: read` are **not** needed anywhere — drop them from new callers.
 - Add `concurrency:` (group per ref, `cancel-in-progress: false` for deploy/release) and `timeout-minutes:` to every job.
 - Commit/push via the `git-commit-push` composite action (rebase + retry), never raw `git push`.
 - Don't rely on **matrix job outputs** (GitHub collapses them) — do per-item work inside the matrix job.
+- **Write workflow scratch files to `$RUNNER_TEMP`, never the repo checkout.** A step
+  that does `git add .` (e.g. `git-commit-push` with `paths: .`) will sweep up stray
+  untracked files (`commits.txt`, `request.json`, `*.sarif`, …) and create an
+  unintended commit. In `ai-release-bump.yml` this once tagged the release on a bogus
+  `chore: bump version` commit instead of the develop→main merge commit, so
+  `release-promote.yml` couldn't find the dev PR and silently **rebuilt instead of
+  promoted**. If a commit step must use `paths: .`, ensure nothing else writes into the
+  working tree.
 
 ## 6. Changing the consumer contract
 
