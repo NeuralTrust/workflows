@@ -84,10 +84,10 @@ jobs:
 
     steps:
       - name: Checkout calling repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Checkout workflow scripts
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.repository_owner }}/workflows
           ref: ${{ inputs.workflows_ref }}
