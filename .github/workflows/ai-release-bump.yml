@@ -184,8 +184,12 @@ jobs:
             echo "count=${COMMIT_COUNT}"
           } >> "$GITHUB_OUTPUT"
 
-          # Write commits to file (for the OpenAI request and release notes)
-          echo "$COMMITS" > commits.txt
+          # Write commits to a scratch file OUTSIDE the repo working tree.
+          # Anything left in the checkout would be swept up by the later
+          # `git add .` in git-commit-push, producing a bogus bump commit that
+          # the release tag then points at — which breaks promote detection in
+          # release-promote.yml (it looks for the develop→main merge commit).
+          echo "$COMMITS" > "${RUNNER_TEMP}/commits.txt"
 
           # Also set as output (truncated for safety)
           TRUNCATED=$(echo "$COMMITS" | head -100)
@@ -214,7 +218,12 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           }
 
-          cat > request.json << 'REQEOF'
+          # Scratch files live under RUNNER_TEMP (outside the repo) so they are
+          # never picked up by the `git add .` in the later commit step.
+          REQUEST_JSON="${RUNNER_TEMP}/request.json"
+          COMMITS_TXT="${RUNNER_TEMP}/commits.txt"
+
+          cat > "$REQUEST_JSON" << 'REQEOF'
           {
             "model": "${{ inputs.model }}",
             "response_format": { "type": "json_object" },
@@ -233,23 +242,28 @@ jobs:
           }
           REQEOF
 
-          # Replace placeholder with actual commits (handles special characters)
-          python3 -c "
-          import json, sys
-          with open('request.json') as f:
+          # Replace placeholder with actual commits (handles special characters).
+          # Paths/version passed via env so untrusted values aren't interpolated
+          # into the python source.
+          REQUEST_JSON="$REQUEST_JSON" COMMITS_TXT="$COMMITS_TXT" \
+          CUR_VERSION="${{ steps.latest-tag.outputs.version }}" python3 - <<'PY'
+          import json, os
+          req = os.environ["REQUEST_JSON"]
+          with open(req) as f:
               data = f.read()
-          with open('commits.txt') as f:
+          with open(os.environ["COMMITS_TXT"]) as f:
               commits = f.read()
-          data = data.replace('COMMITS_PLACEHOLDER', json.dumps('Current version: ${{ steps.latest-tag.outputs.version }}\n\nCommits since last release:\n' + commits))
-          with open('request.json', 'w') as f:
+          payload = "Current version: " + os.environ["CUR_VERSION"] + "\n\nCommits since last release:\n" + commits
+          data = data.replace("COMMITS_PLACEHOLDER", json.dumps(payload))
+          with open(req, "w") as f:
               f.write(data)
-          "
+          PY
 
           # Call OpenAI API
           RESPONSE=$(curl -s https://api.openai.com/v1/chat/completions \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $OPENAI_API_KEY" \
-            -d @request.json)
+            -d @"$REQUEST_JSON")
 
           # Check for API errors
           if echo "$RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
@@ -434,14 +448,16 @@ jobs:
 
           # Build release notes. Consuming repos (e.g. neuraltrust-platform
           # publish-chart.yml) append Container images + Installation after this.
-          cat > release_notes.md << EOF
+          # Scratch files under RUNNER_TEMP so they never enter a commit.
+          RELEASE_NOTES="${RUNNER_TEMP}/release_notes.md"
+          cat > "$RELEASE_NOTES" << EOF
           ## What changed
 
           **${BUMP} release** — ${REASON}
 
           ### Commits
 
-          $(cat commits.txt)
+          $(cat "${RUNNER_TEMP}/commits.txt")
           EOF
 
           if [ -n "$PREVIOUS" ]; then
@@ -453,7 +469,7 @@ jobs:
           echo "Creating release: $VERSION (target: ${TARGET_SHA})"
           gh release create "$VERSION" \
             --title "$TITLE" \
-            --notes-file release_notes.md \
+            --notes-file "$RELEASE_NOTES" \
             --target "$TARGET_SHA"
 
           {
