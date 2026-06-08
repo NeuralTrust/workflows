@@ -244,7 +244,7 @@ jobs:
         # retention keeps storage negligible. Findings are also visible in the table
         # scan log above and the step summary.
         if: always() && hashFiles('trivy-sast.sarif') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trivy-sast-sarif
           path: trivy-sast.sarif
