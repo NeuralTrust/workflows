@@ -90,6 +90,12 @@ and `actions: read` are **not** needed anywhere — drop them from new callers.
   `release-promote.yml` couldn't find the dev PR and silently **rebuilt instead of
   promoted**. If a commit step must use `paths: .`, ensure nothing else writes into the
   working tree.
+- **Promote detection is resilient to commits stacked on the merge.**
+  `release-promote.yml` walks first-parent from the released commit, stepping over
+  *automated* commits only (`chore: bump version`, `docs(changelog):`) and checking
+  both signals (associated dev→main PR, or merge with a dev-branch second parent) at
+  each step. A human commit stops the walk → rebuild. Keep automated commit-message
+  prefixes in sync between `ai-release-bump.yml` (bump-guard) and this walk.
 
 ## 6. Changing the consumer contract
 
