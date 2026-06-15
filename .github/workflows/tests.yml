@@ -41,6 +41,17 @@
 #         language_version: '1.25.1'
 #         kreuzberg_enabled: true
 #         kreuzberg_version: 'v4.1.0'
+#
+# Usage (Go + integration-tagged lint + SQL migrations):
+#   jobs:
+#     test:
+#       uses: NeuralTrust/workflows/.github/workflows/tests.yml@main
+#       with:
+#         language: go
+#         language_version: '1.26.4'
+#         golangci_extra_build_tags: integration
+#         sqlfluff_enabled: true
+#         sqlfluff_paths: internal/infra/migrations
 # ==============================================================================
 
 name: Tests
@@ -107,6 +118,34 @@ on:
         required: false
         type: boolean
         default: false
+      golangci_extra_build_tags:
+        description: >
+          Optional extra golangci-lint pass for Go when lint_command is empty.
+          Value is passed to --build-tags (e.g. integration). Empty disables
+          the extra pass.
+        required: false
+        type: string
+        default: ''
+      sqlfluff_enabled:
+        description: 'Run sqlfluff on SQL migration paths after the default lint steps'
+        required: false
+        type: boolean
+        default: false
+      sqlfluff_paths:
+        description: 'Space-separated paths passed to sqlfluff lint (relative to working_directory)'
+        required: false
+        type: string
+        default: ''
+      sqlfluff_version:
+        description: 'sqlfluff package version'
+        required: false
+        type: string
+        default: '4.2.1'
+      sqlfluff_python_version:
+        description: 'Python version used to install and run sqlfluff'
+        required: false
+        type: string
+        default: '3.13'
 
       # ======================================================================
       # Coverage
@@ -303,6 +342,32 @@ jobs:
           working-directory: ${{ inputs.working_directory }}
           args: --timeout=10m ./...
 
+      - name: Run Go lint (extra build tags)
+        if: inputs.language == 'go' && inputs.lint_command == '' && inputs.golangci_extra_build_tags != ''
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: ${{ inputs.working_directory }}
+          args: --timeout=10m --build-tags=${{ inputs.golangci_extra_build_tags }} ./...
+
+      - name: Set up Python (sqlfluff)
+        if: inputs.sqlfluff_enabled && inputs.sqlfluff_paths != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.sqlfluff_python_version }}
+
+      - name: Run sqlfluff
+        if: inputs.sqlfluff_enabled && inputs.sqlfluff_paths != ''
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          SQLFLUFF_VERSION: ${{ inputs.sqlfluff_version }}
+          SQLFLUFF_PATHS: ${{ inputs.sqlfluff_paths }}
+        run: |
+          pip install "sqlfluff==${SQLFLUFF_VERSION}"
+          # Paths are caller-controlled; space-separated list from sqlfluff_paths.
+          # shellcheck disable=SC2086
+          sqlfluff lint ${SQLFLUFF_PATHS}
+
       # ---- Python ----
       - name: Set up Python
         if: inputs.language == 'python'
@@ -401,6 +466,8 @@ jobs:
             echo ""
             echo "- **Language:** ${{ inputs.language }} ${{ inputs.language_version }}"
             echo "- **Custom command:** ${{ inputs.lint_command != '' && 'Yes' || 'Default' }}"
+            echo "- **golangci extra build tags:** ${{ inputs.golangci_extra_build_tags != '' && inputs.golangci_extra_build_tags || '—' }}"
+            echo "- **sqlfluff:** ${{ inputs.sqlfluff_enabled && inputs.sqlfluff_paths != '' && format('✓ ({0})', inputs.sqlfluff_paths) || '—' }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
