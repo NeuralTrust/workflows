@@ -352,7 +352,7 @@ jobs:
 
       - name: Set up Python (sqlfluff)
         if: inputs.sqlfluff_enabled && inputs.sqlfluff_paths != ''
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ inputs.sqlfluff_python_version }}
 
@@ -371,7 +371,7 @@ jobs:
       # ---- Python ----
       - name: Set up Python
         if: inputs.language == 'python'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ inputs.language_version }}
 
@@ -670,7 +670,7 @@ jobs:
       # ---- Python ----
       - name: Set up Python
         if: inputs.language == 'python'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ inputs.language_version }}
 
