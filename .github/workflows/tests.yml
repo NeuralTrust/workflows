@@ -377,7 +377,7 @@ jobs:
 
       - name: Install uv
         if: inputs.language == 'python'
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
 
       - name: Authenticate to Google Cloud
         if: inputs.language == 'python' && env.HAS_WIF == 'true'
@@ -676,7 +676,7 @@ jobs:
 
       - name: Install uv
         if: inputs.language == 'python'
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
 
       - name: Authenticate to Google Cloud
         if: inputs.language == 'python' && env.HAS_WIF == 'true'
