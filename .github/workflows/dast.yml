@@ -181,7 +181,7 @@ jobs:
           echo "config_file=.zap/options.prop" >> "$GITHUB_OUTPUT"
 
       - name: Run OWASP ZAP Baseline Scan
-        uses: zaproxy/action-baseline@v0.14.0
+        uses: zaproxy/action-baseline@v0.15.0
         with:
           target: ${{ inputs.target_url }}
           cmd_options: ${{ steps.zap_auth.outputs.enabled == 'true' && '-z "-configfile .zap/options.prop"' || '' }}
