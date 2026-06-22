@@ -1,0 +1,315 @@
+# ==============================================================================
+# Reusable Workflow: Backup Organization Git Repositories to GCS
+# ==============================================================================
+# Discovers every repository in a GitHub organization, mirror-clones each one
+# (all branches, tags and notes) into a single `git bundle`, and uploads the
+# bundle plus a SHA-256 checksum to a Google Cloud Storage bucket under a
+# date-partitioned path:
+#
+#     gs://<bucket>/<prefix>/<YYYY-MM-DD>/<repo>.bundle
+#     gs://<bucket>/<prefix>/<YYYY-MM-DD>/<repo>.bundle.sha256
+#
+# A `git bundle` is a self-contained, verifiable snapshot of a repo's history;
+# restore with `git clone <repo>.bundle restored-repo`.
+#
+# SECURITY (this repo is PUBLIC):
+#   - GCP auth uses Workload Identity Federation (OIDC) — no long-lived keys.
+#   - GitHub access uses a short-lived GitHub App installation token (preferred)
+#     or a PAT fallback. The app only needs `contents: read` + `metadata: read`.
+#   - The git auth header is masked and never written to a remote URL or log.
+#   - Least-privilege permissions; all inputs are passed via `env:` (no shell
+#     injection); third-party actions are pinned to release tags.
+#
+# Usage (scheduled caller in a PUBLIC repo):
+#   jobs:
+#     backup:
+#       uses: NeuralTrust/workflows/.github/workflows/repo-backup.yml@main
+#       with:
+#         organization: NeuralTrust
+#         gcs_bucket: nt-git-backups
+#       secrets:
+#         WIF_PROVIDER:        ${{ secrets.WIF_PROVIDER }}
+#         WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+#         BACKUP_APP_ID:          ${{ secrets.BACKUP_APP_ID }}
+#         BACKUP_APP_PRIVATE_KEY: ${{ secrets.BACKUP_APP_PRIVATE_KEY }}
+# ==============================================================================
+
+name: Backup Org Repositories
+
+on:
+  workflow_call:
+    inputs:
+      organization:
+        description: 'GitHub organization whose repositories will be backed up'
+        required: true
+        type: string
+      gcs_bucket:
+        description: 'Destination GCS bucket name (with or without the gs:// prefix)'
+        required: true
+        type: string
+      gcs_prefix:
+        description: 'Path prefix inside the bucket (a date folder is appended automatically)'
+        required: false
+        type: string
+        default: 'git-backups'
+      repo_visibility:
+        description: 'Which repositories to include: all | public | private'
+        required: false
+        type: string
+        default: 'all'
+      include_archived:
+        description: 'Include archived repositories in the backup'
+        required: false
+        type: boolean
+        default: false
+      exclude_repos:
+        description: 'Comma- or newline-separated repository names to skip (exact match)'
+        required: false
+        type: string
+        default: ''
+      max_parallel:
+        description: 'Maximum repositories to back up concurrently'
+        required: false
+        type: number
+        default: 4
+      runner:
+        description: 'GitHub Actions runner label'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+    secrets:
+      WIF_PROVIDER:
+        required: true
+        description: 'GCP Workload Identity Federation provider'
+      WIF_SERVICE_ACCOUNT:
+        required: true
+        description: 'GCP service account email with objectAdmin on the backup bucket'
+      BACKUP_APP_ID:
+        required: false
+        description: 'GitHub App ID with contents:read + metadata:read installed org-wide (preferred)'
+      BACKUP_APP_PRIVATE_KEY:
+        required: false
+        description: 'GitHub App private key (PEM) matching BACKUP_APP_ID'
+      BACKUP_GH_TOKEN:
+        required: false
+        description: 'PAT fallback (read-only repo access) used only when no GitHub App is configured'
+
+# Least privilege by default; jobs opt into more where required.
+permissions:
+  contents: read
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Discover the repositories to back up and emit a matrix.
+  # ----------------------------------------------------------------------------
+  discover:
+    name: Discover repositories
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      HAS_APP: ${{ secrets.BACKUP_APP_ID != '' && secrets.BACKUP_APP_PRIVATE_KEY != '' }}
+    outputs:
+      repos: ${{ steps.list.outputs.repos }}
+      count: ${{ steps.list.outputs.count }}
+      backup_date: ${{ steps.meta.outputs.date }}
+    steps:
+      - name: Mint GitHub App token
+        if: env.HAS_APP == 'true'
+        id: app_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.BACKUP_APP_ID }}
+          private-key: ${{ secrets.BACKUP_APP_PRIVATE_KEY }}
+          # Org-wide, read-only token. Backing up every repo legitimately
+          # requires access to all of them; contents+metadata read is the floor.
+          owner: ${{ inputs.organization }}  # zizmor: ignore[github-app]
+          permission-contents: read
+          permission-metadata: read
+
+      - name: Validate token availability
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token || secrets.BACKUP_GH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::No GitHub credentials available. Provide a GitHub App (BACKUP_APP_ID + BACKUP_APP_PRIVATE_KEY) or BACKUP_GH_TOKEN."
+            exit 1
+          fi
+
+      - name: Resolve backup date
+        id: meta
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: List organization repositories
+        id: list
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token || secrets.BACKUP_GH_TOKEN }}
+          ORG: ${{ inputs.organization }}
+          VISIBILITY: ${{ inputs.repo_visibility }}
+          INCLUDE_ARCHIVED: ${{ inputs.include_archived }}
+          EXCLUDE_REPOS: ${{ inputs.exclude_repos }}
+        run: |
+          set -euo pipefail
+
+          case "$VISIBILITY" in
+            all|public|private) ;;
+            *) echo "::error::repo_visibility must be one of: all, public, private (got '$VISIBILITY')"; exit 1 ;;
+          esac
+
+          # Normalize the exclude list into a JSON array (split on commas/newlines).
+          exclude_json="$(printf '%s' "$EXCLUDE_REPOS" \
+            | tr ',' '\n' \
+            | jq -R . | jq -s -c 'map(gsub("^\\s+|\\s+$";"")) | map(select(. != ""))')"
+
+          # Page through the org repos and keep names, honoring archived + exclude filters.
+          repos="$(gh api --paginate \
+            "orgs/${ORG}/repos?per_page=100&type=${VISIBILITY}" \
+            --jq '.[] | {name: .name, archived: .archived}' \
+            | jq -s -c \
+                --argjson exclude "$exclude_json" \
+                --arg include_archived "$INCLUDE_ARCHIVED" '
+                  map(
+                    select($include_archived == "true" or .archived == false)
+                    | select(.name as $n | ($exclude | index($n)) | not)
+                    | .name
+                  )
+                ')"
+
+          count="$(printf '%s' "$repos" | jq 'length')"
+          {
+            echo "repos=$repos"
+            echo "count=$count"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Discovered ${count} repositories to back up."
+
+      - name: Discovery summary
+        env:
+          ORG: ${{ inputs.organization }}
+          COUNT: ${{ steps.list.outputs.count }}
+          VISIBILITY: ${{ inputs.repo_visibility }}
+          BACKUP_DATE: ${{ steps.meta.outputs.date }}
+        run: |
+          {
+            echo "## Repository backup — discovery"
+            echo ""
+            echo "- **Organization:** \`${ORG}\`"
+            echo "- **Visibility:** \`${VISIBILITY}\`"
+            echo "- **Repositories found:** \`${COUNT}\`"
+            echo "- **Backup date:** \`${BACKUP_DATE}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ----------------------------------------------------------------------------
+  # Mirror-clone each repository and upload a verified bundle to GCS.
+  # ----------------------------------------------------------------------------
+  backup:
+    name: Backup ${{ matrix.repo }}
+    needs: discover
+    if: needs.discover.outputs.repos != '' && needs.discover.outputs.repos != '[]'
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ inputs.max_parallel }}
+      matrix:
+        repo: ${{ fromJson(needs.discover.outputs.repos) }}
+    env:
+      HAS_APP: ${{ secrets.BACKUP_APP_ID != '' && secrets.BACKUP_APP_PRIVATE_KEY != '' }}
+    steps:
+      - name: Mint GitHub App token
+        if: env.HAS_APP == 'true'
+        id: app_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.BACKUP_APP_ID }}
+          private-key: ${{ secrets.BACKUP_APP_PRIVATE_KEY }}
+          # Org-wide, read-only token (see discover job for rationale).
+          owner: ${{ inputs.organization }}  # zizmor: ignore[github-app]
+          permission-contents: read
+          permission-metadata: read
+
+      - name: Mirror-clone repository
+        id: clone
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token || secrets.BACKUP_GH_TOKEN }}
+          ORG: ${{ inputs.organization }}
+          REPO: ${{ matrix.repo }}
+        run: |
+          set -euo pipefail
+
+          # Build a masked Basic auth header (same mechanism actions/checkout uses)
+          # so the token never appears in a remote URL or in command output.
+          auth_b64="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::${auth_b64}"
+
+          work="${RUNNER_TEMP}/backup"
+          mkdir -p "$work"
+          mirror_dir="${work}/${REPO}.git"
+
+          git -c "http.https://github.com/.extraheader=Authorization: Basic ${auth_b64}" \
+            clone --mirror "https://github.com/${ORG}/${REPO}.git" "$mirror_dir"
+
+          bundle_path="${work}/${REPO}.bundle"
+          git -C "$mirror_dir" bundle create "$bundle_path" --all
+          git -C "$mirror_dir" bundle verify "$bundle_path"
+
+          sha256sum "$bundle_path" | awk '{print $1}' > "${bundle_path}.sha256"
+          size="$(du -h "$bundle_path" | cut -f1)"
+
+          {
+            echo "bundle_path=${bundle_path}"
+            echo "bundle_size=${size}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Upload bundle to GCS
+        id: upload
+        env:
+          RAW_BUCKET: ${{ inputs.gcs_bucket }}
+          PREFIX: ${{ inputs.gcs_prefix }}
+          BACKUP_DATE: ${{ needs.discover.outputs.backup_date }}
+          REPO: ${{ matrix.repo }}
+          BUNDLE_PATH: ${{ steps.clone.outputs.bundle_path }}
+        run: |
+          set -euo pipefail
+
+          # Accept bucket with or without gs:// and strip any trailing slash.
+          bucket="${RAW_BUCKET#gs://}"
+          bucket="${bucket%/}"
+          dest="gs://${bucket}/${PREFIX}/${BACKUP_DATE}/${REPO}.bundle"
+
+          gcloud storage cp "$BUNDLE_PATH" "$dest"
+          gcloud storage cp "${BUNDLE_PATH}.sha256" "${dest}.sha256"
+
+          echo "dest=${dest}" >> "$GITHUB_OUTPUT"
+          echo "Uploaded ${REPO} backup to ${dest}"
+
+      - name: Backup summary
+        if: always()
+        env:
+          REPO: ${{ matrix.repo }}
+          DEST: ${{ steps.upload.outputs.dest }}
+          SIZE: ${{ steps.clone.outputs.bundle_size }}
+          STATUS: ${{ job.status }}
+        run: |
+          {
+            echo "### ${REPO}"
+            echo ""
+            echo "- **Status:** \`${STATUS}\`"
+            echo "- **Bundle size:** \`${SIZE:-n/a}\`"
+            echo "- **Destination:** \`${DEST:-not uploaded}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

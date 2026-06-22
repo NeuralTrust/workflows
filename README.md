@@ -101,6 +101,12 @@ Every repo follows the same standardized pipeline:
 | [`build-push-image.yml`](#build--push-image) | Standalone Docker build + push (for advanced composition) |
 | [`update-kustomization.yml`](#update-kustomization) | Update kustomization.yaml + commit/push |
 
+### Operations
+
+| Workflow | Description |
+|----------|-------------|
+| [`repo-backup.yml`](#org-repository-backup) | Mirror-clone every org repo to a `git bundle` and upload to GCS (weekly disaster-recovery snapshot) |
+
 ---
 
 ## Which Release Workflow Should I Use?
@@ -773,6 +779,76 @@ jobs:
 **Example static site repo** (e.g. `web-public` `.github/workflows/site.yml`): on PR — **static** `seo-check.yml` plus **bundle** `npm run build:budget` in parallel; on push to `main` — **`seo-live-url.yml`** when repo variable **`BASE_URL`** is set. Copy `site.yml` into other repos and adjust `app_roots` / scripts as needed.
 
 **`seo-live-url.yml`** — `curl` homepage, optional `robots.txt` + sitemap HEAD, then **`seo-live-content-audit.mjs`**: parse sitemap(s), validate `<loc>` URLs (scheme/host vs `base_url`), sample **HEAD/GET** on up to N URLs, check **`robots.txt`** for `Sitemap:` lines, and on homepage + Lighthouse paths audit **H1**, **`<link rel="canonical">`**, and **`application/ld+json`** (valid JSON). Then Lighthouse SEO on **`base_url`**. Inputs: `content_audit_enabled`, `content_audit_max_url_checks`, `content_audit_strict`. Set repository variable **`BASE_URL`**; job skipped when unset.
+
+---
+
+## Org Repository Backup
+
+**`repo-backup.yml`** — Disaster-recovery snapshot of an entire GitHub org. It discovers every repository, **mirror-clones** each one (all branches, tags and notes), packs the history into a single verifiable **`git bundle`**, and uploads it (plus a SHA-256 checksum) to a Cloud Storage bucket under a date-partitioned path:
+
+```
+gs://<bucket>/<prefix>/<YYYY-MM-DD>/<repo>.bundle
+gs://<bucket>/<prefix>/<YYYY-MM-DD>/<repo>.bundle.sha256
+```
+
+Restore any repo with `git clone <repo>.bundle restored-repo`.
+
+```yaml
+# .github/workflows/backup.yml — scheduler (runs in a PUBLIC repo)
+name: Weekly Org Backup
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    permissions:
+      contents: read
+      id-token: write          # required for GCP Workload Identity Federation
+    uses: NeuralTrust/workflows/.github/workflows/repo-backup.yml@main
+    with:
+      organization: NeuralTrust
+      gcs_bucket: nt-git-backups
+    secrets: inherit
+```
+
+### Inputs
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `organization` | Yes | — | GitHub org to back up |
+| `gcs_bucket` | Yes | — | Destination bucket (with or without `gs://`) |
+| `gcs_prefix` | No | `git-backups` | Path prefix inside the bucket (date folder appended automatically) |
+| `repo_visibility` | No | `all` | `all` \| `public` \| `private` |
+| `include_archived` | No | `false` | Include archived repositories |
+| `exclude_repos` | No | — | Comma/newline-separated repo names to skip |
+| `max_parallel` | No | `4` | Max repositories backed up concurrently |
+| `runner` | No | `ubuntu-latest` | Runner label |
+
+### Secrets
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `WIF_PROVIDER` | Yes | GCP Workload Identity Federation provider |
+| `WIF_SERVICE_ACCOUNT` | Yes | Service account with `roles/storage.objectAdmin` on the backup bucket |
+| `BACKUP_APP_ID` | No* | GitHub App ID (preferred) — needs `contents: read` + `metadata: read`, installed org-wide |
+| `BACKUP_APP_PRIVATE_KEY` | No* | GitHub App private key (PEM) |
+| `BACKUP_GH_TOKEN` | No* | Read-only PAT fallback used only when no GitHub App is configured |
+
+*Provide **either** the GitHub App pair **or** `BACKUP_GH_TOKEN`. The workflow fails fast if neither is set.
+
+### GCS retention
+
+Set a lifecycle policy on the bucket (not in the workflow) to expire old snapshots, e.g. delete objects older than 90 days:
+
+```bash
+gcloud storage buckets update gs://nt-git-backups \
+  --lifecycle-file=lifecycle.json
+```
 
 ---
 
