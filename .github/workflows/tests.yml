@@ -411,7 +411,7 @@ jobs:
       # ---- Node ----
       - name: Set up Node
         if: inputs.language == 'node'
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ inputs.language_version }}
           cache: 'npm'
@@ -700,7 +700,7 @@ jobs:
       # ---- Node ----
       - name: Set up Node
         if: inputs.language == 'node'
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ inputs.language_version }}
           cache: 'npm'
