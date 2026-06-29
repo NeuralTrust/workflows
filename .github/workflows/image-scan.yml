@@ -9,7 +9,7 @@
 #
 # Scan behavior is controlled by policy flags:
 #   - `block_vulnerability_findings: true` blocks on matching fixable CVEs.
-#   - `accept_vulnerability_risk_with_warnings: true` logs findings but does
+#   - `accept_vulnerability_risk: true` logs findings but does
 #     not block when the repo documents accepted risk in `.trivyignore`.
 #
 # Findings are always printed as a table in the job log. When
@@ -33,7 +33,7 @@
 #         image_ref: europe-west1-docker.pkg.dev/proj/repo/svc:sha-123abc
 #         block_vulnerability_findings: true
 #         # or, for documented risk acceptance:
-#         # accept_vulnerability_risk_with_warnings: true
+#         # accept_vulnerability_risk: true
 #       secrets: inherit
 #
 # (No security-events / actions scopes are needed — the report is an artifact,
@@ -68,11 +68,11 @@ on:
           Legacy escape hatch: exit code when matching vulnerabilities are found.
           "0" = warn (never blocks), "1" = block (fails the job).
           Prefer block_vulnerability_findings or
-          accept_vulnerability_risk_with_warnings for new callers.
+          accept_vulnerability_risk for new callers.
         required: false
         type: string
         default: '0'
-      accept_vulnerability_risk_with_warnings:
+      accept_vulnerability_risk:
         description: >
           Accepted risk mode. When true, Trivy findings are logged and uploaded
           as artifacts, but do not block the workflow. Accepted CVEs should be
@@ -168,7 +168,7 @@ jobs:
       - name: Resolve scan policy
         id: scan_policy
         run: |
-          if [ "${{ inputs.accept_vulnerability_risk_with_warnings }}" = "true" ]; then
+          if [ "${{ inputs.accept_vulnerability_risk }}" = "true" ]; then
             echo "exit_code=0" >> "$GITHUB_OUTPUT"
             echo "mode=accepted risk with warnings" >> "$GITHUB_OUTPUT"
           elif [ "${{ inputs.block_vulnerability_findings }}" = "true" ] || [ "${{ inputs.exit_code }}" = "1" ]; then
@@ -244,7 +244,7 @@ jobs:
             echo "- **Fixable only:** \`${{ inputs.ignore_unfixed }}\`"
             echo "- **Mode:** \`${{ steps.scan_policy.outputs.mode }}\`"
             echo "- **Block vulnerability findings:** \`${{ inputs.block_vulnerability_findings }}\`"
-            echo "- **Accepted vulnerability risk:** \`${{ inputs.accept_vulnerability_risk_with_warnings }}\`"
+            echo "- **Accepted vulnerability risk:** \`${{ inputs.accept_vulnerability_risk }}\`"
             if [ -n "${{ steps.trivyignore.outputs.path }}" ]; then
               echo "- **Ignore file:** \`${{ steps.trivyignore.outputs.path }}\`"
             fi
