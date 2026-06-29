@@ -7,14 +7,14 @@
 # test fixtures with masked placeholder tokens that Trivy misclassifies.
 # Use sast.yml / gitleaks for repository secret detection instead.
 #
-# Two modes are supported via the `exit_code` input:
-#   - "0" (warn)  → findings are reported in the job summary but never block.
-#                   Used for every develop build.
-#   - "1" (block) → any matching CRITICAL/HIGH fixable CVE fails the job.
-#                   Used as the prod promote gate.
+# Scan behavior is controlled by policy flags:
+#   - `block_vulnerability_findings: true` blocks on matching fixable CVEs.
+#   - `accept_vulnerability_risk_with_warnings: true` logs findings but does
+#     not block when the repo documents accepted risk in `.trivyignore`.
 #
-# Findings are always printed as a table in the job log (and the gate blocks
-# there). When `upload_sarif: true` (default) the SARIF report is also saved as a
+# Findings are always printed as a table in the job log. When
+# `block_vulnerability_findings: true`, that table scan is the blocking gate.
+# When `upload_sarif: true` (default) the SARIF report is also saved as a
 # downloadable workflow artifact — we don't have GitHub Advanced Security, so it
 # can't go to the Security tab. The artifact uses short retention to keep storage
 # negligible.
@@ -31,7 +31,9 @@
 #         id-token: write          # GCP WIF auth to pull the image
 #       with:
 #         image_ref: europe-west1-docker.pkg.dev/proj/repo/svc:sha-123abc
-#         exit_code: '1'           # '0' = warn, '1' = block
+#         block_vulnerability_findings: true
+#         # or, for documented risk acceptance:
+#         # accept_vulnerability_risk_with_warnings: true
 #       secrets: inherit
 #
 # (No security-events / actions scopes are needed — the report is an artifact,
@@ -54,13 +56,30 @@ on:
         required: false
         type: string
         default: 'CRITICAL,HIGH'
+      block_vulnerability_findings:
+        description: >
+          When true, matching vulnerabilities fail the job. This is the preferred
+          policy flag for blocking gates such as production promotion.
+        required: false
+        type: boolean
+        default: false
       exit_code:
         description: >
-          Exit code when matching vulnerabilities are found.
+          Legacy escape hatch: exit code when matching vulnerabilities are found.
           "0" = warn (never blocks), "1" = block (fails the job).
+          Prefer block_vulnerability_findings or
+          accept_vulnerability_risk_with_warnings for new callers.
         required: false
         type: string
         default: '0'
+      accept_vulnerability_risk_with_warnings:
+        description: >
+          Accepted risk mode. When true, Trivy findings are logged and uploaded
+          as artifacts, but do not block the workflow. Accepted CVEs should be
+          documented in the repo root .trivyignore with a revisit date.
+        required: false
+        type: boolean
+        default: false
       ignore_unfixed:
         description: >
           When true, only count vulnerabilities that have a fix available
@@ -146,11 +165,24 @@ jobs:
           username: oauth2accesstoken
           password: ${{ steps.auth.outputs.access_token }}
 
-      # Human-readable scan — ALWAYS runs, so findings are visible in the job log,
-      # and it is the blocking gate (exit-code = inputs.exit_code). Keeping the gate
-      # here (not on the SARIF step) means a developer can always see *which* CVEs
-      # blocked the promote, even when SARIF upload is unavailable (e.g. the repo
-      # has no GitHub Advanced Security / code scanning enabled).
+      - name: Resolve scan policy
+        id: scan_policy
+        run: |
+          if [ "${{ inputs.accept_vulnerability_risk_with_warnings }}" = "true" ]; then
+            echo "exit_code=0" >> "$GITHUB_OUTPUT"
+            echo "mode=accepted risk with warnings" >> "$GITHUB_OUTPUT"
+          elif [ "${{ inputs.block_vulnerability_findings }}" = "true" ] || [ "${{ inputs.exit_code }}" = "1" ]; then
+            echo "exit_code=1" >> "$GITHUB_OUTPUT"
+            echo "mode=block" >> "$GITHUB_OUTPUT"
+          else
+            echo "exit_code=0" >> "$GITHUB_OUTPUT"
+            echo "mode=warn" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Human-readable scan — ALWAYS runs, so findings are visible in the job log.
+      # With block_vulnerability_findings, this is the blocking gate. In
+      # accepted-risk mode, it reports findings as warnings so an explicit risk
+      # decision can move forward.
       - name: Run Trivy image scan (table)
         id: trivy_table
         # SHA-pinned to the only post-incident-safe release (Mar 2026 supply-chain
@@ -165,7 +197,7 @@ jobs:
           scanners: ${{ inputs.scanners }}
           severity: ${{ inputs.severity }}
           format: 'table'
-          exit-code: ${{ inputs.exit_code }}
+          exit-code: ${{ steps.scan_policy.outputs.exit_code }}
           ignore-unfixed: ${{ inputs.ignore_unfixed }}
           vuln-type: 'os,library'
           trivyignores: ${{ steps.trivyignore.outputs.path }}
@@ -203,11 +235,6 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          MODE="warn"
-          if [ "${{ inputs.exit_code }}" = "1" ]; then
-            MODE="block"
-          fi
-
           {
             echo "## Trivy Image Scan"
             echo ""
@@ -215,7 +242,9 @@ jobs:
             echo "- **Severity:** \`${{ inputs.severity }}\`"
             echo "- **Scanners:** \`${{ inputs.scanners }}\`"
             echo "- **Fixable only:** \`${{ inputs.ignore_unfixed }}\`"
-            echo "- **Mode:** \`${MODE}\` (exit_code=${{ inputs.exit_code }})"
+            echo "- **Mode:** \`${{ steps.scan_policy.outputs.mode }}\`"
+            echo "- **Block vulnerability findings:** \`${{ inputs.block_vulnerability_findings }}\`"
+            echo "- **Accepted vulnerability risk:** \`${{ inputs.accept_vulnerability_risk_with_warnings }}\`"
             if [ -n "${{ steps.trivyignore.outputs.path }}" ]; then
               echo "- **Ignore file:** \`${{ steps.trivyignore.outputs.path }}\`"
             fi

@@ -127,6 +127,15 @@ on:
         required: false
         type: string
         default: 'develop'
+      accept_vulnerability_risk_with_warnings:
+        description: >
+          Accepted risk mode for the pre-promote Trivy image scan.
+          When true, findings are logged but do not block promote/rebuild.
+          Accepted CVEs should still be listed in the repo root .trivyignore
+          with a revisit date.
+        required: false
+        type: boolean
+        default: false
     secrets:
       WIF_PROVIDER:
         required: true
@@ -441,7 +450,8 @@ jobs:
       id-token: write
     with:
       image_ref: ${{ needs.release.outputs.scan_target }}
-      exit_code: '1'
+      block_vulnerability_findings: true
+      accept_vulnerability_risk_with_warnings: ${{ inputs.accept_vulnerability_risk_with_warnings }}
       upload_sarif: false
     secrets:
       WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
