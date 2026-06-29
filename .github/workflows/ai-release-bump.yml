@@ -136,7 +136,7 @@ jobs:
 
       - name: Checkout code
         if: steps.bump-guard.outputs.skip != 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.GH_TOKEN }}
