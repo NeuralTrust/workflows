@@ -1,0 +1,59 @@
+# ==============================================================================
+# Weekly Org Backup (scheduler)
+# ==============================================================================
+# A reusable workflow cannot be triggered by `schedule` on its own — only a
+# caller can. This caller lives in the (public) workflows repo and runs the
+# reusable `repo-backup.yml` once a week to snapshot every NeuralTrust repo to
+# GCS. Trigger it manually via the Actions tab ("Run workflow") to take an
+# on-demand backup.
+#
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   WIF_PROVIDER, WIF_SERVICE_ACCOUNT       — GCP Workload Identity Federation
+#   BACKUP_APP_ID, BACKUP_APP_PRIVATE_KEY   — GitHub App (contents+metadata read)
+#   (or BACKUP_GH_TOKEN as a read-only PAT fallback)
+# ==============================================================================
+
+name: Weekly Org Backup
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"   # Mondays 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      repo_visibility:
+        description: 'Which repositories to include'
+        type: choice
+        options: [all, public, private]
+        default: all
+      include_archived:
+        description: 'Include archived repositories'
+        type: boolean
+        default: false
+
+# Only run the scheduled/manual backup from the canonical repo, never from a fork.
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-org-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    # Don't run on forks of this public repo — they lack the org secrets anyway.
+    if: github.repository_owner == 'NeuralTrust'
+    permissions:
+      contents: read
+      id-token: write
+    uses: NeuralTrust/workflows/.github/workflows/repo-backup.yml@main
+    with:
+      organization: NeuralTrust
+      gcs_bucket: ${{ vars.GCS_BUCKET }}
+      gcs_prefix: git-backups
+      repo_visibility: ${{ inputs.repo_visibility || 'all' }}
+      include_archived: ${{ inputs.include_archived || false }}
+      max_parallel: 4
+    secrets:
+      WIF_PROVIDER: ${{ secrets.PROD_WIF_PROVIDER }}
+      WIF_SERVICE_ACCOUNT: ${{ secrets.PROD_WIF_SERVICE_ACCOUNT }}
+      BACKUP_GH_TOKEN: ${{ secrets.GH_TOKEN }}
