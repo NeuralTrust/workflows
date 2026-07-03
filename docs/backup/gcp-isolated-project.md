@@ -9,7 +9,7 @@ Use a **dedicated GCP project** for git backups, separate from `neuraltrust-app-
 | GCP project | `neuraltrust-git-backup` | Isolated backup boundary |
 | GCS bucket | `nt-git-backups` | Dated bundles + manifests |
 | SA (CI) | `github-backup-runner@…` | WIF-only; upload via Actions |
-| SA (emergency) | `backup-emergency-reader@…` | Offline JSON key in 1Password |
+| SA (emergency) | `backup-emergency-reader@…` | Offline JSON key in team credential vault |
 
 ## 1. Create project
 
@@ -88,4 +88,4 @@ In `NeuralTrust/workflows`:
 
 ## 6. Emergency restore SA (offline key)
 
-See `create-emergency-restore-sa.sh` and `emergency-restore-procedure.md`. The JSON key is stored in **1Password** only — never in git.
+See `create-emergency-restore-sa.sh` and `emergency-restore-procedure.md`. The JSON key lives in your **team credential vault** only — never in git.

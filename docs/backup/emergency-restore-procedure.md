@@ -1,25 +1,34 @@
 # Emergency restore procedure (offline credentials)
 
-**Classification:** Internal — store in 1Password alongside the emergency SA JSON key.
+**Classification:** Internal — store alongside the emergency SA JSON key in your **company credential vault** (see below).
 
 ## When to use
 
 - GitHub and/or GCP production access is unavailable (incident, lockout, ransomware).
 - You need to restore source code from the last known-good weekly backup.
 
-## Prerequisites (pre-staged in 1Password)
+## Prerequisites (pre-staged offline)
 
-1. **Item:** `NeuralTrust Git Backup — Emergency SA`
-   - Attachment: `backup-emergency-reader.json` (GCP service account key)
-   - Field: `bucket` = `nt-git-backups`
-   - Field: `project` = `neuraltrust-git-backup`
-2. `gcloud` CLI installed on a trusted workstation (not compromised).
+Store these in a **team-accessible, encrypted credential store** — any corporate password manager or secure vault works. Examples:
+
+| Option | JSON key file | Procedure text |
+|--------|---------------|----------------|
+| **Apple Passwords** (macOS) | Secure note with pasted key *or* reference to FileVault-encrypted file path | Secure note / shared folder in iCloud (restricted) |
+| **Bitwarden / Vaultwarden** | Secure attachment | Secure note |
+| **Encrypted disk image** (`.dmg`) on Mac | File inside the image | Markdown/PDF in the same image |
+
+Minimum bar: **two people** can access it in an emergency; **not** in git, Slack, or email.
+
+1. **Vault entry:** `NeuralTrust Git Backup — Emergency SA`
+   - Attachment or secure note: `backup-emergency-reader.json` (GCP service account key)
+   - Fields: `bucket` = `nt-git-backups`, `project` = `neuraltrust-git-backup`
+2. `gcloud` CLI on a trusted Mac (FileVault on).
 3. Network access to `storage.googleapis.com`.
 
 ## 1. Authenticate with offline key
 
 ```bash
-export GOOGLE_APPLICATION_CREDENTIALS=/path/from/1password/backup-emergency-reader.json
+export GOOGLE_APPLICATION_CREDENTIALS=/path/from-vault/backup-emergency-reader.json
 gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS"
 gcloud config set project neuraltrust-git-backup
 ```
@@ -94,5 +103,5 @@ Rotate the emergency SA key annually or after any use:
 gcloud iam service-accounts keys list --iam-account=backup-emergency-reader@neuraltrust-git-backup.iam.gserviceaccount.com
 gcloud iam service-accounts keys delete KEY_ID --iam-account=backup-emergency-reader@...
 ./create-emergency-restore-sa.sh /tmp/new-key.json
-# Upload new key to 1Password, delete old key + local file
+# Upload new key to the team vault, delete old key + local file
 ```

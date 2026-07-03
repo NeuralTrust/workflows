@@ -31,7 +31,7 @@
 - 3-week retention for compromise recovery
 - Commit-count anomaly vs prior week
 - Daily dead-man's-switch watchdog
-- Offline emergency restore SA (1Password)
+- Offline emergency restore SA (team credential vault)
 
 ## Object layout
 

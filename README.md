@@ -795,7 +795,7 @@ gs://<bucket>/git-backups/<YYYY-MM-DD>/<repo>.manifest.json
 gs://<bucket>/git-backups/_control/heartbeat.json
 ```
 
-See **`docs/backup/`** for isolated GCP project setup, Object Lock bucket bootstrap, and **offline emergency restore** (SA JSON + 1Password procedure).
+See **`docs/backup/`** for isolated GCP project setup, Object Lock bucket bootstrap, and **offline emergency restore** (SA JSON + team vault procedure).
 
 **Parallel PR:** builds on [#41](https://github.com/NeuralTrust/workflows/pull/41) with security hardening — use dedicated `BACKUP_*` secrets (not `PROD_WIF_*` / `GH_TOKEN`).
 
