@@ -42,6 +42,7 @@
 | `gcp-bucket-setup.sh` | Bucket + Object Lock + 21-day lifecycle |
 | `create-emergency-restore-vault.sh` | **Canonical** — SA key + runbook in encrypted `.dmg` |
 | `secrets-recovery-guide.md` | Cómo guardar valores de secrets (manual / GSM / Apple Passwords) |
+| `github-org-loss-recovery.md` | **Runbook** — recuperar toda la org en GitHub nuevo tras pérdida de la org |
 | `create-emergency-restore-sa.sh` | Low-level SA key generator (used by vault script) |
 
 ## Object layout
