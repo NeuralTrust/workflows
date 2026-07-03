@@ -105,7 +105,8 @@ Every repo follows the same standardized pipeline:
 
 | Workflow | Description |
 |----------|-------------|
-| [`repo-backup.yml`](#org-repository-backup) | Mirror-clone every org repo to a `git bundle` and upload to GCS (weekly disaster-recovery snapshot) |
+| [`repo-backup.yml`](#org-repository-backup) | Hardened org git backup to GCS (bundles, manifest, anomaly checks, Object Lock) |
+| [`repo-backup-watchdog-cron.yml`](#org-repository-backup) | Daily dead-man's-switch — alerts if weekly backup heartbeat is stale |
 
 ---
 
@@ -784,71 +785,62 @@ jobs:
 
 ## Org Repository Backup
 
-**`repo-backup.yml`** — Disaster-recovery snapshot of an entire GitHub org. It discovers every repository, **mirror-clones** each one (all branches, tags and notes), packs the history into a single verifiable **`git bundle`**, and uploads it (plus a SHA-256 checksum) to a Cloud Storage bucket under a date-partitioned path:
+**`repo-backup.yml`** — Hardened disaster-recovery snapshot of a GitHub org. Mirror-clones each repo into a **`git bundle`**, uploads per-repo manifests, builds a consolidated **`manifest.json`** (SHA-256 + `commit_count`), exports **org metadata**, applies **GCS Object Lock**, retains **3 weeks** of dated snapshots, and updates a **heartbeat** for the dead-man's-switch watchdog.
 
 ```
-gs://<bucket>/<prefix>/<YYYY-MM-DD>/<repo>.bundle
-gs://<bucket>/<prefix>/<YYYY-MM-DD>/<repo>.bundle.sha256
+gs://<bucket>/git-backups/<YYYY-MM-DD>/manifest.json
+gs://<bucket>/git-backups/<YYYY-MM-DD>/org-metadata.json
+gs://<bucket>/git-backups/<YYYY-MM-DD>/<repo>.bundle
+gs://<bucket>/git-backups/<YYYY-MM-DD>/<repo>.manifest.json
+gs://<bucket>/git-backups/_control/heartbeat.json
 ```
 
-Restore any repo with `git clone <repo>.bundle restored-repo`.
+See **`docs/backup/`** for isolated GCP project setup, Object Lock bucket bootstrap, and **offline emergency restore** (SA JSON + 1Password procedure).
+
+**Parallel PR:** builds on [#41](https://github.com/NeuralTrust/workflows/pull/41) with security hardening — use dedicated `BACKUP_*` secrets (not `PROD_WIF_*` / `GH_TOKEN`).
 
 ```yaml
-# .github/workflows/backup.yml — scheduler (runs in a PUBLIC repo)
-name: Weekly Org Backup
-on:
-  schedule:
-    - cron: "0 3 * * 1"
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
+# .github/workflows/repo-backup-cron.yml (in this repo)
 jobs:
   backup:
-    permissions:
-      contents: read
-      id-token: write          # required for GCP Workload Identity Federation
-    uses: NeuralTrust/workflows/.github/workflows/repo-backup.yml@main
+    uses: ./.github/workflows/repo-backup.yml
     with:
       organization: NeuralTrust
-      gcs_bucket: nt-git-backups
-    secrets: inherit
+      gcs_bucket: ${{ vars.GCS_BUCKET }}
+      retention_weeks: 3
+      object_lock_enabled: true
+    secrets:
+      WIF_PROVIDER: ${{ secrets.BACKUP_WIF_PROVIDER }}
+      WIF_SERVICE_ACCOUNT: ${{ secrets.BACKUP_WIF_SERVICE_ACCOUNT }}
+      BACKUP_APP_ID: ${{ secrets.BACKUP_APP_ID }}
+      BACKUP_APP_PRIVATE_KEY: ${{ secrets.BACKUP_APP_PRIVATE_KEY }}
 ```
 
-### Inputs
+### Inputs (hardened)
 
-| Input | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `organization` | Yes | — | GitHub org to back up |
-| `gcs_bucket` | Yes | — | Destination bucket (with or without `gs://`) |
-| `gcs_prefix` | No | `git-backups` | Path prefix inside the bucket (date folder appended automatically) |
-| `repo_visibility` | No | `all` | `all` \| `public` \| `private` |
-| `include_archived` | No | `false` | Include archived repositories |
-| `exclude_repos` | No | — | Comma/newline-separated repo names to skip |
-| `max_parallel` | No | `4` | Max repositories backed up concurrently |
-| `runner` | No | `ubuntu-latest` | Runner label |
+| Input | Default | Description |
+|-------|---------|-------------|
+| `retention_weeks` | `3` | Weeks of snapshots (GCS lifecycle + Object Lock horizon) |
+| `object_lock_enabled` | `true` | Governed retention on uploads (bucket must support Object Lock) |
+| `commit_count_drop_threshold` | `30` | Alert if `commit_count` drops more than N% vs prior backup |
+| `fail_on_anomaly` | `false` | Fail workflow on commit-count anomaly |
 
-### Secrets
+### Secrets (hardened)
 
-| Secret | Required | Description |
-|--------|----------|-------------|
-| `WIF_PROVIDER` | Yes | GCP Workload Identity Federation provider |
-| `WIF_SERVICE_ACCOUNT` | Yes | Service account with `roles/storage.objectAdmin` on the backup bucket |
-| `BACKUP_APP_ID` | No* | GitHub App ID (preferred) — needs `contents: read` + `metadata: read`, installed org-wide |
-| `BACKUP_APP_PRIVATE_KEY` | No* | GitHub App private key (PEM) |
-| `BACKUP_GH_TOKEN` | No* | Read-only PAT fallback used only when no GitHub App is configured |
+| Secret | Description |
+|--------|-------------|
+| `BACKUP_WIF_PROVIDER` | WIF in **isolated** backup GCP project |
+| `BACKUP_WIF_SERVICE_ACCOUNT` | CI SA — object create only on backup bucket |
+| `BACKUP_APP_ID` / `BACKUP_APP_PRIVATE_KEY` | Read-only GitHub App (required — do not use org `GH_TOKEN`) |
+| `BACKUP_ALERT_WEBHOOK` | Optional — anomalies, failures, dead-man alerts |
 
-*Provide **either** the GitHub App pair **or** `BACKUP_GH_TOKEN`. The workflow fails fast if neither is set.
+### GCS retention (3 weeks)
 
-### GCS retention
+Lifecycle deletes objects older than **21 days** — see `docs/backup/lifecycle-21d.json` and `gcp-bucket-setup.sh`. Object Lock prevents tampering during the retention window (ransomware resilience).
 
-Set a lifecycle policy on the bucket (not in the workflow) to expire old snapshots, e.g. delete objects older than 90 days:
+### Dead man's switch
 
-```bash
-gcloud storage buckets update gs://nt-git-backups \
-  --lifecycle-file=lifecycle.json
-```
+**`repo-backup-watchdog-cron.yml`** runs daily and fails if `heartbeat.json` is older than 8 days (weekly schedule + grace).
 
 ---
 

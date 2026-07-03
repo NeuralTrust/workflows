@@ -1,16 +1,16 @@
 # ==============================================================================
-# Weekly Org Backup (scheduler)
+# Weekly Org Backup (scheduler) — hardened
 # ==============================================================================
-# A reusable workflow cannot be triggered by `schedule` on its own — only a
-# caller can. This caller lives in the (public) workflows repo and runs the
-# reusable `repo-backup.yml` once a week to snapshot every NeuralTrust repo to
-# GCS. Trigger it manually via the Actions tab ("Run workflow") to take an
-# on-demand backup.
+# Runs the hardened reusable repo-backup.yml weekly. Uses a dedicated backup
+# GitHub App + isolated GCP WIF (BACKUP_* secrets), NOT org GH_TOKEN / PROD_WIF_*.
 #
-# Required repo secrets (Settings → Secrets and variables → Actions):
-#   WIF_PROVIDER, WIF_SERVICE_ACCOUNT       — GCP Workload Identity Federation
-#   BACKUP_APP_ID, BACKUP_APP_PRIVATE_KEY   — GitHub App (contents+metadata read)
-#   (or BACKUP_GH_TOKEN as a read-only PAT fallback)
+# Required org/repo secrets (NeuralTrust/workflows):
+#   BACKUP_WIF_PROVIDER, BACKUP_WIF_SERVICE_ACCOUNT  — isolated backup GCP project
+#   BACKUP_APP_ID, BACKUP_APP_PRIVATE_KEY             — read-only GitHub App
+#   BACKUP_ALERT_WEBHOOK (optional)                   — Slack/Teams for anomalies
+#
+# Required repo variable:
+#   GCS_BUCKET — e.g. nt-git-backups (in isolated GCP project)
 # ==============================================================================
 
 name: Weekly Org Backup
@@ -29,8 +29,11 @@ on:
         description: 'Include archived repositories'
         type: boolean
         default: false
+      fail_on_anomaly:
+        description: 'Fail workflow when commit-count anomaly is detected'
+        type: boolean
+        default: false
 
-# Only run the scheduled/manual backup from the canonical repo, never from a fork.
 permissions:
   contents: read
 
@@ -40,12 +43,11 @@ concurrency:
 
 jobs:
   backup:
-    # Don't run on forks of this public repo — they lack the org secrets anyway.
     if: github.repository_owner == 'NeuralTrust'
     permissions:
       contents: read
       id-token: write
-    uses: NeuralTrust/workflows/.github/workflows/repo-backup.yml@main
+    uses: ./.github/workflows/repo-backup.yml
     with:
       organization: NeuralTrust
       gcs_bucket: ${{ vars.GCS_BUCKET }}
@@ -53,7 +55,13 @@ jobs:
       repo_visibility: ${{ inputs.repo_visibility || 'all' }}
       include_archived: ${{ inputs.include_archived || false }}
       max_parallel: 4
+      retention_weeks: 3
+      object_lock_enabled: true
+      commit_count_drop_threshold: 30
+      fail_on_anomaly: ${{ inputs.fail_on_anomaly || false }}
     secrets:
-      WIF_PROVIDER: ${{ secrets.PROD_WIF_PROVIDER }}
-      WIF_SERVICE_ACCOUNT: ${{ secrets.PROD_WIF_SERVICE_ACCOUNT }}
-      BACKUP_GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      WIF_PROVIDER: ${{ secrets.BACKUP_WIF_PROVIDER }}
+      WIF_SERVICE_ACCOUNT: ${{ secrets.BACKUP_WIF_SERVICE_ACCOUNT }}
+      BACKUP_APP_ID: ${{ secrets.BACKUP_APP_ID }}
+      BACKUP_APP_PRIVATE_KEY: ${{ secrets.BACKUP_APP_PRIVATE_KEY }}
+      BACKUP_ALERT_WEBHOOK: ${{ secrets.BACKUP_ALERT_WEBHOOK }}

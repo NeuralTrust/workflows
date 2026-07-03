@@ -1,37 +1,23 @@
 # ==============================================================================
-# Reusable Workflow: Backup Organization Git Repositories to GCS
+# Reusable Workflow: Hardened Organization Git Backup to GCS
 # ==============================================================================
-# Discovers every repository in a GitHub organization, mirror-clones each one
-# (all branches, tags and notes) into a single `git bundle`, and uploads the
-# bundle plus a SHA-256 checksum to a Google Cloud Storage bucket under a
-# date-partitioned path:
+# Weekly (or on-demand) mirror-clone of every org repo into verified git bundles,
+# with consolidated manifest, org metadata export, commit-count anomaly checks,
+# Object Lock uploads, and a heartbeat for dead-man's-switch monitoring.
 #
-#     gs://<bucket>/<prefix>/<YYYY-MM-DD>/<repo>.bundle
-#     gs://<bucket>/<prefix>/<YYYY-MM-DD>/<repo>.bundle.sha256
+# Layout per run (date = UTC YYYY-MM-DD):
+#   gs://<bucket>/<prefix>/<date>/<repo>.bundle
+#   gs://<bucket>/<prefix>/<date>/<repo>.bundle.sha256
+#   gs://<bucket>/<prefix>/<date>/<repo>.manifest.json
+#   gs://<bucket>/<prefix>/<date>/manifest.json          (consolidated)
+#   gs://<bucket>/<prefix>/<date>/org-metadata.json
+#   gs://<bucket>/<prefix>/_control/heartbeat.json       (updated on success)
 #
-# A `git bundle` is a self-contained, verifiable snapshot of a repo's history;
-# restore with `git clone <repo>.bundle restored-repo`.
-#
-# SECURITY (this repo is PUBLIC):
-#   - GCP auth uses Workload Identity Federation (OIDC) — no long-lived keys.
-#   - GitHub access uses a short-lived GitHub App installation token (preferred)
-#     or a PAT fallback. The app only needs `contents: read` + `metadata: read`.
-#   - The git auth header is masked and never written to a remote URL or log.
-#   - Least-privilege permissions; all inputs are passed via `env:` (no shell
-#     injection); third-party actions are pinned to release tags.
-#
-# Usage (scheduled caller in a PUBLIC repo):
-#   jobs:
-#     backup:
-#       uses: NeuralTrust/workflows/.github/workflows/repo-backup.yml@main
-#       with:
-#         organization: NeuralTrust
-#         gcs_bucket: nt-git-backups
-#       secrets:
-#         WIF_PROVIDER:        ${{ secrets.WIF_PROVIDER }}
-#         WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-#         BACKUP_APP_ID:          ${{ secrets.BACKUP_APP_ID }}
-#         BACKUP_APP_PRIVATE_KEY: ${{ secrets.BACKUP_APP_PRIVATE_KEY }}
+# SECURITY:
+#   - GCP via Workload Identity Federation (dedicated backup project SA).
+#   - GitHub via read-only App (preferred) or read-only PAT fallback.
+#   - Git auth via masked http.extraheader; inputs via env (no shell injection).
+#   - Does NOT backup GitHub Actions secrets, deploy keys, or LFS objects.
 # ==============================================================================
 
 name: Backup Org Repositories
@@ -44,11 +30,11 @@ on:
         required: true
         type: string
       gcs_bucket:
-        description: 'Destination GCS bucket name (with or without the gs:// prefix)'
+        description: 'Destination GCS bucket (with or without gs:// prefix)'
         required: true
         type: string
       gcs_prefix:
-        description: 'Path prefix inside the bucket (a date folder is appended automatically)'
+        description: 'Path prefix inside the bucket (a date folder is appended)'
         required: false
         type: string
         default: 'git-backups'
@@ -63,7 +49,7 @@ on:
         type: boolean
         default: false
       exclude_repos:
-        description: 'Comma- or newline-separated repository names to skip (exact match)'
+        description: 'Comma- or newline-separated repository names to skip'
         required: false
         type: string
         default: ''
@@ -72,6 +58,26 @@ on:
         required: false
         type: number
         default: 4
+      retention_weeks:
+        description: 'Weeks of dated snapshots to retain (GCS lifecycle + Object Lock horizon)'
+        required: false
+        type: number
+        default: 3
+      object_lock_enabled:
+        description: 'Apply governed Object Lock retention on uploaded objects (bucket must support it)'
+        required: false
+        type: boolean
+        default: true
+      commit_count_drop_threshold:
+        description: 'Alert when a repo commit_count drops more than this percent vs prior backup'
+        required: false
+        type: number
+        default: 30
+      fail_on_anomaly:
+        description: 'Fail the workflow when commit-count anomaly is detected'
+        required: false
+        type: boolean
+        default: false
       runner:
         description: 'GitHub Actions runner label'
         required: false
@@ -80,28 +86,27 @@ on:
     secrets:
       WIF_PROVIDER:
         required: true
-        description: 'GCP Workload Identity Federation provider'
+        description: 'GCP WIF provider (backup-isolated project)'
       WIF_SERVICE_ACCOUNT:
         required: true
-        description: 'GCP service account email with objectAdmin on the backup bucket'
+        description: 'GCP SA with object create + retention on the backup bucket only'
       BACKUP_APP_ID:
         required: false
-        description: 'GitHub App ID with contents:read + metadata:read installed org-wide (preferred)'
+        description: 'GitHub App ID (contents:read + metadata:read), org-wide'
       BACKUP_APP_PRIVATE_KEY:
         required: false
-        description: 'GitHub App private key (PEM) matching BACKUP_APP_ID'
+        description: 'GitHub App private key PEM'
       BACKUP_GH_TOKEN:
         required: false
-        description: 'PAT fallback (read-only repo access) used only when no GitHub App is configured'
+        description: 'Read-only PAT fallback when no GitHub App is configured'
+      BACKUP_ALERT_WEBHOOK:
+        required: false
+        description: 'HTTPS webhook (Slack/Teams/PagerDuty) for anomalies and backup failures'
 
-# Least privilege by default; jobs opt into more where required.
 permissions:
   contents: read
 
 jobs:
-  # ----------------------------------------------------------------------------
-  # Discover the repositories to back up and emit a matrix.
-  # ----------------------------------------------------------------------------
   discover:
     name: Discover repositories
     runs-on: ${{ inputs.runner }}
@@ -122,8 +127,6 @@ jobs:
         with:
           app-id: ${{ secrets.BACKUP_APP_ID }}
           private-key: ${{ secrets.BACKUP_APP_PRIVATE_KEY }}
-          # Org-wide, read-only token. Backing up every repo legitimately
-          # requires access to all of them; contents+metadata read is the floor.
           owner: ${{ inputs.organization }}  # zizmor: ignore[github-app]
           permission-contents: read
           permission-metadata: read
@@ -134,7 +137,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN}" ]; then
-            echo "::error::No GitHub credentials available. Provide a GitHub App (BACKUP_APP_ID + BACKUP_APP_PRIVATE_KEY) or BACKUP_GH_TOKEN."
+            echo "::error::Provide BACKUP_APP_ID + BACKUP_APP_PRIVATE_KEY (preferred) or BACKUP_GH_TOKEN (read-only)."
             exit 1
           fi
 
@@ -155,23 +158,22 @@ jobs:
 
           case "$VISIBILITY" in
             all|public|private) ;;
-            *) echo "::error::repo_visibility must be one of: all, public, private (got '$VISIBILITY')"; exit 1 ;;
+            *) echo "::error::repo_visibility must be all|public|private (got '$VISIBILITY')"; exit 1 ;;
           esac
 
-          # Normalize the exclude list into a JSON array (split on commas/newlines).
           exclude_json="$(printf '%s' "$EXCLUDE_REPOS" \
             | tr ',' '\n' \
             | jq -R . | jq -s -c 'map(gsub("^\\s+|\\s+$";"")) | map(select(. != ""))')"
 
-          # Page through the org repos and keep names, honoring archived + exclude filters.
           repos="$(gh api --paginate \
             "orgs/${ORG}/repos?per_page=100&type=${VISIBILITY}" \
-            --jq '.[] | {name: .name, archived: .archived}' \
+            --jq '.[] | {name: .name, archived: .archived, fork: .fork}' \
             | jq -s -c \
                 --argjson exclude "$exclude_json" \
                 --arg include_archived "$INCLUDE_ARCHIVED" '
                   map(
-                    select($include_archived == "true" or .archived == false)
+                    select(.fork == false)
+                    | select($include_archived == "true" or .archived == false)
                     | select(.name as $n | ($exclude | index($n)) | not)
                     | .name
                   )
@@ -182,28 +184,8 @@ jobs:
             echo "repos=$repos"
             echo "count=$count"
           } >> "$GITHUB_OUTPUT"
-
           echo "Discovered ${count} repositories to back up."
 
-      - name: Discovery summary
-        env:
-          ORG: ${{ inputs.organization }}
-          COUNT: ${{ steps.list.outputs.count }}
-          VISIBILITY: ${{ inputs.repo_visibility }}
-          BACKUP_DATE: ${{ steps.meta.outputs.date }}
-        run: |
-          {
-            echo "## Repository backup — discovery"
-            echo ""
-            echo "- **Organization:** \`${ORG}\`"
-            echo "- **Visibility:** \`${VISIBILITY}\`"
-            echo "- **Repositories found:** \`${COUNT}\`"
-            echo "- **Backup date:** \`${BACKUP_DATE}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  # ----------------------------------------------------------------------------
-  # Mirror-clone each repository and upload a verified bundle to GCS.
-  # ----------------------------------------------------------------------------
   backup:
     name: Backup ${{ matrix.repo }}
     needs: discover
@@ -228,7 +210,6 @@ jobs:
         with:
           app-id: ${{ secrets.BACKUP_APP_ID }}
           private-key: ${{ secrets.BACKUP_APP_PRIVATE_KEY }}
-          # Org-wide, read-only token (see discover job for rationale).
           owner: ${{ inputs.organization }}  # zizmor: ignore[github-app]
           permission-contents: read
           permission-metadata: read
@@ -242,8 +223,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Build a masked Basic auth header (same mechanism actions/checkout uses)
-          # so the token never appears in a remote URL or in command output.
           auth_b64="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
           echo "::add-mask::${auth_b64}"
 
@@ -258,16 +237,42 @@ jobs:
           git -C "$mirror_dir" bundle create "$bundle_path" --all
           git -C "$mirror_dir" bundle verify "$bundle_path"
 
-          sha256sum "$bundle_path" | awk '{print $1}' > "${bundle_path}.sha256"
-          size="$(du -h "$bundle_path" | cut -f1)"
+          sha256="$(sha256sum "$bundle_path" | awk '{print $1}')"
+          printf '%s' "$sha256" > "${bundle_path}.sha256"
+          commit_count="$(git -C "$mirror_dir" rev-list --all --count)"
+          bundle_bytes="$(wc -c < "$bundle_path" | tr -d ' ')"
+          default_branch="$(git -C "$mirror_dir" symbolic-ref -q refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@' || echo "")"
+
+          manifest_path="${work}/${REPO}.manifest.json"
+          jq -n \
+            --arg repo "$REPO" \
+            --arg org "$ORG" \
+            --arg sha256 "$sha256" \
+            --argjson commit_count "$commit_count" \
+            --argjson bundle_bytes "$bundle_bytes" \
+            --arg default_branch "$default_branch" \
+            --arg backup_date "${{ needs.discover.outputs.backup_date }}" \
+            --arg workflow_run_id "${{ github.run_id }}" \
+            '{
+              repo: $repo,
+              organization: $org,
+              sha256: $sha256,
+              commit_count: $commit_count,
+              bundle_bytes: $bundle_bytes,
+              default_branch: $default_branch,
+              backup_date: $backup_date,
+              workflow_run_id: $workflow_run_id
+            }' > "$manifest_path"
 
           {
             echo "bundle_path=${bundle_path}"
-            echo "bundle_size=${size}"
+            echo "manifest_path=${manifest_path}"
+            echo "sha256=${sha256}"
+            echo "commit_count=${commit_count}"
+            echo "bundle_bytes=${bundle_bytes}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Authenticate to Google Cloud
-        id: auth
         uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
@@ -276,7 +281,7 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v3
 
-      - name: Upload bundle to GCS
+      - name: Upload bundle and per-repo manifest to GCS
         id: upload
         env:
           RAW_BUCKET: ${{ inputs.gcs_bucket }}
@@ -284,32 +289,299 @@ jobs:
           BACKUP_DATE: ${{ needs.discover.outputs.backup_date }}
           REPO: ${{ matrix.repo }}
           BUNDLE_PATH: ${{ steps.clone.outputs.bundle_path }}
+          MANIFEST_PATH: ${{ steps.clone.outputs.manifest_path }}
+          RETENTION_WEEKS: ${{ inputs.retention_weeks }}
+          OBJECT_LOCK: ${{ inputs.object_lock_enabled }}
         run: |
           set -euo pipefail
 
-          # Accept bucket with or without gs:// and strip any trailing slash.
           bucket="${RAW_BUCKET#gs://}"
           bucket="${bucket%/}"
-          dest="gs://${bucket}/${PREFIX}/${BACKUP_DATE}/${REPO}.bundle"
+          base="gs://${bucket}/${PREFIX}/${BACKUP_DATE}"
+          dest_bundle="${base}/${REPO}.bundle"
 
-          gcloud storage cp "$BUNDLE_PATH" "$dest"
-          gcloud storage cp "${BUNDLE_PATH}.sha256" "${dest}.sha256"
+          lock_args=()
+          if [ "$OBJECT_LOCK" = "true" ]; then
+            retention_days=$(( RETENTION_WEEKS * 7 ))
+            retention_until="$(date -u -d "+${retention_days} days" +%Y-%m-%dT%H:%M:%SZ)"
+            lock_args=(--retention-mode=governed --retention-time="$retention_until")
+          fi
 
-          echo "dest=${dest}" >> "$GITHUB_OUTPUT"
-          echo "Uploaded ${REPO} backup to ${dest}"
+          gcloud storage cp "$BUNDLE_PATH" "$dest_bundle" "${lock_args[@]}"
+          gcloud storage cp "${BUNDLE_PATH}.sha256" "${dest_bundle}.sha256" "${lock_args[@]}"
+          gcloud storage cp "$MANIFEST_PATH" "${base}/${REPO}.manifest.json" "${lock_args[@]}"
 
-      - name: Backup summary
+          echo "dest=${dest_bundle}" >> "$GITHUB_OUTPUT"
+
+  finalize:
+    name: Finalize backup (manifest, metadata, anomaly, heartbeat)
+    needs: [discover, backup]
+    if: always() && needs.discover.outputs.count != '0'
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      HAS_APP: ${{ secrets.BACKUP_APP_ID != '' && secrets.BACKUP_APP_PRIVATE_KEY != '' }}
+    steps:
+      - name: Mint GitHub App token
+        if: env.HAS_APP == 'true'
+        id: app_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.BACKUP_APP_ID }}
+          private-key: ${{ secrets.BACKUP_APP_PRIVATE_KEY }}
+          owner: ${{ inputs.organization }}  # zizmor: ignore[github-app]
+          permission-contents: read
+          permission-metadata: read
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Export organization metadata
+        id: org_meta
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token || secrets.BACKUP_GH_TOKEN }}
+          ORG: ${{ inputs.organization }}
+          BACKUP_DATE: ${{ needs.discover.outputs.backup_date }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/finalize"
+          mkdir -p "$work"
+
+          gh api "orgs/${ORG}" > "${work}/org.json"
+          gh api --paginate "orgs/${ORG}/repos?per_page=100" \
+            --jq '.[] | {name, private, archived, default_branch, updated_at, pushed_at}' \
+            | jq -s '.' > "${work}/repos-summary.json"
+          gh api --paginate "orgs/${ORG}/teams?per_page=100" \
+            --jq '{slug, name, privacy, description}' 2>/dev/null \
+            | jq -s '.' > "${work}/teams.json" || echo '[]' > "${work}/teams.json"
+
+          jq -n \
+            --arg backup_date "$BACKUP_DATE" \
+            --arg workflow_run_id "${{ github.run_id }}" \
+            --arg workflow_run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --slurpfile org "${work}/org.json" \
+            --slurpfile repos "${work}/repos-summary.json" \
+            --slurpfile teams "${work}/teams.json" \
+            '{
+              backup_date: $backup_date,
+              workflow_run_id: $workflow_run_id,
+              workflow_run_url: $workflow_run_url,
+              organization: $org[0],
+              repositories_summary: $repos[0],
+              teams: $teams[0],
+              note: "Metadata only — GitHub Actions secrets, deploy keys, and org settings secrets are NOT included."
+            }' > "${work}/org-metadata.json"
+
+          echo "path=${work}/org-metadata.json" >> "$GITHUB_OUTPUT"
+
+      - name: Build consolidated manifest and run anomaly checks
+        id: manifest
+        env:
+          RAW_BUCKET: ${{ inputs.gcs_bucket }}
+          PREFIX: ${{ inputs.gcs_prefix }}
+          BACKUP_DATE: ${{ needs.discover.outputs.backup_date }}
+          ORG: ${{ inputs.organization }}
+          THRESHOLD: ${{ inputs.commit_count_drop_threshold }}
+          FAIL_ON_ANOMALY: ${{ inputs.fail_on_anomaly }}
+          RETENTION_WEEKS: ${{ inputs.retention_weeks }}
+          OBJECT_LOCK: ${{ inputs.object_lock_enabled }}
+          ORG_META_PATH: ${{ steps.org_meta.outputs.path }}
+          BACKUP_RESULT: ${{ needs.backup.result }}
+          REPO_COUNT: ${{ needs.discover.outputs.count }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/finalize"
+          bucket="${RAW_BUCKET#gs://}"
+          bucket="${bucket%/}"
+          base="gs://${bucket}/${PREFIX}/${BACKUP_DATE}"
+          lock_args=()
+          if [ "$OBJECT_LOCK" = "true" ]; then
+            retention_days=$(( RETENTION_WEEKS * 7 ))
+            retention_until="$(date -u -d "+${retention_days} days" +%Y-%m-%dT%H:%M:%SZ)"
+            lock_args=(--retention-mode=governed --retention-time="$retention_until")
+          fi
+
+          mkdir -p "${work}/manifests"
+          gcloud storage cp "${base}/*.manifest.json" "${work}/manifests/" 2>/dev/null || true
+          shopt -s nullglob
+          files=("${work}/manifests"/*.manifest.json)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::No per-repo manifests found under ${base}/"
+            exit 1
+          fi
+
+          repos_json="$(jq -s '.' "${files[@]}")"
+          prior_date="$(gcloud storage ls "gs://${bucket}/${PREFIX}/" \
+            | sed -n 's|.*/\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\)/|\1|p' \
+            | sort -u | grep -v "^${BACKUP_DATE}$" | tail -n 1 || true)"
+
+          anomalies='[]'
+          if [ -n "$prior_date" ]; then
+            mkdir -p "${work}/prior"
+            gcloud storage cp "gs://${bucket}/${PREFIX}/${prior_date}/*.manifest.json" "${work}/prior/" 2>/dev/null || true
+            prior_files=("${work}/prior"/*.manifest.json)
+            if [ "${#prior_files[@]}" -gt 0 ]; then
+              prior_json="$(jq -s '.' "${prior_files[@]}")"
+              anomalies="$(jq -n \
+                --argjson current "$repos_json" \
+                --argjson prior "$prior_json" \
+                --argjson threshold "$THRESHOLD" \
+                '
+                  def prior_map:
+                    reduce .[] as $r ({}; .[$r.repo] = $r.commit_count);
+                  ($prior | prior_map) as $pmap
+                  | [
+                      $current[]
+                      | select(.repo as $r | $pmap[$r] != null)
+                      | select(.commit_count < ($pmap[.repo] * (100 - $threshold) / 100))
+                      | {
+                          repo: .repo,
+                          current_commit_count: .commit_count,
+                          prior_commit_count: $pmap[.repo],
+                          threshold_percent: $threshold
+                        }
+                    ]
+                ')"
+            fi
+          fi
+
+          manifest_path="${work}/manifest.json"
+          jq -n \
+            --arg backup_date "$BACKUP_DATE" \
+            --arg organization "$ORG" \
+            --arg workflow_run_id "${{ github.run_id }}" \
+            --arg workflow_run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --arg prior_backup_date "${prior_date:-}" \
+            --argjson repo_count "${#files[@]}" \
+            --argjson expected_repo_count "$REPO_COUNT" \
+            --arg backup_job_result "$BACKUP_RESULT" \
+            --argjson repositories "$repos_json" \
+            --argjson anomalies "$anomalies" \
+            --argjson retention_weeks "$RETENTION_WEEKS" \
+            '{
+              schema_version: 1,
+              backup_date: $backup_date,
+              organization: $organization,
+              workflow_run_id: $workflow_run_id,
+              workflow_run_url: $workflow_run_url,
+              prior_backup_date: (if $prior_backup_date == "" then null else $prior_backup_date end),
+              repo_count: $repo_count,
+              expected_repo_count: ($expected_repo_count | tonumber),
+              backup_job_result: $backup_job_result,
+              retention_weeks: $retention_weeks,
+              repositories: $repositories,
+              anomalies: $anomalies
+            }' > "$manifest_path"
+
+          gcloud storage cp "$manifest_path" "${base}/manifest.json" "${lock_args[@]}"
+          gcloud storage cp "$ORG_META_PATH" "${base}/org-metadata.json" "${lock_args[@]}"
+
+          anomaly_count="$(jq '.anomalies | length' "$manifest_path")"
+          {
+            echo "manifest_path=${manifest_path}"
+            echo "anomaly_count=${anomaly_count}"
+            echo "prior_date=${prior_date:-none}"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$anomaly_count" -gt 0 ]; then
+            echo "::warning::Commit-count anomalies detected for ${anomaly_count} repo(s) vs prior backup (${prior_date:-n/a})"
+            jq -r '.anomalies[] | "::warning::\(.repo): commits \(.current_commit_count) vs prior \(.prior_commit_count) (threshold \(.threshold_percent)%)"' "$manifest_path"
+            if [ "$FAIL_ON_ANOMALY" = "true" ]; then
+              exit 1
+            fi
+          fi
+
+          if [ "$BACKUP_RESULT" != "success" ]; then
+            echo "::error::One or more repository backup jobs failed (matrix result: ${BACKUP_RESULT})"
+            exit 1
+          fi
+
+      - name: Update dead-man heartbeat
+        if: steps.manifest.outcome == 'success'
+        env:
+          RAW_BUCKET: ${{ inputs.gcs_bucket }}
+          PREFIX: ${{ inputs.gcs_prefix }}
+          BACKUP_DATE: ${{ needs.discover.outputs.backup_date }}
+          ORG: ${{ inputs.organization }}
+          RETENTION_WEEKS: ${{ inputs.retention_weeks }}
+          OBJECT_LOCK: ${{ inputs.object_lock_enabled }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/finalize"
+          bucket="${RAW_BUCKET#gs://}"
+          bucket="${bucket%/}"
+          heartbeat_path="${work}/heartbeat.json"
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          jq -n \
+            --arg last_success_at "$now" \
+            --arg backup_date "$BACKUP_DATE" \
+            --arg organization "$ORG" \
+            --arg workflow_run_id "${{ github.run_id }}" \
+            --arg workflow_run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{
+              last_success_at: $last_success_at,
+              backup_date: $backup_date,
+              organization: $organization,
+              workflow_run_id: $workflow_run_id,
+              workflow_run_url: $workflow_run_url
+            }' > "$heartbeat_path"
+
+          lock_args=()
+          if [ "$OBJECT_LOCK" = "true" ]; then
+            retention_days=$(( RETENTION_WEEKS * 7 ))
+            retention_until="$(date -u -d "+${retention_days} days" +%Y-%m-%dT%H:%M:%SZ)"
+            lock_args=(--retention-mode=governed --retention-time="$retention_until")
+          fi
+
+          gcloud storage cp "$heartbeat_path" "gs://${bucket}/${PREFIX}/_control/heartbeat.json" "${lock_args[@]}"
+
+      - name: Alert on anomalies or failures
+        if: always() && (steps.manifest.outputs.anomaly_count != '0' || needs.backup.result != 'success')
+        env:
+          WEBHOOK: ${{ secrets.BACKUP_ALERT_WEBHOOK }}
+          ANOMALY_COUNT: ${{ steps.manifest.outputs.anomaly_count }}
+          BACKUP_RESULT: ${{ needs.backup.result }}
+          BACKUP_DATE: ${{ needs.discover.outputs.backup_date }}
+          ORG: ${{ inputs.organization }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WEBHOOK}" ]; then
+            echo "No BACKUP_ALERT_WEBHOOK configured — skipping alert."
+            exit 0
+          fi
+          payload="$(jq -n \
+            --arg org "$ORG" \
+            --arg date "$BACKUP_DATE" \
+            --arg backup_result "$BACKUP_RESULT" \
+            --arg anomaly_count "${ANOMALY_COUNT:-0}" \
+            --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{text: ("Git backup alert for " + $org + " (" + $date + "): backup_result=" + $backup_result + ", anomalies=" + $anomaly_count + " — " + $run_url)}')"
+          curl -fsS -X POST -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK"
+
+      - name: Finalize summary
         if: always()
         env:
-          REPO: ${{ matrix.repo }}
-          DEST: ${{ steps.upload.outputs.dest }}
-          SIZE: ${{ steps.clone.outputs.bundle_size }}
-          STATUS: ${{ job.status }}
+          BACKUP_DATE: ${{ needs.discover.outputs.backup_date }}
+          ANOMALY_COUNT: ${{ steps.manifest.outputs.anomaly_count }}
+          PRIOR_DATE: ${{ steps.manifest.outputs.prior_date }}
+          BACKUP_RESULT: ${{ needs.backup.result }}
         run: |
           {
-            echo "### ${REPO}"
+            echo "## Repository backup — finalize"
             echo ""
-            echo "- **Status:** \`${STATUS}\`"
-            echo "- **Bundle size:** \`${SIZE:-n/a}\`"
-            echo "- **Destination:** \`${DEST:-not uploaded}\`"
+            echo "- **Backup date:** \`${BACKUP_DATE}\`"
+            echo "- **Matrix result:** \`${BACKUP_RESULT}\`"
+            echo "- **Prior backup compared:** \`${PRIOR_DATE}\`"
+            echo "- **Commit-count anomalies:** \`${ANOMALY_COUNT:-n/a}\`"
+            echo "- **Heartbeat:** updated at \`gs://…/${{ inputs.gcs_prefix }}/_control/heartbeat.json\`"
           } >> "$GITHUB_STEP_SUMMARY"

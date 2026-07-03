@@ -1,0 +1,114 @@
+# ==============================================================================
+# Dead Man's Switch — org git backup watchdog
+# ==============================================================================
+# Runs daily. Reads gs://<bucket>/git-backups/_control/heartbeat.json and fails
+# (optionally alerting via webhook) if no successful backup within max_age_days.
+#
+# Pair with repo-backup-cron.yml (weekly). Default grace: 8 days (weekly + buffer).
+# ==============================================================================
+
+name: Org Backup Watchdog
+
+on:
+  schedule:
+    - cron: "0 8 * * *"   # Daily 08:00 UTC
+  workflow_dispatch:
+    inputs:
+      max_age_days:
+        description: 'Maximum days since last successful backup'
+        type: number
+        default: 8
+
+permissions:
+  contents: read
+
+concurrency:
+  group: org-backup-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    if: github.repository_owner == 'NeuralTrust'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.BACKUP_WIF_PROVIDER }}
+          service_account: ${{ secrets.BACKUP_WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Check backup heartbeat
+        id: check
+        env:
+          RAW_BUCKET: ${{ vars.GCS_BUCKET }}
+          PREFIX: git-backups
+          MAX_AGE_DAYS: ${{ inputs.max_age_days || 8 }}
+        run: |
+          set -euo pipefail
+          bucket="${RAW_BUCKET#gs://}"
+          bucket="${bucket%/}"
+          heartbeat_uri="gs://${bucket}/${PREFIX}/_control/heartbeat.json"
+          work="${RUNNER_TEMP}/watchdog"
+          mkdir -p "$work"
+
+          if ! gcloud storage cp "$heartbeat_uri" "${work}/heartbeat.json" 2>/dev/null; then
+            echo "status=missing" >> "$GITHUB_OUTPUT"
+            echo "::error::Heartbeat not found at ${heartbeat_uri} — no successful backup recorded."
+            exit 1
+          fi
+
+          last_success="$(jq -r '.last_success_at' "${work}/heartbeat.json")"
+          backup_date="$(jq -r '.backup_date' "${work}/heartbeat.json")"
+          now_epoch="$(date -u +%s)"
+          last_epoch="$(date -u -d "$last_success" +%s)"
+          age_days=$(( (now_epoch - last_epoch) / 86400 ))
+
+          {
+            echo "status=ok"
+            echo "last_success_at=${last_success}"
+            echo "backup_date=${backup_date}"
+            echo "age_days=${age_days}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Last successful backup: ${backup_date} (${last_success}), age ${age_days} day(s)."
+
+          if [ "$age_days" -gt "$MAX_AGE_DAYS" ]; then
+            echo "::error::Backup heartbeat is ${age_days} days old (max ${MAX_AGE_DAYS}). Possible backup pipeline failure or compromise."
+            exit 1
+          fi
+
+      - name: Alert on watchdog failure
+        if: failure()
+        env:
+          WEBHOOK: ${{ secrets.BACKUP_ALERT_WEBHOOK }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WEBHOOK}" ]; then
+            exit 0
+          fi
+          payload="$(jq -n \
+            --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{text: ("DEAD MAN SWITCH: org git backup heartbeat missing or stale — " + $run_url)}')"
+          curl -fsS -X POST -H 'Content-Type: application/json' -d "$payload" "$WEBHOOK"
+
+      - name: Watchdog summary
+        if: always()
+        env:
+          STATUS: ${{ steps.check.outputs.status }}
+          LAST: ${{ steps.check.outputs.last_success_at }}
+          AGE: ${{ steps.check.outputs.age_days }}
+        run: |
+          {
+            echo "## Org backup watchdog"
+            echo ""
+            echo "- **Status:** \`${STATUS:-failed}\`"
+            echo "- **Last success:** \`${LAST:-n/a}\`"
+            echo "- **Age (days):** \`${AGE:-n/a}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
