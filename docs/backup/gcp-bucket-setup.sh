@@ -35,12 +35,21 @@ else
     --versioning
 fi
 
-echo "==> Enabling Object Lock (retention ${RETENTION_DAYS}d minimum)"
+echo "==> Enabling Object Lock (retention ${RETENTION_DAYS}d minimum, governed)"
 gcloud storage buckets update "gs://${BUCKET}" \
   --project="${PROJECT_ID}" \
   --retention-period="${RETENTION_DAYS}d" \
   --lock-retention-period 2>/dev/null || \
   echo "WARN: retention period may already be locked — verify manually."
+
+cat <<'NOTE'
+NOTE: This script sets governed retention (flexible for admins).
+For stronger ransomware resistance, consider COMPLIANCE mode once — irreversible:
+  gcloud storage buckets update gs://${BUCKET} --retention-period=21d
+  gcloud storage buckets update gs://${BUCKET} --lock-retention-period
+  # Then use --retention-mode=compliance on uploads instead of governed.
+See: https://cloud.google.com/storage/docs/object-lock
+NOTE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "==> Applying lifecycle (delete objects older than ${RETENTION_DAYS} days)"

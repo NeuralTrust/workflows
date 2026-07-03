@@ -8,6 +8,8 @@
 | Per-repo SHA-256 checksum | Yes |
 | Per-repo `commit_count` | Yes — for anomaly detection |
 | Consolidated `manifest.json` | Yes |
+| `secrets-inventory.json` (secret **names** only) | Yes |
+| Secret **values** | No — see `secrets-recovery-guide.md` |
 | Org metadata (public API) | Yes — `org-metadata.json` |
 | Weekly dated snapshots | Yes — 3 weeks retained (21-day lifecycle) |
 | Dead-man heartbeat | Yes — `_control/heartbeat.json` |
@@ -39,6 +41,7 @@
 |--------|---------|
 | `gcp-bucket-setup.sh` | Bucket + Object Lock + 21-day lifecycle |
 | `create-emergency-restore-vault.sh` | **Canonical** — SA key + runbook in encrypted `.dmg` |
+| `secrets-recovery-guide.md` | Cómo guardar valores de secrets (manual / GSM / Apple Passwords) |
 | `create-emergency-restore-sa.sh` | Low-level SA key generator (used by vault script) |
 
 ## Object layout

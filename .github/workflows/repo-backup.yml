@@ -11,13 +11,15 @@
 #   gs://<bucket>/<prefix>/<date>/<repo>.manifest.json
 #   gs://<bucket>/<prefix>/<date>/manifest.json          (consolidated)
 #   gs://<bucket>/<prefix>/<date>/org-metadata.json
+#   gs://<bucket>/<prefix>/<date>/secrets-inventory.json  (names only — no values)
 #   gs://<bucket>/<prefix>/_control/heartbeat.json       (updated on success)
 #
 # SECURITY:
 #   - GCP via Workload Identity Federation (dedicated backup project SA).
 #   - GitHub via read-only App (preferred) or read-only PAT fallback.
 #   - Git auth via masked http.extraheader; inputs via env (no shell injection).
-#   - Does NOT backup GitHub Actions secrets, deploy keys, or LFS objects.
+#   - Does NOT backup secret VALUES (GitHub API forbids). Exports secrets-inventory.json
+#     (names only) plus docs/backup/secrets-recovery-guide.md for manual/GSM DR.
 # ==============================================================================
 
 name: Backup Org Repositories
@@ -69,12 +71,22 @@ on:
         type: boolean
         default: true
       commit_count_drop_threshold:
-        description: 'Alert when a repo commit_count drops more than this percent vs prior backup'
+        description: 'Alert when commit_count drops more than this percent vs prior backup'
         required: false
         type: number
         default: 30
+      bundle_bytes_drop_threshold:
+        description: 'Alert when bundle_bytes drops more than this percent vs prior backup'
+        required: false
+        type: number
+        default: 30
+      min_success_percent:
+        description: 'Minimum percent of repos backed up to refresh heartbeat (partial runs still write manifest)'
+        required: false
+        type: number
+        default: 90
       fail_on_anomaly:
-        description: 'Fail the workflow when commit-count anomaly is detected'
+        description: 'Fail the workflow when size/count anomaly is detected'
         required: false
         type: boolean
         default: false
@@ -92,7 +104,7 @@ on:
         description: 'GCP SA with object create + retention on the backup bucket only'
       BACKUP_APP_ID:
         required: false
-        description: 'GitHub App ID (contents:read + metadata:read), org-wide'
+        description: 'GitHub App ID (contents+metadata+secrets read), org-wide'
       BACKUP_APP_PRIVATE_KEY:
         required: false
         description: 'GitHub App private key PEM'
@@ -130,6 +142,7 @@ jobs:
           owner: ${{ inputs.organization }}  # zizmor: ignore[github-app]
           permission-contents: read
           permission-metadata: read
+          permission-secrets: read
 
       - name: Validate token availability
         env:
@@ -213,6 +226,7 @@ jobs:
           owner: ${{ inputs.organization }}  # zizmor: ignore[github-app]
           permission-contents: read
           permission-metadata: read
+          permission-secrets: read
 
       - name: Mirror-clone repository
         id: clone
@@ -335,6 +349,7 @@ jobs:
           owner: ${{ inputs.organization }}  # zizmor: ignore[github-app]
           permission-contents: read
           permission-metadata: read
+          permission-secrets: read
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v3
@@ -378,10 +393,70 @@ jobs:
               organization: $org[0],
               repositories_summary: $repos[0],
               teams: $teams[0],
-              note: "Metadata only — GitHub Actions secrets, deploy keys, and org settings secrets are NOT included."
+              note: "Metadata only — secret values are NOT included (see secrets-inventory.json)."
             }' > "${work}/org-metadata.json"
 
           echo "path=${work}/org-metadata.json" >> "$GITHUB_OUTPUT"
+
+      - name: Export secrets inventory (names only)
+        id: secrets_inv
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token || secrets.BACKUP_GH_TOKEN }}
+          ORG: ${{ inputs.organization }}
+          BACKUP_DATE: ${{ needs.discover.outputs.backup_date }}
+          REPOS_JSON: ${{ needs.discover.outputs.repos }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/finalize"
+          mkdir -p "$work"
+
+          org_secrets='[]'
+          if gh api "orgs/${ORG}/actions/secrets" >/dev/null 2>&1; then
+            org_secrets="$(gh api "orgs/${ORG}/actions/secrets" \
+              --jq '.secrets | map({name, updated_at, visibility})' 2>/dev/null || echo '[]')"
+          else
+            echo "::warning::Cannot list org secrets — grant the backup App Organization secrets: Read"
+          fi
+
+          repos_inv='[]'
+          while IFS= read -r repo; do
+            [ -z "$repo" ] && continue
+            repo_secrets="$(gh api "repos/${ORG}/${repo}/actions/secrets" \
+              --jq '.secrets | map({name, updated_at})' 2>/dev/null || echo '[]')"
+            env_inv='[]'
+            while IFS= read -r env_name; do
+              [ -z "$env_name" ] && continue
+              env_secrets="$(gh api "repos/${ORG}/${repo}/environments/${env_name}/secrets" \
+                --jq '.secrets | map({name, updated_at})' 2>/dev/null || echo '[]')"
+              env_inv="$(jq -n --arg n "$env_name" --argjson s "$env_secrets" --argjson acc "$env_inv" \
+                '$acc + [{name: $n, secrets: $s}]')"
+            done < <(gh api "repos/${ORG}/${repo}/environments" \
+              --jq '.environments[].name' 2>/dev/null || true)
+            repos_inv="$(jq -n \
+              --arg name "$repo" \
+              --argjson actions_secrets "$repo_secrets" \
+              --argjson environments "$env_inv" \
+              --argjson acc "$repos_inv" \
+              '$acc + [{name: $name, actions_secrets: $actions_secrets, environments: $environments}]')"
+          done < <(printf '%s' "$REPOS_JSON" | jq -r '.[]')
+
+          jq -n \
+            --arg backup_date "$BACKUP_DATE" \
+            --arg organization "$ORG" \
+            --arg workflow_run_id "${{ github.run_id }}" \
+            --argjson org_secrets "$org_secrets" \
+            --argjson repositories "$repos_inv" \
+            '{
+              schema_version: 1,
+              backup_date: $backup_date,
+              organization: $organization,
+              workflow_run_id: $workflow_run_id,
+              org_secrets: $org_secrets,
+              repositories: $repositories,
+              note: "Names and timestamps only. GitHub never exposes secret values via API. See docs/backup/secrets-recovery-guide.md."
+            }' > "${work}/secrets-inventory.json"
+
+          echo "path=${work}/secrets-inventory.json" >> "$GITHUB_OUTPUT"
 
       - name: Build consolidated manifest and run anomaly checks
         id: manifest
@@ -390,13 +465,17 @@ jobs:
           PREFIX: ${{ inputs.gcs_prefix }}
           BACKUP_DATE: ${{ needs.discover.outputs.backup_date }}
           ORG: ${{ inputs.organization }}
-          THRESHOLD: ${{ inputs.commit_count_drop_threshold }}
+          COUNT_THRESHOLD: ${{ inputs.commit_count_drop_threshold }}
+          BYTES_THRESHOLD: ${{ inputs.bundle_bytes_drop_threshold }}
+          MIN_SUCCESS: ${{ inputs.min_success_percent }}
           FAIL_ON_ANOMALY: ${{ inputs.fail_on_anomaly }}
           RETENTION_WEEKS: ${{ inputs.retention_weeks }}
           OBJECT_LOCK: ${{ inputs.object_lock_enabled }}
           ORG_META_PATH: ${{ steps.org_meta.outputs.path }}
+          SECRETS_INV_PATH: ${{ steps.secrets_inv.outputs.path }}
           BACKUP_RESULT: ${{ needs.backup.result }}
           REPO_COUNT: ${{ needs.discover.outputs.count }}
+          REPOS_JSON: ${{ needs.discover.outputs.repos }}
         run: |
           set -euo pipefail
           work="${RUNNER_TEMP}/finalize"
@@ -410,45 +489,73 @@ jobs:
             lock_args=(--retention-mode=governed --retention-time="$retention_until")
           fi
 
-          mkdir -p "${work}/manifests"
-          gcloud storage cp "${base}/*.manifest.json" "${work}/manifests/" 2>/dev/null || true
+          mkdir -p "${work}/manifests" "${work}/prior"
+          missing=0
+          while IFS= read -r repo; do
+            [ -z "$repo" ] && continue
+            if gcloud storage cp "${base}/${repo}.manifest.json" "${work}/manifests/${repo}.manifest.json" 2>/dev/null; then
+              :
+            else
+              echo "::warning::Missing manifest for ${repo}"
+              missing=$((missing + 1))
+            fi
+          done < <(printf '%s' "$REPOS_JSON" | jq -r '.[]')
+
           shopt -s nullglob
           files=("${work}/manifests"/*.manifest.json)
           if [ "${#files[@]}" -eq 0 ]; then
-            echo "::error::No per-repo manifests found under ${base}/"
+            echo "::error::No per-repo manifests downloaded from ${base}/"
             exit 1
           fi
 
           repos_json="$(jq -s '.' "${files[@]}")"
-          prior_date="$(gcloud storage ls "gs://${bucket}/${PREFIX}/" \
+          expected="$(printf '%s' "$REPO_COUNT" | tr -d ' ')"
+          success_count="${#files[@]}"
+          success_pct=$(( success_count * 100 / expected ))
+          heartbeat_ok=false
+          if [ "$success_pct" -ge "$MIN_SUCCESS" ]; then
+            heartbeat_ok=true
+          fi
+
+          prior_date="$(gcloud storage ls "gs://${bucket}/${PREFIX}/" 2>/dev/null \
             | sed -n 's|.*/\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\)/|\1|p' \
             | sort -u | grep -v "^${BACKUP_DATE}$" | tail -n 1 || true)"
 
           anomalies='[]'
           if [ -n "$prior_date" ]; then
-            mkdir -p "${work}/prior"
-            gcloud storage cp "gs://${bucket}/${PREFIX}/${prior_date}/*.manifest.json" "${work}/prior/" 2>/dev/null || true
+            while IFS= read -r repo; do
+              [ -z "$repo" ] && continue
+              gcloud storage cp \
+                "gs://${bucket}/${PREFIX}/${prior_date}/${repo}.manifest.json" \
+                "${work}/prior/${repo}.manifest.json" 2>/dev/null || true
+            done < <(printf '%s' "$REPOS_JSON" | jq -r '.[]')
             prior_files=("${work}/prior"/*.manifest.json)
             if [ "${#prior_files[@]}" -gt 0 ]; then
               prior_json="$(jq -s '.' "${prior_files[@]}")"
               anomalies="$(jq -n \
                 --argjson current "$repos_json" \
                 --argjson prior "$prior_json" \
-                --argjson threshold "$THRESHOLD" \
+                --argjson count_thr "$COUNT_THRESHOLD" \
+                --argjson bytes_thr "$BYTES_THRESHOLD" \
                 '
-                  def prior_map:
-                    reduce .[] as $r ({}; .[$r.repo] = $r.commit_count);
-                  ($prior | prior_map) as $pmap
+                  def pmap(f): reduce .[] as $r ({}; .[$r.repo] = ($r | f));
+                  ($prior | pmap(.commit_count)) as $pcc
+                  | ($prior | pmap(.bundle_bytes)) as $pb
                   | [
                       $current[]
-                      | select(.repo as $r | $pmap[$r] != null)
-                      | select(.commit_count < ($pmap[.repo] * (100 - $threshold) / 100))
-                      | {
-                          repo: .repo,
-                          current_commit_count: .commit_count,
-                          prior_commit_count: $pmap[.repo],
-                          threshold_percent: $threshold
-                        }
+                      | . as $c
+                      | ($pcc[$c.repo] // null) as $pc
+                      | if $pc != null and $c.commit_count < ($pc * (100 - $count_thr) / 100) then
+                          {repo: $c.repo, kind: "commit_count_drop",
+                           current: $c.commit_count, prior: $pc, threshold_percent: $count_thr}
+                        else empty end,
+                      $current[]
+                      | . as $c
+                      | ($pb[$c.repo] // null) as $pbv
+                      | if $pbv != null and $c.bundle_bytes < ($pbv * (100 - $bytes_thr) / 100) then
+                          {repo: $c.repo, kind: "bundle_bytes_drop",
+                           current: $c.bundle_bytes, prior: $pbv, threshold_percent: $bytes_thr}
+                        else empty end
                     ]
                 ')"
             fi
@@ -461,21 +568,27 @@ jobs:
             --arg workflow_run_id "${{ github.run_id }}" \
             --arg workflow_run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --arg prior_backup_date "${prior_date:-}" \
-            --argjson repo_count "${#files[@]}" \
-            --argjson expected_repo_count "$REPO_COUNT" \
+            --argjson repo_count "$success_count" \
+            --argjson expected_repo_count "$expected" \
+            --argjson success_percent "$success_pct" \
+            --argjson min_success_percent "$MIN_SUCCESS" \
+            --argjson missing_manifests "$missing" \
             --arg backup_job_result "$BACKUP_RESULT" \
             --argjson repositories "$repos_json" \
             --argjson anomalies "$anomalies" \
             --argjson retention_weeks "$RETENTION_WEEKS" \
             '{
-              schema_version: 1,
+              schema_version: 2,
               backup_date: $backup_date,
               organization: $organization,
               workflow_run_id: $workflow_run_id,
               workflow_run_url: $workflow_run_url,
               prior_backup_date: (if $prior_backup_date == "" then null else $prior_backup_date end),
               repo_count: $repo_count,
-              expected_repo_count: ($expected_repo_count | tonumber),
+              expected_repo_count: $expected_repo_count,
+              success_percent: $success_percent,
+              min_success_percent: $min_success_percent,
+              missing_manifests: $missing_manifests,
               backup_job_result: $backup_job_result,
               retention_weeks: $retention_weeks,
               repositories: $repositories,
@@ -484,29 +597,38 @@ jobs:
 
           gcloud storage cp "$manifest_path" "${base}/manifest.json" "${lock_args[@]}"
           gcloud storage cp "$ORG_META_PATH" "${base}/org-metadata.json" "${lock_args[@]}"
+          gcloud storage cp "$SECRETS_INV_PATH" "${base}/secrets-inventory.json" "${lock_args[@]}"
 
           anomaly_count="$(jq '.anomalies | length' "$manifest_path")"
           {
             echo "manifest_path=${manifest_path}"
             echo "anomaly_count=${anomaly_count}"
             echo "prior_date=${prior_date:-none}"
+            echo "success_percent=${success_pct}"
+            echo "heartbeat_ok=${heartbeat_ok}"
           } >> "$GITHUB_OUTPUT"
 
           if [ "$anomaly_count" -gt 0 ]; then
-            echo "::warning::Commit-count anomalies detected for ${anomaly_count} repo(s) vs prior backup (${prior_date:-n/a})"
-            jq -r '.anomalies[] | "::warning::\(.repo): commits \(.current_commit_count) vs prior \(.prior_commit_count) (threshold \(.threshold_percent)%)"' "$manifest_path"
+            echo "::warning::Anomalies detected for ${anomaly_count} signal(s) vs prior backup (${prior_date:-n/a})"
+            jq -r '.anomalies[] |
+              "::warning::\(.repo) \(.kind): \(.current) vs prior \(.prior) (threshold \(.threshold_percent)%)"' \
+              "$manifest_path"
             if [ "$FAIL_ON_ANOMALY" = "true" ]; then
               exit 1
             fi
           fi
 
-          if [ "$BACKUP_RESULT" != "success" ]; then
-            echo "::error::One or more repository backup jobs failed (matrix result: ${BACKUP_RESULT})"
+          if [ "$missing" -gt 0 ]; then
+            echo "::warning::${missing} repo(s) missing from backup (${success_pct}% success, need ${MIN_SUCCESS}% for heartbeat)"
+          fi
+
+          if [ "$BACKUP_RESULT" != "success" ] && [ "$heartbeat_ok" != "true" ]; then
+            echo "::error::Backup below minimum success (${success_pct}% < ${MIN_SUCCESS}%)"
             exit 1
           fi
 
       - name: Update dead-man heartbeat
-        if: steps.manifest.outcome == 'success'
+        if: steps.manifest.outcome == 'success' && steps.manifest.outputs.heartbeat_ok == 'true'
         env:
           RAW_BUCKET: ${{ inputs.gcs_bucket }}
           PREFIX: ${{ inputs.gcs_prefix }}
@@ -575,6 +697,9 @@ jobs:
           ANOMALY_COUNT: ${{ steps.manifest.outputs.anomaly_count }}
           PRIOR_DATE: ${{ steps.manifest.outputs.prior_date }}
           BACKUP_RESULT: ${{ needs.backup.result }}
+          SUCCESS_PCT: ${{ steps.manifest.outputs.success_percent }}
+          HEARTBEAT_OK: ${{ steps.manifest.outputs.heartbeat_ok }}
+          MIN_SUCCESS: ${{ inputs.min_success_percent }}
         run: |
           {
             echo "## Repository backup — finalize"
@@ -582,6 +707,11 @@ jobs:
             echo "- **Backup date:** \`${BACKUP_DATE}\`"
             echo "- **Matrix result:** \`${BACKUP_RESULT}\`"
             echo "- **Prior backup compared:** \`${PRIOR_DATE}\`"
-            echo "- **Commit-count anomalies:** \`${ANOMALY_COUNT:-n/a}\`"
-            echo "- **Heartbeat:** updated at \`gs://…/${{ inputs.gcs_prefix }}/_control/heartbeat.json\`"
+            echo "- **Anomalies:** \`${ANOMALY_COUNT:-n/a}\`"
+            echo "- **Success rate:** \`${SUCCESS_PCT:-n/a}%\` (heartbeat needs ≥\`${MIN_SUCCESS}%\`)"
+            if [ "${HEARTBEAT_OK}" = "true" ]; then
+              echo "- **Heartbeat:** updated"
+            else
+              echo "- **Heartbeat:** skipped (partial run)"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"

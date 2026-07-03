@@ -68,7 +68,8 @@ Configure **Workload Identity Federation** binding so only `NeuralTrust/workflow
 
 Create an org GitHub App with:
 
-- Repository permissions: **Contents** Read, **Metadata** Read
+- Repository permissions: **Contents** Read, **Metadata** Read, **Secrets** Read
+- Organization permissions: **Secrets** Read
 - Install on all org repositories
 
 Store `BACKUP_APP_ID` and `BACKUP_APP_PRIVATE_KEY` in `NeuralTrust/workflows` secrets.
