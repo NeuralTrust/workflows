@@ -23,7 +23,7 @@
 | Issues / PRs / Projects | Not in git bundles |
 | Packages registry | Separate process |
 
-## Security controls (hardened PR)
+## Security controls
 
 - Isolated GCP project (`BACKUP_WIF_*`, not `PROD_WIF_*`)
 - Read-only GitHub App (not org `GH_TOKEN` with write)
@@ -31,7 +31,15 @@
 - 3-week retention for compromise recovery
 - Commit-count anomaly vs prior week
 - Daily dead-man's-switch watchdog
-- Offline emergency restore SA (team credential vault)
+- Offline emergency restore via encrypted `.dmg` + Apple Passwords
+
+## Setup scripts
+
+| Script | Purpose |
+|--------|---------|
+| `gcp-bucket-setup.sh` | Bucket + Object Lock + 21-day lifecycle |
+| `create-emergency-restore-vault.sh` | **Canonical** — SA key + runbook in encrypted `.dmg` |
+| `create-emergency-restore-sa.sh` | Low-level SA key generator (used by vault script) |
 
 ## Object layout
 

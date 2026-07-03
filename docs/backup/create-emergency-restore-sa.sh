@@ -2,7 +2,7 @@
 # ==============================================================================
 # Create read-only emergency restore service account + download JSON key
 # ==============================================================================
-# Run locally by a GCP admin. Store the key ONLY in the team credential vault (see procedure doc).
+# Run locally by a GCP admin. Prefer create-emergency-restore-vault.sh (encrypted .dmg).
 # NEVER commit the JSON file.
 #
 # Usage:
@@ -37,5 +37,5 @@ gcloud iam service-accounts keys create "$KEY_PATH" \
 
 chmod 600 "$KEY_PATH"
 echo "Key written to ${KEY_PATH}"
-echo "Store in team vault (Apple Passwords secure note, encrypted .dmg, etc.) and delete local copy after verification."
+echo "Next: run create-emergency-restore-vault.sh to package into encrypted .dmg (canonical store)."
 echo "Document restore steps in emergency-restore-procedure.md"

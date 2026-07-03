@@ -9,7 +9,7 @@ Use a **dedicated GCP project** for git backups, separate from `neuraltrust-app-
 | GCP project | `neuraltrust-git-backup` | Isolated backup boundary |
 | GCS bucket | `nt-git-backups` | Dated bundles + manifests |
 | SA (CI) | `github-backup-runner@…` | WIF-only; upload via Actions |
-| SA (emergency) | `backup-emergency-reader@…` | Offline JSON key in team credential vault |
+| SA (emergency) | `backup-emergency-reader@…` | Offline JSON inside encrypted `.dmg` (password in Apple Passwords) |
 
 ## 1. Create project
 
@@ -86,6 +86,17 @@ In `NeuralTrust/workflows`:
 | Secret | `BACKUP_APP_PRIVATE_KEY` | PEM |
 | Secret | `BACKUP_ALERT_WEBHOOK` | Slack/Teams URL (optional) |
 
-## 6. Emergency restore SA (offline key)
+## 6. Emergency restore vault (encrypted .dmg)
 
-See `create-emergency-restore-sa.sh` and `emergency-restore-procedure.md`. The JSON key lives in your **team credential vault** only — never in git.
+```bash
+export PROJECT_ID=neuraltrust-git-backup
+export BUCKET=nt-git-backups
+chmod +x docs/backup/create-emergency-restore-vault.sh
+./docs/backup/create-emergency-restore-vault.sh ~/Secure/neuraltrust-git-backup-vault.dmg
+```
+
+- Store the `.dmg` on a FileVault Mac (restricted share).
+- Store the password in **Apple Passwords** (shared note, 2+ responders).
+- Never commit `.dmg`, JSON, or password to git.
+
+See `emergency-restore-procedure.md` for restore steps.

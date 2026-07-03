@@ -1,60 +1,71 @@
 # Emergency restore procedure (offline credentials)
 
-**Classification:** Internal — store alongside the emergency SA JSON key in your **company credential vault** (see below).
+**Classification:** Internal — credentials live in an **encrypted `.dmg`** on macOS; the password is in **Apple Passwords** (shared secure note, 2+ responders).
+
+## Vault layout (canonical)
+
+Create once with `create-emergency-restore-vault.sh`:
+
+```
+neuraltrust-git-backup-vault.dmg   (AES-256 encrypted)
+└── NeuralTrust Git Backup/
+    ├── backup-emergency-reader.json
+    ├── emergency-restore-procedure.md
+    └── README.txt
+```
+
+| What | Where |
+|------|--------|
+| `.dmg` file | FileVault Mac + restricted team share (not git/Slack/email) |
+| `.dmg` password | Apple Passwords → shared note `NeuralTrust Git Backup Vault` |
+| Responders | Minimum **2 people** must know how to open Apple Passwords + mount the `.dmg` |
 
 ## When to use
 
 - GitHub and/or GCP production access is unavailable (incident, lockout, ransomware).
-- You need to restore source code from the last known-good weekly backup.
+- You need source code from a **known-good weekly snapshot** (use an older date if the latest week may be compromised).
 
-## Prerequisites (pre-staged offline)
+## Prerequisites
 
-Store these in a **team-accessible, encrypted credential store** — any corporate password manager or secure vault works. Examples:
+1. Trusted Mac with FileVault enabled.
+2. `gcloud` CLI installed.
+3. Access to the `.dmg` and its password (Apple Passwords).
+4. Network access to `storage.googleapis.com`.
 
-| Option | JSON key file | Procedure text |
-|--------|---------------|----------------|
-| **Apple Passwords** (macOS) | Secure note with pasted key *or* reference to FileVault-encrypted file path | Secure note / shared folder in iCloud (restricted) |
-| **Bitwarden / Vaultwarden** | Secure attachment | Secure note |
-| **Encrypted disk image** (`.dmg`) on Mac | File inside the image | Markdown/PDF in the same image |
-
-Minimum bar: **two people** can access it in an emergency; **not** in git, Slack, or email.
-
-1. **Vault entry:** `NeuralTrust Git Backup — Emergency SA`
-   - Attachment or secure note: `backup-emergency-reader.json` (GCP service account key)
-   - Fields: `bucket` = `nt-git-backups`, `project` = `neuraltrust-git-backup`
-2. `gcloud` CLI on a trusted Mac (FileVault on).
-3. Network access to `storage.googleapis.com`.
-
-## 1. Authenticate with offline key
+## 1. Mount vault and authenticate
 
 ```bash
-export GOOGLE_APPLICATION_CREDENTIALS=/path/from-vault/backup-emergency-reader.json
+# Password from Apple Passwords shared note
+hdiutil attach ~/Secure/neuraltrust-git-backup-vault.dmg
+export VAULT="/Volumes/NeuralTrust Git Backup"
+export GOOGLE_APPLICATION_CREDENTIALS="${VAULT}/backup-emergency-reader.json"
 gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS"
 gcloud config set project neuraltrust-git-backup
 ```
 
-## 2. List available backup dates (last ~3 weeks)
+## 2. List backup dates (last ~3 weeks)
 
 ```bash
 gcloud storage ls gs://nt-git-backups/git-backups/ | grep -E '/[0-9]{4}-[0-9]{2}-[0-9]{2}/'
 ```
 
-Pick the **oldest clean week** if you suspect recent compromise (attackers may have pushed malicious commits before backup).
+If you suspect compromise, pick the **oldest clean week** within retention — not necessarily the latest.
 
-## 3. Download consolidated manifest and verify
+## 3. Download manifest and check anomalies
 
 ```bash
-export BACKUP_DATE=2026-06-23   # example — use chosen date
+export BACKUP_DATE=2026-06-23
 mkdir -p "./restore/${BACKUP_DATE}"
 gcloud storage cp \
   "gs://nt-git-backups/git-backups/${BACKUP_DATE}/manifest.json" \
   "./restore/${BACKUP_DATE}/"
-cat "./restore/${BACKUP_DATE}/manifest.json" | jq '.anomalies, .repo_count'
+jq '.anomalies, .repo_count, .repositories[] | select(.repo=="watchdog")' \
+  "./restore/${BACKUP_DATE}/manifest.json"
 ```
 
-Review `anomalies` — prefer a date with **no commit-count drops** vs the prior week.
+Prefer a date with **empty `anomalies`** and expected `repo_count`.
 
-## 4. Restore a single repository
+## 4. Restore one repository
 
 ```bash
 export REPO=watchdog
@@ -69,11 +80,11 @@ sha256sum -c "${REPO}.bundle.sha256"
 git clone "${REPO}.bundle" "${REPO}-restored"
 ```
 
-## 5. Bulk restore (all repos)
+## 5. Bulk restore
 
 ```bash
-gcloud storage cp -r \
-  "gs://nt-git-backups/git-backups/${BACKUP_DATE}/*.bundle" \
+mkdir -p "./restore/${BACKUP_DATE}/bundles" "./restore/${BACKUP_DATE}/out"
+gcloud storage cp "gs://nt-git-backups/git-backups/${BACKUP_DATE}/*.bundle" \
   "./restore/${BACKUP_DATE}/bundles/"
 for bundle in "./restore/${BACKUP_DATE}/bundles"/*.bundle; do
   name="$(basename "$bundle" .bundle)"
@@ -83,25 +94,27 @@ done
 
 ## 6. Post-restore
 
-1. Compare restored `commit_count` / `sha256` with `manifest.json`.
-2. Push to a **new** GitHub org or private fork before re-trusting production.
-3. Rotate all secrets that may have been in git history.
-4. Revoke and re-issue emergency SA key if the workstation was exposed.
+1. Verify `sha256` / `commit_count` against `manifest.json`.
+2. Push to a **new** org or isolated fork before re-trusting production.
+3. Rotate all secrets that may have lived in git history.
+4. Unmount vault: `hdiutil detach "/Volumes/NeuralTrust Git Backup"`.
+5. If the workstation was exposed, rotate the emergency SA key and rebuild the `.dmg`.
 
 ## What this does NOT restore
 
 - GitHub Actions / Environment secrets
 - Deploy keys (private halves)
-- Git LFS objects (unless added in a future workflow revision)
+- Git LFS objects
 - Issues, PRs, wiki (unless in git)
 
-## Key rotation
-
-Rotate the emergency SA key annually or after any use:
+## Key rotation and new vault
 
 ```bash
-gcloud iam service-accounts keys list --iam-account=backup-emergency-reader@neuraltrust-git-backup.iam.gserviceaccount.com
-gcloud iam service-accounts keys delete KEY_ID --iam-account=backup-emergency-reader@...
-./create-emergency-restore-sa.sh /tmp/new-key.json
-# Upload new key to the team vault, delete old key + local file
+gcloud iam service-accounts keys list \
+  --iam-account=backup-emergency-reader@neuraltrust-git-backup.iam.gserviceaccount.com
+gcloud iam service-accounts keys delete KEY_ID \
+  --iam-account=backup-emergency-reader@neuraltrust-git-backup.iam.gserviceaccount.com
+export PROJECT_ID=neuraltrust-git-backup BUCKET=nt-git-backups
+./create-emergency-restore-vault.sh ~/Secure/neuraltrust-git-backup-vault-$(date +%Y%m%d).dmg
+# Update Apple Passwords note; destroy old .dmg securely
 ```
