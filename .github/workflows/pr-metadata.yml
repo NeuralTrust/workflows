@@ -6,6 +6,10 @@
 #   - Description must be at least 20 characters long after trimming whitespace.
 #   - PR must reference a Linear issue key or issue URL.
 #
+# Release PRs that promote `develop` -> `main` aggregate many already-reviewed
+# changes and have no single Linear issue, so the Linear-reference requirement is
+# skipped for them (title and description checks still apply).
+#
 # Usage:
 #   jobs:
 #     pr-metadata:
@@ -34,6 +38,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          PR_BASE: ${{ github.event.pull_request.base.ref }}
         run: |
           python3 - <<'PYEOF'
           import os
@@ -56,7 +61,12 @@ jobs:
           title = os.environ.get("PR_TITLE", "")
           body = os.environ.get("PR_BODY", "")
           branch = os.environ.get("PR_BRANCH", "")
+          base = os.environ.get("PR_BASE", "")
           trimmed_body = body.strip()
+
+          # Release PRs promoting develop -> main roll up many already-reviewed
+          # PRs and have no single Linear issue to reference.
+          is_release_pr = branch == "develop" and base == "main"
 
           errors = []
 
@@ -78,7 +88,7 @@ jobs:
               re.IGNORECASE,
           )
           searchable_metadata = "\n".join([title, body, branch])
-          if not linear_issue_pattern.search(searchable_metadata):
+          if not is_release_pr and not linear_issue_pattern.search(searchable_metadata):
               errors.append(
                   "PR must reference a Linear issue in the title, description, or branch name. "
                   "Use an issue key like ENG-123 or a Linear issue URL."
