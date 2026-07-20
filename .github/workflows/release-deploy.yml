@@ -155,6 +155,7 @@ jobs:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
           token_format: access_token
+          create_credentials_file: false
 
       - name: Build and push Docker image
         id: build
