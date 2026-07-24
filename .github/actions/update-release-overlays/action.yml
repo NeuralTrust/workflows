@@ -1,0 +1,173 @@
+name: Update Release Overlays
+description: >
+  Update kustomization.yaml image tags and APPLICATION_VERSION in config.env for
+  the primary prod overlay and, when present, k8s/overlays/prod-us (US regional
+  Flux) so both regions stay on the same release tag.
+
+inputs:
+  overlay_path:
+    description: Primary prod overlay directory (usually k8s/overlays/prod).
+    required: false
+    default: k8s/overlays/prod
+  sync_prod_us:
+    description: >
+      When true and k8s/overlays/prod-us exists, update it with the same tag as
+      overlay_path. Default true.
+    required: false
+    default: 'true'
+  extra_overlay_paths:
+    description: Optional newline-separated extra overlay directories to update.
+    required: false
+    default: ''
+  images:
+    description: JSON array of image configs for kustomize edit set image.
+    required: true
+  image_tag:
+    description: Release tag to set (e.g. v1.2.3).
+    required: true
+  registry:
+    description: Docker registry host.
+    required: true
+  gcp_project_id:
+    description: GCP project ID.
+    required: true
+  repository:
+    description: Artifact Registry repository name.
+    required: true
+  config_env_file:
+    description: Config env filename inside each overlay.
+    required: false
+    default: config.env
+
+outputs:
+  overlay_paths:
+    description: Newline-separated overlay directories that were targeted.
+    value: ${{ steps.resolve.outputs.overlay_paths }}
+  commit_paths:
+    description: Newline-separated files to git-add after updates.
+    value: ${{ steps.resolve.outputs.commit_paths }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve overlay directories
+      id: resolve
+      shell: bash
+      env:
+        PRIMARY: ${{ inputs.overlay_path }}
+        SYNC_PROD_US: ${{ inputs.sync_prod_us }}
+        EXTRA: ${{ inputs.extra_overlay_paths }}
+        CONFIG_ENV_FILE: ${{ inputs.config_env_file }}
+      run: |
+        set -euo pipefail
+
+        paths=()
+        paths+=("${PRIMARY}")
+
+        if [ "${SYNC_PROD_US}" = "true" ] && [ -d "k8s/overlays/prod-us" ]; then
+          # Keep US regional Flux overlay in lockstep with EU prod releases.
+          paths+=("k8s/overlays/prod-us")
+        fi
+
+        while IFS= read -r extra; do
+          [ -z "${extra}" ] && continue
+          paths+=("${extra}")
+        done <<< "${EXTRA}"
+
+        # Deduplicate while preserving order
+        deduped="$(printf '%s\n' "${paths[@]}" | awk 'NF && !seen[$0]++')"
+
+        commit_paths=""
+        while IFS= read -r dir; do
+          [ -z "${dir}" ] && continue
+          commit_paths+="${dir}/kustomization.yaml"$'\n'
+          commit_paths+="${dir}/${CONFIG_ENV_FILE}"$'\n'
+        done <<< "${deduped}"
+
+        {
+          echo "overlay_paths<<EOF"
+          printf '%s\n' "${deduped}"
+          echo "EOF"
+          echo "commit_paths<<EOF"
+          printf '%s' "${commit_paths}"
+          echo "EOF"
+        } >> "${GITHUB_OUTPUT}"
+
+        echo "Resolved overlays:"
+        printf '%s\n' "${deduped}"
+
+    - name: Update kustomization images for all overlays
+      shell: bash
+      env:
+        OVERLAY_PATHS: ${{ steps.resolve.outputs.overlay_paths }}
+        IMAGES_JSON: ${{ inputs.images }}
+        IMAGE_TAG: ${{ inputs.image_tag }}
+        REGISTRY: ${{ inputs.registry }}
+        GCP_PROJECT_ID: ${{ inputs.gcp_project_id }}
+        REPOSITORY: ${{ inputs.repository }}
+        KUSTOMIZE_VERSION: v5.6.0
+      run: |
+        set -euo pipefail
+
+        if ! command -v kustomize >/dev/null 2>&1; then
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+            -o "${tmp_dir}/kustomize.tar.gz"
+          tar -xzf "${tmp_dir}/kustomize.tar.gz" -C "${tmp_dir}" kustomize
+          chmod +x "${tmp_dir}/kustomize"
+          sudo mv "${tmp_dir}/kustomize" /usr/local/bin/kustomize
+        fi
+        kustomize version
+
+        echo "${IMAGES_JSON}" | jq -e 'type == "array"' > /dev/null
+
+        while IFS= read -r OVERLAY_DIR; do
+          [ -z "${OVERLAY_DIR}" ] && continue
+          kustomization_file="${OVERLAY_DIR}/kustomization.yaml"
+          if [ ! -f "${kustomization_file}" ]; then
+            echo "::warning::${kustomization_file} not found. Skipping."
+            continue
+          fi
+
+          echo "== Updating images in ${OVERLAY_DIR} =="
+          pushd "${OVERLAY_DIR}" > /dev/null
+          echo "${IMAGES_JSON}" | jq -c '.[]' | while IFS= read -r img; do
+            kustomize_name="$(echo "${img}" | jq -r '.kustomize_name')"
+            image_name="$(echo "${img}" | jq -r '.image_name')"
+            tag_override="$(echo "${img}" | jq -r '.tag_override // empty')"
+            effective_tag="${tag_override:-$IMAGE_TAG}"
+            new_name="${REGISTRY}/${GCP_PROJECT_ID}/${REPOSITORY}/${image_name}"
+            echo "  ${kustomize_name} -> ${new_name}:${effective_tag}"
+            kustomize edit set image "${kustomize_name}=${new_name}:${effective_tag}"
+          done
+          popd > /dev/null
+        done <<< "${OVERLAY_PATHS}"
+
+    - name: Update APPLICATION_VERSION in config.env for all overlays
+      shell: bash
+      env:
+        OVERLAY_PATHS: ${{ steps.resolve.outputs.overlay_paths }}
+        CONFIG_ENV_FILE: ${{ inputs.config_env_file }}
+        RELEASE_TAG: ${{ inputs.image_tag }}
+      run: |
+        set -euo pipefail
+
+        while IFS= read -r OVERLAY_DIR; do
+          [ -z "${OVERLAY_DIR}" ] && continue
+          CONFIG_FILE="${OVERLAY_DIR}/${CONFIG_ENV_FILE}"
+          if [ ! -f "${CONFIG_FILE}" ]; then
+            echo "::warning::${CONFIG_FILE} not found. Skipping APPLICATION_VERSION update."
+            continue
+          fi
+
+          [ -s "${CONFIG_FILE}" ] && [ "$(tail -c1 "${CONFIG_FILE}")" != "" ] && echo "" >> "${CONFIG_FILE}"
+
+          if grep -q '^APPLICATION_VERSION=' "${CONFIG_FILE}"; then
+            sed -i "s|^APPLICATION_VERSION=.*|APPLICATION_VERSION=${RELEASE_TAG}|" "${CONFIG_FILE}"
+            echo "Updated APPLICATION_VERSION in ${CONFIG_FILE}"
+          else
+            echo "APPLICATION_VERSION=${RELEASE_TAG}" >> "${CONFIG_FILE}"
+            echo "Added APPLICATION_VERSION to ${CONFIG_FILE}"
+          fi
+        done <<< "${OVERLAY_PATHS}"

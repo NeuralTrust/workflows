@@ -242,7 +242,7 @@ jobs:
 | `tag_prefix` | No | — | Tag prefix (e.g., `gpu-`) |
 | `tag_suffix` | No | — | Tag suffix |
 | `kustomize_name` | No | `image_name` | Image name in kustomization.yaml |
-| `overlay_path` | No | `k8s/overlays/prod` | Prod kustomize overlay path |
+| `overlay_path` | No | `k8s/overlays/prod` | Primary prod overlay. If `k8s/overlays/prod-us` exists, release jobs update it in the same commit (US regional Flux) |
 | `config_env_file` | No | `config.env` | Config env file name in overlay |
 | `dev_branch` | No | `develop` | Dev branch name (for PR detection) |
 
@@ -1306,8 +1306,8 @@ gcloud artifacts repositories add-iam-policy-binding nt-docker \
 | Push `develop` | `COMMIT_SHA`, `latest`, `cache` | Warn (non-blocking) | `k8s/overlays/dev` | `APPLICATION_VERSION=<sha>` | Dev |
 | PR to `main` | — (no build) | — | — | — | — (CI only) |
 | Push `main` | — (no build) | — | — | — | — (creates release) |
-| GitHub Release (promote) | `v1.2.3`, `SHA`, `latest`, `cache` | Block (dev source) | `k8s/overlays/prod` | `APPLICATION_VERSION=v1.2.3` | Prod |
-| GitHub Release (rebuild) | `v1.2.3`, `SHA`, `latest`, `cache` | Block (prod image) | `k8s/overlays/prod` | `APPLICATION_VERSION=v1.2.3` | Prod |
+| GitHub Release (promote) | `v1.2.3`, `SHA`, `latest`, `cache` | Block (dev source) | `k8s/overlays/prod` (+ `prod-us` when present) | `APPLICATION_VERSION=v1.2.3` | Prod / US |
+| GitHub Release (rebuild) | `v1.2.3`, `SHA`, `latest`, `cache` | Block (prod image) | `k8s/overlays/prod` (+ `prod-us` when present) | `APPLICATION_VERSION=v1.2.3` | Prod / US |
 
 ---
 
@@ -1317,6 +1317,7 @@ gcloud artifacts repositories add-iam-policy-binding nt-docker \
 |--------|-------------|
 | [`docker-build-push`](.github/actions/docker-build-push/action.yml) | Build and push a Docker image (buildx) with shared tag/cache/secrets handling. Shared by all build/release workflows. |
 | [`kustomize-set-images`](.github/actions/kustomize-set-images/action.yml) | Update image names/tags in `kustomization.yaml` via `kustomize edit set image` (pinned binary) instead of fragile `sed`. |
+| [`update-release-overlays`](.github/actions/update-release-overlays/action.yml) | Release helper: set image tags + `APPLICATION_VERSION` on `k8s/overlays/prod` and, when present, `k8s/overlays/prod-us` in one pass. |
 | [`git-commit-push`](.github/actions/git-commit-push/action.yml) | Commit selected paths and push with `pull --rebase` + retry to avoid overlay-update races. Outputs the pushed commit SHA. |
 | [`free-disk-space`](.github/actions/free-disk-space/action.yml) | Free runner disk space for large Docker builds. |
 | [`setup-crane`](.github/actions/setup-crane/action.yml) | Install a pinned `crane` binary for image promotion (`crane copy`). |
