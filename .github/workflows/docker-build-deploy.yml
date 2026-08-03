@@ -106,11 +106,19 @@ on:
         required: false
         type: string
         default: 'inline'
-      cache_mounts:
+      build_cache_stage:
         description: >-
-          Newline-separated `RUN --mount=type=cache` targets to persist across
-          runs via actions/cache (e.g. "/app/.next/cache"). Empty disables it.
+          Dockerfile stage holding only a compiler cache directory. Pushed to
+          `<image>:buildcache` after the build and fed back into the next run.
           Use for compiler caches that layer caching cannot reach.
+          Requires build_cache_context. Empty disables it.
+        required: false
+        type: string
+        default: ''
+      build_cache_context:
+        description: >-
+          Named build context the Dockerfile reads the previous compiler cache
+          from. Must match a `FROM scratch AS <name>` stage.
         required: false
         type: string
         default: ''
@@ -191,7 +199,8 @@ jobs:
           tag_prefix: ${{ inputs.tag_prefix }}
           tag_suffix: ${{ inputs.tag_suffix }}
           cache_mode: ${{ inputs.cache_mode }}
-          cache_mounts: ${{ inputs.cache_mounts }}
+          build_cache_stage: ${{ inputs.build_cache_stage }}
+          build_cache_context: ${{ inputs.build_cache_context }}
 
   # ============================================================================
   # Job 2: Image Vulnerability Scan (warn mode — never blocks dev deploys)

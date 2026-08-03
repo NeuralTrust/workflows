@@ -73,14 +73,24 @@ inputs:
       every stage to the registry cache ref so multi-stage layer caching works.
     required: false
     default: inline
-  cache_mounts:
+  build_cache_stage:
     description: >-
-      Newline-separated list of `RUN --mount=type=cache` targets to persist
-      across runs (e.g. "/app/.next/cache"). Empty (default) disables this.
-      Layer caching cannot help these: a cache mount lives only inside one
-      BuildKit session, and hosted runners get a fresh builder every run, so
-      compiler caches start cold even when the layer above them is reused.
-      Each target is round-tripped through actions/cache via buildkit-cache-dance.
+      Name of a Dockerfile stage whose entire filesystem is a compiler cache
+      (e.g. `FROM scratch` + `COPY --from=builder /app/.next/cache /`). After
+      the main build this stage is pushed to `<image>:<prefix>buildcache<suffix>`
+      and fed back into the next run through `build_cache_context`.
+      Layer caching alone cannot carry a compiler cache: a `--mount=type=cache`
+      lives only inside one BuildKit session and hosted runners get a fresh
+      builder every run, so the contents must travel as a real layer.
+      Requires build_cache_context. Empty (default) disables this.
+    required: false
+    default: ''
+  build_cache_context:
+    description: >-
+      Named build context the Dockerfile reads the previous cache from. Must
+      match a `FROM scratch AS <name>` stage, which buildx overrides when the
+      cache image exists and which stays empty on the first run.
+      Required when build_cache_stage is set.
     required: false
     default: ''
 
@@ -97,6 +107,9 @@ outputs:
   cache_ref:
     description: Cache image reference.
     value: ${{ steps.meta.outputs.cache_ref }}
+  buildcache_ref:
+    description: Compiler-cache image reference.
+    value: ${{ steps.meta.outputs.buildcache_ref }}
   latest_ref:
     description: Latest image reference.
     value: ${{ steps.meta.outputs.latest_ref }}
@@ -132,6 +145,7 @@ runs:
         image_tag="${TAG_PREFIX}${primary}${TAG_SUFFIX}"
         cache_ref="${image_base}:${TAG_PREFIX}cache${TAG_SUFFIX}"
         latest_ref="${image_base}:${TAG_PREFIX}latest${TAG_SUFFIX}"
+        buildcache_ref="${image_base}:${TAG_PREFIX}buildcache${TAG_SUFFIX}"
 
         # With mode=max, buildx writes an OCI cache index to cache_ref. Including
         # that same ref in --tag would overwrite it with the final image and
@@ -164,6 +178,7 @@ runs:
         echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
         echo "image_ref=${image_base}:${image_tag}" >> "$GITHUB_OUTPUT"
         echo "cache_ref=${cache_ref}" >> "$GITHUB_OUTPUT"
+        echo "buildcache_ref=${buildcache_ref}" >> "$GITHUB_OUTPUT"
         echo "latest_ref=${latest_ref}" >> "$GITHUB_OUTPUT"
         echo "tags=${tags}" >> "$GITHUB_OUTPUT"
         echo "has_git_tag=${has_git_tag}" >> "$GITHUB_OUTPUT"
@@ -204,62 +219,31 @@ runs:
         echo "${args}" >> "$GITHUB_OUTPUT"
         echo "${eof}" >> "$GITHUB_OUTPUT"
 
-    - name: Prepare cache mount directories
-      id: cache-mounts
-      if: inputs.cache_mounts != ''
+    - name: Resolve previous build cache image
+      id: build-cache
+      if: inputs.build_cache_stage != ''
       shell: bash
       env:
-        CACHE_MOUNTS: ${{ inputs.cache_mounts }}
+        BUILDCACHE_REF: ${{ steps.meta.outputs.buildcache_ref }}
+        BUILD_CACHE_CONTEXT: ${{ inputs.build_cache_context }}
       run: |
-        set -euo pipefail
+        set -uo pipefail
 
-        # Host dirs live under RUNNER_TEMP, never the workspace: anything written
-        # into the build context would change the context hash and invalidate the
-        # very COPY layers this is meant to speed up.
-        root="${RUNNER_TEMP}/buildkit-cache-mounts"
-        map='{}'
-        dirs=''
+        if [ -z "$BUILD_CACHE_CONTEXT" ]; then
+          echo "::error::build_cache_stage requires build_cache_context"
+          exit 1
+        fi
 
-        while IFS= read -r raw; do
-          # `read` strips surrounding IFS whitespace; mount targets never contain any.
-          read -r target <<< "$raw" || true
-          [ -n "$target" ] || continue
-          slug="$(printf '%s' "$target" | sed 's#^/##; s#[^a-zA-Z0-9]#-#g')"
-          dir="${root}/${slug}"
-          mkdir -p "$dir"
-          map="$(jq -c --arg d "$dir" --arg t "$target" '. + {($d): $t}' <<< "$map")"
-          dirs="${dirs}${dir}"$'\n'
-        done <<< "$CACHE_MOUNTS"
-
-        # actions/cache treats a blank line in `path` as an empty pattern.
-        dirs="${dirs%$'\n'}"
-
-        echo "map=${map}" >> "$GITHUB_OUTPUT"
-
-        eof="$(dd if=/dev/urandom bs=15 count=1 status=none | base64)"
-        echo "dirs<<${eof}" >> "$GITHUB_OUTPUT"
-        echo "${dirs}" >> "$GITHUB_OUTPUT"
-        echo "${eof}" >> "$GITHUB_OUTPUT"
-
-    # Must run before the cache-dance step. Post steps execute in reverse order,
-    # so this saves *after* the dance has extracted the mounts back out.
-    - name: Restore cache mount data
-      if: inputs.cache_mounts != ''
-      uses: actions/cache@v4
-      with:
-        path: ${{ steps.cache-mounts.outputs.dirs }}
-        key: bkcache-${{ inputs.image_name }}-${{ github.sha }}
-        restore-keys: |
-          bkcache-${{ inputs.image_name }}-
-
-    - name: Inject cache mounts into BuildKit
-      if: inputs.cache_mounts != ''
-      uses: reproducible-containers/buildkit-cache-dance@v3.4.0
-      with:
-        builder: ${{ steps.buildx.outputs.name }}
-        cache-map: ${{ steps.cache-mounts.outputs.map }}
-        # Defaults to ./scratch, which would land inside the build context.
-        scratch-dir: ${{ runner.temp }}/buildkit-cache-scratch
+        # A missing tag is the normal first-run state, not a failure. Omitting the
+        # context leaves the Dockerfile's empty `FROM scratch` stage in place, so
+        # the build just starts cold.
+        if docker buildx imagetools inspect "$BUILDCACHE_REF" >/dev/null 2>&1; then
+          echo "contexts=${BUILD_CACHE_CONTEXT}=docker-image://${BUILDCACHE_REF}" >> "$GITHUB_OUTPUT"
+          echo "Seeding compiler cache from ${BUILDCACHE_REF}"
+        else
+          echo "contexts=" >> "$GITHUB_OUTPUT"
+          echo "::notice::${BUILDCACHE_REF} not found - building with a cold compiler cache"
+        fi
 
     - name: Build and push Docker image
       uses: docker/build-push-action@v6
@@ -270,6 +254,7 @@ runs:
         push: true
         tags: ${{ steps.meta.outputs.tags }}
         build-args: ${{ steps.build-args.outputs.args }}
+        build-contexts: ${{ steps.build-cache.outputs.contexts }}
         cache-from: |
           type=registry,ref=${{ steps.meta.outputs.cache_ref }}
           type=registry,ref=${{ steps.meta.outputs.latest_ref }}
@@ -277,4 +262,26 @@ runs:
           GCP_ACCESS_TOKEN=${{ inputs.access_token }}
           ${{ inputs.docker_secrets }}
         cache-to: ${{ inputs.cache_mode == 'max' && format('type=registry,ref={0},mode=max', steps.meta.outputs.cache_ref) || 'type=inline' }}
+        provenance: false
+
+    # Same builder, same build-args and contexts as the step above, so every
+    # layer is already a local cache hit and this only compresses and pushes the
+    # one cache blob. A failure here costs the next run a warm cache, nothing
+    # more, so it must never fail the deploy.
+    - name: Push build cache image
+      if: inputs.build_cache_stage != ''
+      continue-on-error: true
+      uses: docker/build-push-action@v6
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.context }}/${{ inputs.dockerfile }}
+        target: ${{ inputs.build_cache_stage }}
+        push: true
+        tags: ${{ steps.meta.outputs.buildcache_ref }}
+        build-args: ${{ steps.build-args.outputs.args }}
+        build-contexts: ${{ steps.build-cache.outputs.contexts }}
+        cache-from: type=registry,ref=${{ steps.meta.outputs.cache_ref }}
+        secrets: |
+          GCP_ACCESS_TOKEN=${{ inputs.access_token }}
+          ${{ inputs.docker_secrets }}
         provenance: false
