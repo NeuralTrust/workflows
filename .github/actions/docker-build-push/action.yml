@@ -83,6 +83,11 @@ inputs:
       lives only inside one BuildKit session and hosted runners get a fresh
       builder every run, so the contents must travel as a real layer.
       Requires build_cache_context. Empty (default) disables this.
+      DO NOT combine with cache_mode: max. mode=max exports every layer in the
+      build graph to the cache ref, so the cache is compressed and pushed twice
+      per run. Measured on a 170MB (compressed) Next.js cache: registry cache
+      export went from 20s to 199s, plus a 70s second push and ~60s to unpack
+      the seed layer — 330s of transfer to save 104s of compile.
     required: false
     default: ''
   build_cache_context:
