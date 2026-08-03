@@ -80,6 +80,13 @@ on:
         required: false
         type: string
         default: 'ubuntu-latest'
+      cache_mode:
+        description: >-
+          Buildx cache export mode passed to docker-build-push.
+          "inline" (default) or "max" for full multi-stage layer caching.
+        required: false
+        type: string
+        default: 'inline'
     secrets:
       WIF_PROVIDER:
         required: true
@@ -147,6 +154,7 @@ jobs:
           tag_prefix: ${{ inputs.tag_prefix }}
           tag_suffix: ${{ inputs.tag_suffix }}
           extra_tags: ${{ inputs.extra_tags }}
+          cache_mode: ${{ inputs.cache_mode }}
           include_git_tag: 'true'
 
       - name: Summary

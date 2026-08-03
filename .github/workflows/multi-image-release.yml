@@ -66,6 +66,14 @@ on:
         required: false
         type: string
         default: 'ubuntu-latest'
+      cache_mode:
+        description: >-
+          Buildx cache export mode passed to docker-build-push.
+          "inline" (default) or "max" for full multi-stage layer caching.
+          Per-image override: set cache_mode on an object in the images JSON.
+        required: false
+        type: string
+        default: 'inline'
     secrets:
       WIF_PROVIDER:
         required: true
@@ -140,6 +148,7 @@ jobs:
           tag_prefix: ${{ matrix.image.tag_prefix }}
           tag_suffix: ${{ matrix.image.tag_suffix }}
           extra_tags: ${{ github.sha }}
+          cache_mode: ${{ matrix.image.cache_mode || inputs.cache_mode }}
 
   # ============================================================================
   # Job 2: Update Kustomization with Release Tag
