@@ -99,6 +99,13 @@ on:
         required: false
         type: string
         default: 'ubuntu-latest'
+      cache_mode:
+        description: >-
+          Buildx cache export mode passed to docker-build-push.
+          "inline" (default) or "max" for full multi-stage layer caching.
+        required: false
+        type: string
+        default: 'inline'
     secrets:
       WIF_PROVIDER:
         required: true
@@ -175,6 +182,7 @@ jobs:
           app_version: ${{ github.sha }}
           tag_prefix: ${{ inputs.tag_prefix }}
           tag_suffix: ${{ inputs.tag_suffix }}
+          cache_mode: ${{ inputs.cache_mode }}
 
   # ============================================================================
   # Job 2: Image Vulnerability Scan (warn mode — never blocks dev deploys)

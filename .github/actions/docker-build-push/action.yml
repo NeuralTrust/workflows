@@ -66,6 +66,13 @@ inputs:
     description: Also tag with the git ref name when running on a tag ref.
     required: false
     default: 'false'
+  cache_mode:
+    description: >-
+      Buildx cache export mode. "inline" (default) embeds cache metadata in the
+      final image only — intermediate stages are not reusable. "max" exports
+      every stage to the registry cache ref so multi-stage layer caching works.
+    required: false
+    default: inline
 
 outputs:
   image_base:
@@ -106,6 +113,7 @@ runs:
         TAG_SUFFIX: ${{ inputs.tag_suffix }}
         EXTRA_TAGS: ${{ inputs.extra_tags }}
         INCLUDE_GIT_TAG: ${{ inputs.include_git_tag }}
+        CACHE_MODE: ${{ inputs.cache_mode }}
       run: |
         set -euo pipefail
 
@@ -115,7 +123,15 @@ runs:
         cache_ref="${image_base}:${TAG_PREFIX}cache${TAG_SUFFIX}"
         latest_ref="${image_base}:${TAG_PREFIX}latest${TAG_SUFFIX}"
 
-        tags="${image_base}:${image_tag},${latest_ref},${cache_ref}"
+        # With mode=max, buildx writes an OCI cache index to cache_ref. Including
+        # that same ref in --tag would overwrite it with the final image and
+        # defeat intermediate-stage caching. Inline mode needs the tag so the
+        # embedded cache metadata lands on a pullable image.
+        if [ "${CACHE_MODE}" = "max" ]; then
+          tags="${image_base}:${image_tag},${latest_ref}"
+        else
+          tags="${image_base}:${image_tag},${latest_ref},${cache_ref}"
+        fi
         has_git_tag=false
 
         if [ "$INCLUDE_GIT_TAG" = "true" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
@@ -192,5 +208,5 @@ runs:
         secrets: |
           GCP_ACCESS_TOKEN=${{ inputs.access_token }}
           ${{ inputs.docker_secrets }}
-        cache-to: type=inline
+        cache-to: ${{ inputs.cache_mode == 'max' && format('type=registry,ref={0},mode=max', steps.meta.outputs.cache_ref) || 'type=inline' }}
         provenance: false
