@@ -42,7 +42,7 @@ jobs:
     name: Invoke sast.yml as a consumer
     permissions:
       contents: read  # sast.yml saves SARIF as an artifact; no extra scopes needed
-    uses: ./.github/workflows/sast.yml
+    uses: NeuralTrust/workflows/.github/workflows/sast.yml@main
     with:
       scan_type: config
       trivy_scanners: config,secret

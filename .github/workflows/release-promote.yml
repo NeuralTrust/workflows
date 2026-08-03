@@ -447,7 +447,7 @@ jobs:
   scan:
     name: Image Vulnerability Scan
     needs: release
-    uses: ./.github/workflows/image-scan.yml
+    uses: NeuralTrust/workflows/.github/workflows/image-scan.yml@main
     permissions:
       contents: read
       id-token: write
