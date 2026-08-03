@@ -73,6 +73,16 @@ inputs:
       every stage to the registry cache ref so multi-stage layer caching works.
     required: false
     default: inline
+  cache_mounts:
+    description: >-
+      Newline-separated list of `RUN --mount=type=cache` targets to persist
+      across runs (e.g. "/app/.next/cache"). Empty (default) disables this.
+      Layer caching cannot help these: a cache mount lives only inside one
+      BuildKit session, and hosted runners get a fresh builder every run, so
+      compiler caches start cold even when the layer above them is reused.
+      Each target is round-tripped through actions/cache via buildkit-cache-dance.
+    required: false
+    default: ''
 
 outputs:
   image_base:
@@ -159,6 +169,7 @@ runs:
         echo "has_git_tag=${has_git_tag}" >> "$GITHUB_OUTPUT"
 
     - name: Set up Docker Buildx
+      id: buildx
       uses: docker/setup-buildx-action@v4
 
     - name: Login to Artifact Registry
@@ -192,6 +203,63 @@ runs:
         echo "args<<${eof}" >> "$GITHUB_OUTPUT"
         echo "${args}" >> "$GITHUB_OUTPUT"
         echo "${eof}" >> "$GITHUB_OUTPUT"
+
+    - name: Prepare cache mount directories
+      id: cache-mounts
+      if: inputs.cache_mounts != ''
+      shell: bash
+      env:
+        CACHE_MOUNTS: ${{ inputs.cache_mounts }}
+      run: |
+        set -euo pipefail
+
+        # Host dirs live under RUNNER_TEMP, never the workspace: anything written
+        # into the build context would change the context hash and invalidate the
+        # very COPY layers this is meant to speed up.
+        root="${RUNNER_TEMP}/buildkit-cache-mounts"
+        map='{}'
+        dirs=''
+
+        while IFS= read -r raw; do
+          # `read` strips surrounding IFS whitespace; mount targets never contain any.
+          read -r target <<< "$raw" || true
+          [ -n "$target" ] || continue
+          slug="$(printf '%s' "$target" | sed 's#^/##; s#[^a-zA-Z0-9]#-#g')"
+          dir="${root}/${slug}"
+          mkdir -p "$dir"
+          map="$(jq -c --arg d "$dir" --arg t "$target" '. + {($d): $t}' <<< "$map")"
+          dirs="${dirs}${dir}"$'\n'
+        done <<< "$CACHE_MOUNTS"
+
+        # actions/cache treats a blank line in `path` as an empty pattern.
+        dirs="${dirs%$'\n'}"
+
+        echo "map=${map}" >> "$GITHUB_OUTPUT"
+
+        eof="$(dd if=/dev/urandom bs=15 count=1 status=none | base64)"
+        echo "dirs<<${eof}" >> "$GITHUB_OUTPUT"
+        echo "${dirs}" >> "$GITHUB_OUTPUT"
+        echo "${eof}" >> "$GITHUB_OUTPUT"
+
+    # Must run before the cache-dance step. Post steps execute in reverse order,
+    # so this saves *after* the dance has extracted the mounts back out.
+    - name: Restore cache mount data
+      if: inputs.cache_mounts != ''
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.cache-mounts.outputs.dirs }}
+        key: bkcache-${{ inputs.image_name }}-${{ github.sha }}
+        restore-keys: |
+          bkcache-${{ inputs.image_name }}-
+
+    - name: Inject cache mounts into BuildKit
+      if: inputs.cache_mounts != ''
+      uses: reproducible-containers/buildkit-cache-dance@v3.4.0
+      with:
+        builder: ${{ steps.buildx.outputs.name }}
+        cache-map: ${{ steps.cache-mounts.outputs.map }}
+        # Defaults to ./scratch, which would land inside the build context.
+        scratch-dir: ${{ runner.temp }}/buildkit-cache-scratch
 
     - name: Build and push Docker image
       uses: docker/build-push-action@v6

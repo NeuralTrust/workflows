@@ -106,6 +106,14 @@ on:
         required: false
         type: string
         default: 'inline'
+      cache_mounts:
+        description: >-
+          Newline-separated `RUN --mount=type=cache` targets to persist across
+          runs via actions/cache (e.g. "/app/.next/cache"). Empty disables it.
+          Use for compiler caches that layer caching cannot reach.
+        required: false
+        type: string
+        default: ''
     secrets:
       WIF_PROVIDER:
         required: true
@@ -183,6 +191,7 @@ jobs:
           tag_prefix: ${{ inputs.tag_prefix }}
           tag_suffix: ${{ inputs.tag_suffix }}
           cache_mode: ${{ inputs.cache_mode }}
+          cache_mounts: ${{ inputs.cache_mounts }}
 
   # ============================================================================
   # Job 2: Image Vulnerability Scan (warn mode — never blocks dev deploys)
