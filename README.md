@@ -391,7 +391,7 @@ jobs:
 
 | Input | Default | Description |
 |-------|---------|-------------|
-| `model` | `gpt-4o-mini` | OpenAI model for classification |
+| `model` | `gpt-5.6-luna` | OpenAI model for classification |
 | `default_bump` | `patch` | Fallback if AI classification fails |
 | `initial_version` | `v0.1.0` | Version for repos with no previous tags |
 | `tag_prefix` | `v` | Prefix for version tags |

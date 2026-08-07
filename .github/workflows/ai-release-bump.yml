@@ -35,7 +35,7 @@ on:
         description: 'OpenAI model to use for semver classification'
         required: false
         type: string
-        default: 'gpt-4o-mini'
+        default: 'gpt-5.6-luna'
       default_bump:
         description: 'Default bump type if AI classification fails'
         required: false
