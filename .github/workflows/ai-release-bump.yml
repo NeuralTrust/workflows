@@ -223,6 +223,11 @@ jobs:
           REQUEST_JSON="${RUNNER_TEMP}/request.json"
           COMMITS_TXT="${RUNNER_TEMP}/commits.txt"
 
+          # Reasoning models reject `max_tokens` (use `max_completion_tokens`)
+          # and any `temperature` other than the default, so neither is sent.
+          # The budget covers unseen reasoning tokens as well as the ~20-token
+          # answer; too low and the model spends it all reasoning and returns
+          # empty content with finish_reason=length.
           cat > "$REQUEST_JSON" << 'REQEOF'
           {
             "model": "${{ inputs.model }}",
@@ -237,8 +242,7 @@ jobs:
                 "content": COMMITS_PLACEHOLDER
               }
             ],
-            "max_tokens": 200,
-            "temperature": 0
+            "max_completion_tokens": 2000
           }
           REQEOF
 
@@ -275,7 +279,17 @@ jobs:
           fi
 
           # Extract the classification
-          AI_RESPONSE=$(echo "$RESPONSE" | jq -r '.choices[0].message.content')
+          AI_RESPONSE=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // ""')
+
+          # A reasoning model that exhausts its budget returns HTTP 200 with
+          # empty content, which would otherwise be reported as invalid JSON.
+          if [ -z "${AI_RESPONSE//[[:space:]]/}" ]; then
+            FINISH_REASON=$(echo "$RESPONSE" | jq -r '.choices[0].finish_reason // "unknown"')
+            echo "::warning::Empty AI response (finish_reason=${FINISH_REASON}) — defaulting to ${{ inputs.default_bump }}"
+            echo "bump_type=${{ inputs.default_bump }}" >> "$GITHUB_OUTPUT"
+            write_output "reason" "Empty AI response, defaulting to ${{ inputs.default_bump }}"
+            exit 0
+          fi
 
           if ! echo "$AI_RESPONSE" | jq empty 2>/dev/null; then
             echo "::warning::Invalid AI response — defaulting to ${{ inputs.default_bump }}"
