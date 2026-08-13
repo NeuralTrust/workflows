@@ -1,0 +1,126 @@
+# ==============================================================================
+# Org-wide Dependabot retarget — security PRs onto develop
+# ==============================================================================
+# GitHub Dependabot security updates always open against the repository
+# default branch. Every NeuralTrust repo still uses main as the default, so
+# security PRs land on production. There is no organization setting and no
+# dependabot.yml key that can change that.
+#
+# This workflow is the central control: it searches NeuralTrust for open
+# Dependabot PRs against main and moves them onto develop when that branch
+# exists.
+#
+# Dependabot rebase can reset the base back to main, so this also runs on a
+# schedule rather than only when a PR is opened.
+#
+# Requires org secret GH_TOKEN with repo scope across NeuralTrust.
+# ==============================================================================
+
+name: Dependabot retarget
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-retarget
+  cancel-in-progress: false
+
+jobs:
+  retarget:
+    name: Retarget Dependabot PRs to develop
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Move Dependabot PRs from main to develop
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_ORG: NeuralTrust
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::GH_TOKEN is not set; cannot list or edit org PRs."
+            exit 1
+          fi
+
+          python3 - <<'PYEOF'
+          import json
+          import os
+          import subprocess
+
+          org = os.environ["GH_ORG"]
+
+          def gh_json(args):
+              result = subprocess.run(
+                  ["gh", *args],
+                  check=True,
+                  capture_output=True,
+                  text=True,
+              )
+              return json.loads(result.stdout) if result.stdout.strip() else []
+
+          def has_develop(repo):
+              result = subprocess.run(
+                  ["gh", "api", f"repos/{repo}/branches/develop", "--jq", ".name"],
+                  capture_output=True,
+                  text=True,
+              )
+              return result.returncode == 0
+
+          prs = gh_json([
+              "search",
+              "prs",
+              "--owner",
+              org,
+              "--app",
+              "dependabot",
+              "--state",
+              "open",
+              "--base",
+              "main",
+              "--limit",
+              "1000",
+              "--json",
+              "number,repository,url",
+          ])
+
+          retargeted = 0
+          skipped_no_develop = 0
+          develop_cache = {}
+
+          for pr in prs:
+              repo = pr["repository"]["nameWithOwner"]
+              if repo not in develop_cache:
+                  develop_cache[repo] = has_develop(repo)
+              if not develop_cache[repo]:
+                  print(f"Skip {repo}#{pr['number']}: no develop branch")
+                  skipped_no_develop += 1
+                  continue
+              print(f"Retargeting {repo}#{pr['number']} main -> develop")
+              subprocess.run(
+                  [
+                      "gh",
+                      "pr",
+                      "edit",
+                      str(pr["number"]),
+                      "--repo",
+                      repo,
+                      "--base",
+                      "develop",
+                  ],
+                  check=True,
+              )
+              retargeted += 1
+
+          print(
+              f"Found {len(prs)} open Dependabot PR(s) targeting main; "
+              f"skipped {skipped_no_develop} without develop; "
+              f"retargeted {retargeted}."
+          )
+          if retargeted:
+              print(f"::notice::{retargeted} Dependabot PR(s) retargeted to develop.")
+          PYEOF

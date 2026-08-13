@@ -1204,6 +1204,12 @@ All repos include a `dependabot.yml` that creates automated PRs for dependency u
 
 PRs target the `develop` branch only. Since all changes must be tested before promotion to `main`, dependency updates follow the same flow: merged into `develop` → tested → promoted via PR to `main`. Dependabot PRs trigger the standard CI pipeline (tests + SAST/security + metadata validation), so safe updates follow the same review path as other changes.
 
+**Security updates are different.** GitHub Dependabot security PRs always open against the repository default branch (`main` in this org). There is no organization-level setting and no `dependabot.yml` key that can change that.
+
+[`dependabot-retarget.yml`](.github/workflows/dependabot-retarget.yml) is the org-wide workaround: hourly (and `workflow_dispatch`) it searches NeuralTrust for open Dependabot PRs against `main` and moves them onto `develop` when that branch exists. Repos without `develop` stay on `main`. Dependabot rebase can reset the base back to `main`, which is why the job is scheduled rather than one-shot.
+
+Every service still needs a per-repo `.github/dependabot.yml` with `target-branch: develop` so *version* updates (weekly bumps) open against `develop` rather than `main`.
+
 ---
 
 ## Repository Self-Protection ("CI of CIs")
