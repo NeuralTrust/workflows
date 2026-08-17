@@ -1206,7 +1206,7 @@ PRs target the `develop` branch only. Since all changes must be tested before pr
 
 **Security updates are different.** GitHub Dependabot security PRs always open against the repository default branch (`main` in this org). There is no organization-level setting and no `dependabot.yml` key that can change that.
 
-[`dependabot-retarget.yml`](.github/workflows/dependabot-retarget.yml) is the org-wide workaround: hourly (and `workflow_dispatch`) it searches NeuralTrust for open Dependabot PRs against `main` and moves them onto `develop` when that branch exists. Repos without `develop` stay on `main`. Dependabot rebase can reset the base back to `main`, which is why the job is scheduled rather than one-shot.
+[`dependabot-retarget.yml`](.github/workflows/dependabot-retarget.yml) is the org-wide workaround: twice a day at 00:00 and 12:00 UTC (and `workflow_dispatch`) it searches NeuralTrust for open Dependabot PRs against `main` and moves them onto `develop` when that branch exists. Repos without `develop` stay on `main`. Dependabot rebase can reset the base back to `main`, which is why the job is scheduled rather than one-shot.
 
 Every service still needs a per-repo `.github/dependabot.yml` with `target-branch: develop` so *version* updates (weekly bumps) open against `develop` rather than `main`.
 

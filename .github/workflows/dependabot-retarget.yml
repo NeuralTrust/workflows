@@ -21,7 +21,7 @@ name: Dependabot retarget
 
 on:
   schedule:
-    - cron: "17 * * * *"
+    - cron: "0 0,12 * * *"
   workflow_dispatch:
 
 permissions:
