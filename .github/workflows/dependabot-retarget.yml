@@ -8,7 +8,8 @@
 #
 # This workflow is the central control: it searches NeuralTrust for open
 # Dependabot PRs against main and moves them onto develop when that branch
-# exists.
+# exists. Archived repos and repos without develop are skipped. A single
+# failed edit does not fail the job.
 #
 # Dependabot rebase can reset the base back to main, so this also runs on a
 # schedule rather than only when a PR is opened.
@@ -54,22 +55,41 @@ jobs:
 
           org = os.environ["GH_ORG"]
 
-          def gh_json(args):
-              result = subprocess.run(
+          def gh_run(args):
+              return subprocess.run(
                   ["gh", *args],
-                  check=True,
                   capture_output=True,
                   text=True,
               )
+
+          def gh_json(args):
+              result = gh_run(args)
+              if result.returncode != 0:
+                  raise RuntimeError(
+                      f"gh {' '.join(args)} failed ({result.returncode}): "
+                      f"{(result.stderr or result.stdout).strip()}"
+                  )
               return json.loads(result.stdout) if result.stdout.strip() else []
 
-          def has_develop(repo):
-              result = subprocess.run(
-                  ["gh", "api", f"repos/{repo}/branches/develop", "--jq", ".name"],
-                  capture_output=True,
-                  text=True,
-              )
-              return result.returncode == 0
+          def repo_state(repo):
+              result = gh_run([
+                  "api",
+                  f"repos/{repo}",
+                  "--jq",
+                  "{archived: .archived}",
+              ])
+              if result.returncode != 0:
+                  return {"archived": True, "has_develop": False}
+              archived = json.loads(result.stdout).get("archived", False)
+              if archived:
+                  return {"archived": True, "has_develop": False}
+              develop = gh_run([
+                  "api",
+                  f"repos/{repo}/branches/develop",
+                  "--jq",
+                  ".name",
+              ])
+              return {"archived": False, "has_develop": develop.returncode == 0}
 
           prs = gh_json([
               "search",
@@ -82,6 +102,7 @@ jobs:
               "open",
               "--base",
               "main",
+              "--archived=false",
               "--limit",
               "1000",
               "--json",
@@ -90,37 +111,50 @@ jobs:
 
           retargeted = 0
           skipped_no_develop = 0
-          develop_cache = {}
+          skipped_archived = 0
+          failed = 0
+          cache = {}
 
           for pr in prs:
               repo = pr["repository"]["nameWithOwner"]
-              if repo not in develop_cache:
-                  develop_cache[repo] = has_develop(repo)
-              if not develop_cache[repo]:
-                  print(f"Skip {repo}#{pr['number']}: no develop branch")
+              number = pr["number"]
+              if repo not in cache:
+                  cache[repo] = repo_state(repo)
+              state = cache[repo]
+              if state["archived"]:
+                  print(f"Skip {repo}#{number}: repository is archived")
+                  skipped_archived += 1
+                  continue
+              if not state["has_develop"]:
+                  print(f"Skip {repo}#{number}: no develop branch")
                   skipped_no_develop += 1
                   continue
-              print(f"Retargeting {repo}#{pr['number']} main -> develop")
-              subprocess.run(
-                  [
-                      "gh",
-                      "pr",
-                      "edit",
-                      str(pr["number"]),
-                      "--repo",
-                      repo,
-                      "--base",
-                      "develop",
-                  ],
-                  check=True,
-              )
+              print(f"Retargeting {repo}#{number} main -> develop", flush=True)
+              result = gh_run([
+                  "pr",
+                  "edit",
+                  str(number),
+                  "--repo",
+                  repo,
+                  "--base",
+                  "develop",
+              ])
+              if result.returncode != 0:
+                  err = (result.stderr or result.stdout).strip()
+                  print(f"Failed {repo}#{number}: {err}", flush=True)
+                  failed += 1
+                  continue
               retargeted += 1
 
           print(
               f"Found {len(prs)} open Dependabot PR(s) targeting main; "
               f"skipped {skipped_no_develop} without develop; "
-              f"retargeted {retargeted}."
+              f"skipped {skipped_archived} archived; "
+              f"retargeted {retargeted}; "
+              f"failed {failed}."
           )
           if retargeted:
               print(f"::notice::{retargeted} Dependabot PR(s) retargeted to develop.")
+          if failed:
+              print(f"::warning::{failed} Dependabot PR(s) could not be retargeted.")
           PYEOF
