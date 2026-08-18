@@ -318,7 +318,7 @@ jobs:
       # ---- Go ----
       - name: Set up Go
         if: inputs.language == 'go'
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ inputs.language_version }}
           cache: true
@@ -652,7 +652,7 @@ jobs:
       # ---- Go ----
       - name: Set up Go
         if: inputs.language == 'go'
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ inputs.language_version }}
           cache: true
