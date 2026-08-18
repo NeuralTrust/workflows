@@ -20,7 +20,7 @@ name: PR Metadata Validation
 
 on:
   workflow_call:
-    inputs:
+
 # No workflow-level `concurrency:` here — a reusable workflow cannot key a group
 # per calling job (github.run_id/workflow/ref are identical across sibling and
 # matrix jobs), so siblings would cancel each other. Callers declare their own.
