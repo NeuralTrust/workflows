@@ -21,17 +21,6 @@ name: SEO live URL
 on:
   workflow_call:
     inputs:
-      concurrency_key:
-        description: >
-          Optional discriminator for this workflow's concurrency group. Leave
-          empty (default) to keep every call in its own group — required when a
-          caller invokes this workflow more than once in the same run, since a
-          shared group would make the sibling calls cancel each other. Set it to
-          a stable string (e.g. the calling job id) to collapse superseded runs
-          of that job across pushes.
-        required: false
-        type: string
-        default: ''
       base_url:
         description: 'Production (or preview) origin, e.g. https://neuraltrust.ai'
         required: true
@@ -88,12 +77,9 @@ on:
         description: 'Optional PAT to checkout private NeuralTrust/workflows'
         required: false
 
-# A reusable workflow shares its concurrency group with every caller, so the
-# group must carry caller context. github.run_id keeps each call isolated by
-# default; callers that want superseded runs cancelled pass concurrency_key.
-concurrency:
-  group: seo-live-url-${{ github.workflow }}-${{ github.ref }}-${{ inputs.concurrency_key || github.run_id }}
-  cancel-in-progress: true
+# No workflow-level `concurrency:` here — a reusable workflow cannot key a group
+# per calling job (github.run_id/workflow/ref are identical across sibling and
+# matrix jobs), so siblings would cancel each other. Callers declare their own.
 
 jobs:
   live:

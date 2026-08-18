@@ -12,13 +12,13 @@ Checks
    referenced by full repo ref. This is the exact bug that broke consumer
    deploys.
 
-2. missing-concurrency
-   Reusable (`workflow_call`) workflows must declare a workflow-level
-   `concurrency:` block. Without one, a caller that invokes the same reusable
-   workflow twice in a run has no way to scope queueing, and superseded runs
-   keep burning runner minutes. Self-triggered workflows in this repo (e.g.
-   `workflows-ci.yml`) set their own concurrency and are not covered by this
-   rule, since they are not consumed by other repos.
+2. reusable-concurrency
+   A reusable workflow cannot key a concurrency group per calling job —
+   `github.run_id`, `github.workflow` and `github.ref` are identical for every
+   job of a caller's run, so sibling and matrix jobs share one group and cancel
+   each other. This silently killed real CI jobs. Concurrency belongs to the
+   caller. Allowed: `cancel-in-progress: false` (queues instead of cancelling)
+   and groups keyed on `inputs.*`, which the caller varies per call.
 
 Exit code is 1 when any check fails, so this can gate CI directly.
 """
@@ -38,9 +38,19 @@ def is_reusable(text: str) -> bool:
     return re.search(r"^\s{2}workflow_call:", text, re.MULTILINE) is not None
 
 
-def has_top_level_concurrency(text: str) -> bool:
-    """True when the workflow declares a workflow-level `concurrency:` block."""
-    return re.search(r"^concurrency:", text, re.MULTILINE) is not None
+def cancelling_concurrency(text: str) -> str | None:
+    """Return the offending group when a reusable workflow can cancel its siblings."""
+    match = re.search(r"^concurrency:\n((?:^[ \t]+.*\n)+)", text, re.MULTILINE)
+    if match is None:
+        return None
+    block = match.group(1)
+    if not re.search(r"cancel-in-progress:\s*true", block):
+        return None
+    group = re.search(r"group:\s*(.+)", block)
+    key = group.group(1).strip() if group else block.strip()
+    if "inputs." in key:
+        return None
+    return key
 
 
 def main() -> int:
@@ -63,15 +73,13 @@ def main() -> int:
                 )
                 failures += 1
 
-        if not has_top_level_concurrency(text):
+        offending = cancelling_concurrency(text)
+        if offending is not None:
             print(
-                f"::error file={path}::Reusable workflow is missing a workflow-level "
-                "`concurrency:` block. Add one keyed on `inputs.concurrency_key` so callers "
-                "can scope queueing, e.g.\n"
-                "  concurrency:\n"
-                "    group: <prefix>-${{ github.workflow }}-${{ github.ref }}-"
-                "${{ inputs.concurrency_key || github.run_id }}\n"
-                "    cancel-in-progress: false"
+                f"::error file={path}::Reusable workflow declares a cancelling "
+                f"`concurrency:` group ({offending}) — github.run_id/workflow/ref are "
+                "identical across sibling and matrix jobs, so those jobs cancel each "
+                "other. Remove it and let the caller declare concurrency."
             )
             failures += 1
 
