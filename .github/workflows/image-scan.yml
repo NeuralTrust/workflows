@@ -162,13 +162,6 @@ jobs:
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 25
 
-    # `pull-requests: write` is only needed for the sticky findings comment; when
-    # the caller does not grant it the comment step degrades to a warning.
-    permissions:
-      contents: read
-      id-token: write
-      pull-requests: write
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v6

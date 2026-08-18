@@ -212,15 +212,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
-    # SARIF is saved as a downloadable workflow artifact (below), not pushed to the
-    # GitHub Security tab — that path needs GitHub Advanced Security, which we don't
-    # have. Artifact upload uses the default token, so no extra scopes are required.
-    # `pull-requests: write` is only needed for the sticky findings comment; when
-    # the caller does not grant it the comment step degrades to a warning.
-    permissions:
-      contents: read
-      pull-requests: write
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v6

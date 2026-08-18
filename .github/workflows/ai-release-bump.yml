@@ -481,10 +481,6 @@ jobs:
     outputs:
       image_ref: ${{ steps.resolve.outputs.image_ref }}
 
-    permissions:
-      contents: read
-      id-token: write
-
     steps:
       - name: Validate scan inputs
         env:
@@ -556,9 +552,12 @@ jobs:
     name: Pre-Release Image Scan
     needs: [bump, resolve-image]
     uses: NeuralTrust/workflows/.github/workflows/image-scan.yml@main
-    permissions:
-      contents: read
-      id-token: write
+    # No `permissions:` here on purpose. A nested reusable-workflow call can only
+    # narrow the caller's grant, never widen it, and GitHub validates this at
+    # workflow-parse time — before `if:` is evaluated. Declaring `id-token: write`
+    # therefore hard-fails every caller that does not already grant it, even when
+    # image_scan_enabled is false. Callers that opt into the scan must grant
+    # `id-token: write` themselves (see the usage example at the top).
     with:
       image_ref: ${{ needs.resolve-image.outputs.image_ref }}
       severity: ${{ inputs.image_scan_severity }}
