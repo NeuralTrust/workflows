@@ -123,6 +123,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Detect source PR
@@ -209,13 +210,15 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Compute image metadata
         id: meta
         run: |
           P="${{ matrix.image.tag_prefix }}"
           S="${{ matrix.image.tag_suffix }}"
-          RELEASE_TAG="${P}${{ github.ref_name }}${S}"
+          RELEASE_TAG="${P}${GITHUB_REF_NAME}${S}"
 
           PROD_BASE="${{ inputs.registry }}/${{ inputs.gcp_project_id }}/${{ inputs.repository }}/${{ matrix.image.name }}"
           DEV_BASE="${{ inputs.registry }}/${{ inputs.dev_gcp_project_id }}/${{ inputs.repository }}/${{ matrix.image.name }}"
@@ -402,6 +405,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
+          persist-credentials: true
           token: ${{ secrets.GH_TOKEN }}
           ref: main
           fetch-depth: 0
@@ -442,7 +446,7 @@ jobs:
 
       - name: Release deployment summary
         run: |
-          RELEASE_TAG="${{ github.ref_name }}"
+          RELEASE_TAG="${GITHUB_REF_NAME}"
           STRATEGY="${{ needs.detect.outputs.strategy }}"
           OVERLAY_PATHS="${{ steps.overlays.outputs.overlay_paths }}"
 
@@ -516,9 +520,9 @@ jobs:
               --arg method "$METHOD" \
               --arg repo "${{ github.repository }}" \
               --arg images "$IMAGES_LABEL" \
-              --arg tag "${{ github.ref_name }}" \
+              --arg tag "${GITHUB_REF_NAME}" \
               --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-              --arg actor "${{ github.actor }}" \
+              --arg actor "${GITHUB_ACTOR}" \
               '{
                 "attachments": [{
                   "color": $color,

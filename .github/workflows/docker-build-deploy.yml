@@ -170,6 +170,8 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Authenticate to Google Cloud
         id: auth
@@ -237,6 +239,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
+          persist-credentials: true
           token: ${{ secrets.GH_TOKEN }}
           ref: ${{ github.ref_name }}
           fetch-depth: 0
@@ -244,7 +247,7 @@ jobs:
       - name: Determine overlay directory
         id: overlay
         run: |
-          case "${{ github.ref_name }}" in
+          case "${GITHUB_REF_NAME}" in
             develop)
               echo "dir=${{ inputs.overlay_dev_path }}" >> "$GITHUB_OUTPUT"
               ;;
@@ -301,7 +304,7 @@ jobs:
             echo "## Deployment Updated"
             echo "- **Image:** \`${{ needs.build-push.outputs.image_ref }}\`"
             echo "- **Overlay:** \`${OVERLAY_DIR}\`"
-            echo "- **Branch:** \`${{ github.ref_name }}\`"
+            echo "- **Branch:** \`${GITHUB_REF_NAME}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
@@ -346,9 +349,9 @@ jobs:
               --arg repo "${{ github.repository }}" \
               --arg image "${{ inputs.image_name }}" \
               --arg tag "${{ needs.build-push.outputs.image_tag }}" \
-              --arg branch "${{ github.ref_name }}" \
+              --arg branch "${GITHUB_REF_NAME}" \
               --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-              --arg actor "${{ github.actor }}" \
+              --arg actor "${GITHUB_ACTOR}" \
               '{
                 "attachments": [{
                   "color": $color,

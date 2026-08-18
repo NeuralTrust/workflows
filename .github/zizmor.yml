@@ -9,6 +9,12 @@
 # and relies on Dependabot to keep them current, rather than full commit-SHA
 # pins. Tell zizmor that tag/branch ("ref") pins satisfy the unpinned-uses
 # audit so it does not flag every intentional tag pin as a finding.
+#
+# Note: audits are NOT disabled here. `workflows-ci.yml` runs zizmor as a
+# blocking gate via `scripts/zizmor-ratchet.py`, which pins the accepted
+# finding count per file in `.github/zizmor-baseline.json`. Disabling an audit
+# would hide new findings; the ratchet blocks new ones while leaving the
+# pre-existing template-injection debt visible and countable.
 # ==============================================================================
 rules:
   unpinned-uses:

@@ -22,6 +22,17 @@ name: Build and Push Docker Image
 on:
   workflow_call:
     inputs:
+      concurrency_key:
+        description: >
+          Optional discriminator for this workflow's concurrency group. Leave
+          empty (default) to keep every call in its own group — required when a
+          caller invokes this workflow more than once in the same run, since a
+          shared group would make the sibling calls cancel each other. Set it to
+          a stable string (e.g. the calling job id) to collapse superseded runs
+          of that job across pushes.
+        required: false
+        type: string
+        default: ''
       image_name:
         description: 'Docker image name in the registry (e.g., "tenant-app", "aiapi")'
         required: true
@@ -108,6 +119,13 @@ on:
         description: 'Image tag (prefix + commit SHA + suffix)'
         value: ${{ jobs.build-push.outputs.image_tag }}
 
+# A reusable workflow shares its concurrency group with every caller, so the
+# group must carry caller context. github.run_id keeps each call isolated by
+# default; callers that want superseded runs cancelled pass concurrency_key.
+concurrency:
+  group: build-push-image-${{ github.workflow }}-${{ github.ref }}-${{ inputs.concurrency_key || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   build-push:
     name: Build & Push ${{ inputs.image_name }}
@@ -125,6 +143,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Authenticate to Google Cloud
         id: auth
@@ -165,6 +185,6 @@ jobs:
             echo "- **Image:** \`${{ steps.build.outputs.image_ref }}\`"
             echo "- **Latest:** \`${{ steps.build.outputs.latest_ref }}\`"
             if [[ "${{ steps.build.outputs.has_git_tag }}" == "true" ]]; then
-              echo "- **Semver:** \`${{ github.ref_name }}\`"
+              echo "- **Semver:** \`${GITHUB_REF_NAME}\`"
             fi
           } >> "$GITHUB_STEP_SUMMARY"

@@ -57,6 +57,17 @@ name: SAST & Security
 on:
   workflow_call:
     inputs:
+      concurrency_key:
+        description: >
+          Optional discriminator for this workflow's concurrency group. Leave
+          empty (default) to keep every call in its own group — required when a
+          caller invokes this workflow more than once in the same run, since a
+          shared group would make the sibling calls cancel each other. Set it to
+          a stable string (e.g. the calling job id) to collapse superseded runs
+          of that job across pushes.
+        required: false
+        type: string
+        default: ''
       # ======================================================================
       # Trivy (all languages)
       # ======================================================================
@@ -91,6 +102,15 @@ on:
         required: false
         type: string
         default: ''
+      trivy_pr_comment:
+        description: >
+          On pull requests, post a sticky comment listing each HIGH/CRITICAL CVE
+          with its fix version. The comment is updated in place on every run.
+          The caller must grant `pull-requests: write`; without it the step warns
+          and the table remains available in the job summary.
+        required: false
+        type: boolean
+        default: true
 
       # ======================================================================
       # pip-audit (Python)
@@ -176,6 +196,13 @@ on:
         type: string
         default: '.'
 
+# A reusable workflow shares its concurrency group with every caller, so the
+# group must carry caller context. github.run_id keeps each call isolated by
+# default; callers that want superseded runs cancelled pass concurrency_key.
+concurrency:
+  group: sast-${{ github.workflow }}-${{ github.ref }}-${{ inputs.concurrency_key || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   # ============================================================================
   # Trivy: Vulnerability & Misconfiguration Scanner (all languages)
@@ -188,12 +215,17 @@ jobs:
     # SARIF is saved as a downloadable workflow artifact (below), not pushed to the
     # GitHub Security tab — that path needs GitHub Advanced Security, which we don't
     # have. Artifact upload uses the default token, so no extra scopes are required.
+    # `pull-requests: write` is only needed for the sticky findings comment; when
+    # the caller does not grant it the comment step degrades to a warning.
     permissions:
       contents: read
+      pull-requests: write
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Detect Trivy ignore file
         id: trivyignore
@@ -205,6 +237,31 @@ jobs:
           else
             echo "path=" >> "$GITHUB_OUTPUT"
           fi
+
+      # JSON report first with exit-code 0, so the findings table can be rendered
+      # even when the blocking table scan below fails the job.
+      - name: Run Trivy scan (JSON report)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: 'v0.71.0'
+          scan-type: ${{ inputs.scan_type }}
+          scan-ref: '.'
+          scanners: ${{ inputs.trivy_scanners }}
+          severity: ${{ inputs.trivy_severity }}
+          format: 'json'
+          output: 'trivy-sast.json'
+          exit-code: '0'
+          ignore-unfixed: true
+          trivyignores: ${{ steps.trivyignore.outputs.path }}
+
+      - name: Report HIGH/CRITICAL findings
+        if: always()
+        uses: NeuralTrust/workflows/.github/actions/trivy-report@main
+        with:
+          report_path: trivy-sast.json
+          title: Trivy code scan — HIGH/CRITICAL
+          marker: trivy-sast
+          comment_on_pr: ${{ inputs.trivy_pr_comment }}
 
       - name: Run Trivy vulnerability scanner
         # SHA-pinned to the only post-incident-safe release (Mar 2026 supply-chain
@@ -260,7 +317,7 @@ jobs:
             echo "- **Scan type:** ${{ inputs.scan_type }}"
             echo "- **Scanners:** ${{ inputs.trivy_scanners }}"
             echo ""
-            echo "Findings are in the scan logs above; the SARIF report is saved as the \`trivy-sast-sarif\` run artifact."
+            echo "The HIGH/CRITICAL table above lists each finding with its fix version. Full findings are in the scan logs; the SARIF report is saved as the \`trivy-sast-sarif\` run artifact."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
@@ -279,6 +336,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -341,6 +400,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Run Gitleaks
@@ -379,6 +439,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -421,6 +483,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -481,6 +545,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Run njsscan
         run: |

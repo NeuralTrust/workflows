@@ -1,39 +1,75 @@
 # ==============================================================================
-# Reusable Workflow: Smoke Test (Post-Deploy Health Check)
+# Reusable Workflow: Smoke Test (Post-Deploy Verification)
 # ==============================================================================
-# Polls a health endpoint waiting for the expected version to appear.
-# Handles FluxCD async sync + Kubernetes rolling updates gracefully.
+# Verifies that a deploy actually landed. Three modes cover the different
+# service shapes we run:
+#
+#   mode: http    Poll an HTTP health endpoint until it reports the expected
+#                 version. Only works for services that expose a route the
+#                 runner can reach (public, or internal via a self-hosted /
+#                 Twingate-connected runner - see `runner`).
+#
+#   mode: gitops  Ask FluxCD whether the new revision was reconciled and the
+#                 workloads became Ready. This is the only option for services
+#                 with no HTTP route (Kafka workers, schedulers, jobs) and is
+#                 also a stronger signal than a health probe, because it fails
+#                 on CrashLoopBackOff instead of silently timing out.
+#
+#   mode: both    Run the gitops check first, then the HTTP probe. Recommended
+#                 for HTTP services: Flux confirms the rollout, the probe
+#                 confirms the served version.
 #
 # Outcomes:
-#   ✅ SUCCESS  — New version detected within timeout
-#   ⚠️ WARNING  — Service responding but old version still running (FluxCD lag)
-#   🚨 PROBLEM  — Service not responding at all
+#   SUCCESS  - expected version verified (and/or Flux reconciled + Ready)
+#   WARNING  - service responding but still on the old version (Flux lag)
+#   PROBLEM  - service not responding, or Flux failed to reconcile
 #
-# Usage (in deploy.yml caller):
+# ---------------------------------------------------------------------------
+# Usage (worker with no HTTP route - Flux verification only):
 #   jobs:
-#     deploy:
-#       uses: NeuralTrust/workflows/.github/workflows/docker-build-deploy.yml@main
-#       ...
-#
 #     smoke-test:
 #       needs: deploy
 #       uses: NeuralTrust/workflows/.github/workflows/smoke-test.yml@main
+#       permissions:
+#         contents: read
+#         id-token: write            # GCP WIF auth for cluster credentials
 #       with:
-#         health_url: https://api.dev.example.com/health
-#         expected_version: ${{ github.sha }}
-#       secrets:
-#         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+#         mode: gitops
+#         flux_kustomization: kafka-workers
+#         gke_cluster: neuraltrust-dev
+#         gke_location: europe-west1
+#         gcp_project_id: dev-project-id
+#         workload_namespace: kafka-workers
+#       secrets: inherit
 #
-# Usage (in release.yml caller):
+# Usage (public HTTP service - probe only, as before):
 #     smoke-test:
-#       needs: release
+#       needs: deploy
 #       uses: NeuralTrust/workflows/.github/workflows/smoke-test.yml@main
 #       with:
 #         health_url: https://api.example.com/health
 #         expected_version: ${{ github.ref_name }}
 #         environment: prod
-#       secrets:
-#         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+#       secrets: inherit
+#
+# Usage (internal HTTP service - Flux check plus probe from a runner that can
+# reach *.internal.neuraltrust.ai):
+#     smoke-test:
+#       needs: deploy
+#       uses: NeuralTrust/workflows/.github/workflows/smoke-test.yml@main
+#       permissions:
+#         contents: read
+#         id-token: write
+#       with:
+#         mode: both
+#         runner: self-hosted-twingate
+#         health_url: https://svc.internal.neuraltrust.ai/health
+#         expected_version: ${{ github.sha }}
+#         flux_kustomization: my-service
+#         gke_cluster: neuraltrust-dev
+#         gke_location: europe-west1
+#         gcp_project_id: dev-project-id
+#       secrets: inherit
 # ==============================================================================
 
 name: Smoke Test
@@ -41,14 +77,48 @@ name: Smoke Test
 on:
   workflow_call:
     inputs:
+      concurrency_key:
+        description: >
+          Optional discriminator for this workflow's concurrency group. Leave
+          empty (default) to keep every call in its own group — required when a
+          caller invokes this workflow more than once in the same run, since a
+          shared group would make the sibling calls cancel each other. Set it to
+          a stable string (e.g. the calling job id) to collapse superseded runs
+          of that job across pushes.
+        required: false
+        type: string
+        default: ''
+      mode:
+        description: >
+          Verification mode: `http` (poll a health endpoint), `gitops` (verify the
+          FluxCD Kustomization reconciled the new revision and workloads are
+          Ready), or `both` (gitops first, then http). Use `gitops` for services
+          with no HTTP route, such as Kafka workers and schedulers.
+        required: false
+        type: string
+        default: 'http'
       health_url:
-        description: 'URL to poll (e.g., https://api.dev.example.com/health)'
-        required: true
+        description: >
+          URL to poll (e.g. https://api.dev.example.com/health).
+          Required for mode `http` and `both`.
+        required: false
         type: string
+        default: ''
       expected_version:
-        description: 'Version string to look for in the health response (commit SHA or release tag)'
-        required: true
+        description: >
+          Version string to look for in the health response (commit SHA or
+          release tag). Required for mode `http` and `both`.
+        required: false
         type: string
+        default: ''
+      runner:
+        description: >
+          Runner label. Internal endpoints (*.internal.neuraltrust.ai) are not
+          reachable from GitHub-hosted runners — use a self-hosted / Twingate-
+          connected runner label for those, or prefer mode `gitops`.
+        required: false
+        type: string
+        default: 'ubuntu-latest'
       timeout_minutes:
         description: 'Max minutes to wait for new version before reporting'
         required: false
@@ -75,15 +145,362 @@ on:
         type: string
         default: ''
 
+      # ======================================================================
+      # GitOps (FluxCD) verification — mode: gitops | both
+      # ======================================================================
+      flux_kustomization:
+        description: >
+          Name of the FluxCD Kustomization to verify (as in the gitops repo,
+          e.g. `kafka-workers`). Required for mode `gitops` and `both`.
+        required: false
+        type: string
+        default: ''
+      flux_namespace:
+        description: 'Namespace holding the Flux Kustomization object.'
+        required: false
+        type: string
+        default: 'flux-system'
+      workload_namespace:
+        description: >
+          Namespace holding the workloads to check for readiness. Defaults to
+          flux_kustomization when empty. Set to `-` to skip the rollout check
+          and verify only Flux reconciliation.
+        required: false
+        type: string
+        default: ''
+      gke_cluster:
+        description: 'GKE cluster name (required for mode gitops | both).'
+        required: false
+        type: string
+        default: ''
+      gke_location:
+        description: 'GKE cluster location/region (required for mode gitops | both).'
+        required: false
+        type: string
+        default: ''
+      gcp_project_id:
+        description: 'GCP project holding the GKE cluster (required for mode gitops | both).'
+        required: false
+        type: string
+        default: ''
+      flux_timeout_minutes:
+        description: 'Max minutes to wait for Flux reconciliation and workload readiness.'
+        required: false
+        type: number
+        default: 10
+
     secrets:
       SLACK_WEBHOOK_URL:
         required: false
         description: 'Slack webhook for WARNING/PROBLEM alerts'
+      WIF_PROVIDER:
+        required: false
+        description: 'GCP Workload Identity Federation provider (mode gitops | both)'
+      WIF_SERVICE_ACCOUNT:
+        required: false
+        description: 'GCP service account email for WIF (mode gitops | both)'
+
+# A reusable workflow shares its concurrency group with every caller, so the
+# group must carry caller context. github.run_id keeps each call isolated by
+# default; callers that want superseded runs cancelled pass concurrency_key.
+concurrency:
+  group: smoke-test-${{ github.workflow }}-${{ github.ref }}-${{ inputs.concurrency_key || github.run_id }}
+  cancel-in-progress: false
 
 jobs:
+  # ============================================================================
+  # Job 1: Validate the requested mode has the inputs it needs
+  # ============================================================================
+  # Fails fast with an actionable message instead of, say, polling an empty URL
+  # for ten minutes and reporting a bogus PROBLEM.
+  validate:
+    name: Validate Inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    outputs:
+      http_enabled: ${{ steps.check.outputs.http_enabled }}
+      gitops_enabled: ${{ steps.check.outputs.gitops_enabled }}
+
+    steps:
+      - name: Check mode inputs
+        id: check
+        env:
+          MODE: ${{ inputs.mode }}
+          HEALTH_URL: ${{ inputs.health_url }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+          FLUX_KUSTOMIZATION: ${{ inputs.flux_kustomization }}
+          GKE_CLUSTER: ${{ inputs.gke_cluster }}
+          GKE_LOCATION: ${{ inputs.gke_location }}
+          GCP_PROJECT_ID: ${{ inputs.gcp_project_id }}
+        run: |
+          set -euo pipefail
+
+          case "$MODE" in
+            http)   http=true;  gitops=false ;;
+            gitops) http=false; gitops=true  ;;
+            both)   http=true;  gitops=true  ;;
+            *)
+              echo "::error::Unknown mode '${MODE}'. Use http, gitops or both."
+              exit 1
+              ;;
+          esac
+
+          missing=""
+          if [ "$http" = "true" ]; then
+            [ -n "$HEALTH_URL" ] || missing="${missing} health_url"
+            [ -n "$EXPECTED_VERSION" ] || missing="${missing} expected_version"
+          fi
+          if [ "$gitops" = "true" ]; then
+            [ -n "$FLUX_KUSTOMIZATION" ] || missing="${missing} flux_kustomization"
+            [ -n "$GKE_CLUSTER" ] || missing="${missing} gke_cluster"
+            [ -n "$GKE_LOCATION" ] || missing="${missing} gke_location"
+            [ -n "$GCP_PROJECT_ID" ] || missing="${missing} gcp_project_id"
+          fi
+
+          if [ -n "$missing" ]; then
+            echo "::error::mode '${MODE}' requires:${missing}"
+            exit 1
+          fi
+
+          {
+            echo "http_enabled=${http}"
+            echo "gitops_enabled=${gitops}"
+          } >> "$GITHUB_OUTPUT"
+          echo "mode=${MODE} (http=${http}, gitops=${gitops})"
+
+  # ============================================================================
+  # Job 2: GitOps verification — Flux reconciled + workloads Ready
+  # ============================================================================
+  # This is the only usable check for services with no HTTP route, and it
+  # catches failures a health probe cannot: image pull errors, CrashLoopBackOff,
+  # and a Kustomization that never picked up the new revision at all.
+  gitops:
+    name: Verify FluxCD Rollout
+    needs: validate
+    if: needs.validate.outputs.gitops_enabled == 'true'
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+
+    outputs:
+      result: ${{ steps.flux.outputs.result }}
+      detail: ${{ steps.flux.outputs.detail }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v3
+        with:
+          cluster_name: ${{ inputs.gke_cluster }}
+          location: ${{ inputs.gke_location }}
+          project_id: ${{ inputs.gcp_project_id }}
+
+      - name: Wait for Flux reconciliation and workload readiness
+        id: flux
+        env:
+          KUSTOMIZATION: ${{ inputs.flux_kustomization }}
+          FLUX_NS: ${{ inputs.flux_namespace }}
+          WORKLOAD_NS: ${{ inputs.workload_namespace }}
+          TIMEOUT_MINUTES: ${{ inputs.flux_timeout_minutes }}
+          POLL_INTERVAL: ${{ inputs.poll_interval }}
+          INITIAL_DELAY: ${{ inputs.initial_delay }}
+        run: |
+          set -uo pipefail
+
+          NS="${WORKLOAD_NS:-$KUSTOMIZATION}"
+          TIMEOUT=$(( TIMEOUT_MINUTES * 60 ))
+
+          echo "Waiting ${INITIAL_DELAY}s for Flux to notice the new revision..."
+          sleep "$INITIAL_DELAY"
+
+          # Flux sets Ready=True with a message naming the applied revision once
+          # the Kustomization has been applied successfully.
+          echo "::group::Waiting for Kustomization/${KUSTOMIZATION} to be Ready"
+          ELAPSED=0
+          READY=""
+          while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
+            READY=$(kubectl get kustomization "$KUSTOMIZATION" -n "$FLUX_NS" \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
+            MSG=$(kubectl get kustomization "$KUSTOMIZATION" -n "$FLUX_NS" \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}' 2>/dev/null || echo "")
+            REVISION=$(kubectl get kustomization "$KUSTOMIZATION" -n "$FLUX_NS" \
+              -o jsonpath='{.status.lastAppliedRevision}' 2>/dev/null || echo "")
+
+            echo "[$((ELAPSED / 60))m$((ELAPSED % 60))s] Ready=${READY:-unknown} revision=${REVISION:-none} ${MSG}"
+
+            if [ "$READY" = "True" ]; then
+              break
+            fi
+            sleep "$POLL_INTERVAL"
+            ELAPSED=$((ELAPSED + POLL_INTERVAL))
+          done
+          echo "::endgroup::"
+
+          if [ "$READY" != "True" ]; then
+            DETAIL="Kustomization ${KUSTOMIZATION} not Ready after ${TIMEOUT_MINUTES}min (Ready=${READY:-unknown})"
+            echo "::error::${DETAIL}"
+            kubectl describe kustomization "$KUSTOMIZATION" -n "$FLUX_NS" || true
+            {
+              echo "result=problem"
+              echo "detail=${DETAIL}"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$NS" = "-" ]; then
+            DETAIL="Flux reconciled revision ${REVISION:-unknown}; rollout check skipped"
+            echo "$DETAIL"
+            {
+              echo "result=success"
+              echo "detail=${DETAIL}"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Flux reporting Ready means the manifests applied, not that pods came
+          # up — a bad image still reconciles cleanly. Wait on the rollouts too.
+          echo "::group::Waiting for rollouts in namespace ${NS}"
+          REMAINING=$((TIMEOUT - ELAPSED))
+          [ "$REMAINING" -lt 60 ] && REMAINING=60
+          FAILED=""
+
+          mapfile -t WORKLOADS < <(kubectl get deployments,statefulsets -n "$NS" \
+            -o name 2>/dev/null || true)
+
+          if [ "${#WORKLOADS[@]}" -eq 0 ]; then
+            echo "::warning::No Deployments or StatefulSets found in namespace ${NS}"
+          fi
+
+          for w in "${WORKLOADS[@]}"; do
+            [ -z "$w" ] && continue
+            echo "--- rollout status ${w}"
+            if ! kubectl rollout status "$w" -n "$NS" --timeout="${REMAINING}s"; then
+              FAILED="${FAILED} ${w}"
+            fi
+          done
+          echo "::endgroup::"
+
+          if [ -n "$FAILED" ]; then
+            DETAIL="Rollout did not complete for:${FAILED}"
+            echo "::error::${DETAIL}"
+            kubectl get pods -n "$NS" || true
+            {
+              echo "result=problem"
+              echo "detail=${DETAIL}"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          DETAIL="Flux reconciled revision ${REVISION:-unknown}; all rollouts Ready in ${NS}"
+          {
+            echo "result=success"
+            echo "detail=${DETAIL}"
+          } >> "$GITHUB_OUTPUT"
+          echo "$DETAIL"
+
+      - name: Summary
+        if: always()
+        env:
+          RESULT: ${{ steps.flux.outputs.result }}
+          DETAIL: ${{ steps.flux.outputs.detail }}
+        run: |
+          {
+            echo "## GitOps Verification (${{ inputs.environment }})"
+            echo ""
+            if [ "$RESULT" = "success" ]; then
+              echo "**Result:** Flux rollout verified"
+            else
+              echo "**Result:** Flux rollout FAILED"
+            fi
+            echo ""
+            echo "- **Kustomization:** \`${{ inputs.flux_kustomization }}\` (ns \`${{ inputs.flux_namespace }}\`)"
+            echo "- **Cluster:** \`${{ inputs.gke_cluster }}\` (\`${{ inputs.gke_location }}\`)"
+            echo "- **Detail:** ${DETAIL:-no detail}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send Slack notification
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RESULT: ${{ steps.flux.outputs.result }}
+          DETAIL: ${{ steps.flux.outputs.detail }}
+          SERVICE: ${{ inputs.service_name || github.repository }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          KUSTOMIZATION: ${{ inputs.flux_kustomization }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "No Slack webhook configured, skipping notification"
+            exit 0
+          fi
+
+          # Only alert on failure here: in `both` mode a successful rollout is
+          # followed by the HTTP probe, which sends the success notification.
+          if [ "$RESULT" = "success" ]; then
+            echo "Rollout verified; success is reported by the HTTP probe or the job summary."
+            exit 0
+          fi
+
+          curl -sf "$SLACK_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n \
+              --arg service "$SERVICE" \
+              --arg env "$ENVIRONMENT" \
+              --arg kustomization "$KUSTOMIZATION" \
+              --arg detail "${DETAIL:-the Flux verification step did not complete}" \
+              --arg run_url "$RUN_URL" \
+              '{
+                "attachments": [{
+                  "color": "#dc3545",
+                  "blocks": [
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": (":rotating_light: *GitOps Verification FAILED* | `" + $service + "` (" + $env + ")")
+                      }
+                    },
+                    {
+                      "type": "section",
+                      "text": {"type": "mrkdwn", "text": $detail}
+                    },
+                    {
+                      "type": "section",
+                      "fields": [
+                        {"type": "mrkdwn", "text": ("*Kustomization:*\n`" + $kustomization + "`")},
+                        {"type": "mrkdwn", "text": ("*Workflow:*\n<" + $run_url + "|View Run>")}
+                      ]
+                    }
+                  ]
+                }]
+              }'
+            )" || echo "::warning::Slack notification failed"
+
+      - name: Fail on unsuccessful rollout
+        if: steps.flux.outputs.result != 'success'
+        run: exit 1
+
+  # ============================================================================
+  # Job 3: HTTP health probe
+  # ============================================================================
   smoke-test:
     name: Smoke Test (${{ inputs.environment }})
-    runs-on: ubuntu-latest
+    needs: [validate, gitops]
+    if: |
+      always() &&
+      needs.validate.result == 'success' &&
+      needs.validate.outputs.http_enabled == 'true' &&
+      (needs.gitops.result == 'success' || needs.gitops.result == 'skipped')
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 60
 
     steps:
@@ -235,7 +652,7 @@ jobs:
               --arg version "$SHORT_VERSION" \
               --arg url "$URL" \
               --arg run_url "$RUN_URL" \
-              --arg actor "${{ github.actor }}" \
+              --arg actor "${GITHUB_ACTOR}" \
               '{
                 "attachments": [{
                   "color": $color,
@@ -269,6 +686,9 @@ jobs:
             )" || echo "::warning::Slack notification failed"
 
       - name: Set exit code
+        # Without always(), a failing earlier step would skip this and the job
+        # could report success; the notification step above already ran.
+        if: always()
         run: |
           RESULT="${{ steps.poll.outputs.result }}"
           case "$RESULT" in
@@ -283,6 +703,10 @@ jobs:
               ;;
             problem)
               echo "🚨 Smoke test failed — service not responding"
+              exit 1
+              ;;
+            *)
+              echo "::error::Smoke test produced no result — the poll step did not complete."
               exit 1
               ;;
           esac

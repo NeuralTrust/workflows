@@ -7,13 +7,40 @@
 # Creates a GitHub Release with the new version tag. The release event then
 # triggers the repo's release.yml workflow for building and deploying.
 #
-# Usage:
+# Job graph:
+#   bump ──► resolve-image ──► scan ──► publish
+#            (opt-in)          (opt-in)  tag + Release + version files
+#
+# `bump` only COMPUTES the next version. Nothing is tagged, committed or
+# published until the optional image-scan gate has passed, so a vulnerable
+# image can never produce a release (no orphan tag, no half-done release).
+# When `image_scan_enabled: false` (default) resolve-image/scan are skipped and
+# behaviour is identical to the pre-gate version of this workflow.
+#
+# Usage (no image scan — unchanged behaviour):
 #   jobs:
 #     release:
 #       uses: NeuralTrust/workflows/.github/workflows/ai-release-bump.yml@main
 #       secrets:
 #         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 #         GH_TOKEN: ${{ secrets.GH_TOKEN }}
+#
+# Usage (blocking image-scan gate before the release is created):
+#   jobs:
+#     release:
+#       uses: NeuralTrust/workflows/.github/workflows/ai-release-bump.yml@main
+#       permissions:
+#         contents: write
+#         id-token: write          # GCP WIF auth to resolve/pull the dev image
+#       with:
+#         image_scan_enabled: true
+#         image_name: my-service
+#         dev_gcp_project_id: dev-project-id
+#       secrets:
+#         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+#         GH_TOKEN: ${{ secrets.GH_TOKEN }}
+#         WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
+#         WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
 #
 # Note: GH_TOKEN must be a PAT (not GITHUB_TOKEN) so the created release
 #       event can trigger other workflows (release.yml).
@@ -76,6 +103,61 @@ on:
         required: false
         type: string
         default: '## [Unreleased]'
+
+      # ======================================================================
+      # Pre-release image scan gate
+      # ======================================================================
+      image_scan_enabled:
+        description: >
+          Block release creation on a Trivy scan of the already-built dev image.
+          Opt-in (default false) so repos without a container image, or whose
+          image is built after the release, keep the previous behaviour.
+          Requires image_name, dev_gcp_project_id and the WIF secrets.
+        required: false
+        type: boolean
+        default: false
+      image_name:
+        description: 'Docker image name in the dev registry (required when image_scan_enabled).'
+        required: false
+        type: string
+        default: ''
+      dev_gcp_project_id:
+        description: 'Dev GCP project id holding the image to scan (required when image_scan_enabled).'
+        required: false
+        type: string
+        default: ''
+      registry:
+        description: 'Artifact Registry host for the dev image.'
+        required: false
+        type: string
+        default: 'europe-west1-docker.pkg.dev'
+      repository:
+        description: 'Artifact Registry repository name for the dev image.'
+        required: false
+        type: string
+        default: 'nt-docker'
+      image_tag_prefix:
+        description: 'Prefix applied to dev image tags (mirrors release-promote tag_prefix, e.g. "gpu-").'
+        required: false
+        type: string
+        default: ''
+      image_tag_suffix:
+        description: 'Suffix applied to dev image tags (mirrors release-promote tag_suffix).'
+        required: false
+        type: string
+        default: ''
+      image_scan_severity:
+        description: 'Trivy severity levels for the pre-release image scan.'
+        required: false
+        type: string
+        default: 'CRITICAL,HIGH'
+      accept_vulnerability_risk:
+        description: >
+          Log pre-release scan findings without blocking. Accepted CVEs should be
+          documented in the repo root .trivyignore with a revisit date.
+        required: false
+        type: boolean
+        default: false
     secrets:
       OPENAI_API_KEY:
         required: true
@@ -83,6 +165,12 @@ on:
       GH_TOKEN:
         required: true
         description: 'GitHub PAT with contents:write — needed to trigger release.yml'
+      WIF_PROVIDER:
+        required: false
+        description: 'GCP Workload Identity Federation provider (required when image_scan_enabled)'
+      WIF_SERVICE_ACCOUNT:
+        required: false
+        description: 'GCP service account email for WIF (required when image_scan_enabled)'
     outputs:
       new_version:
         description: 'The new version tag (e.g., v1.2.3)'
@@ -105,12 +193,16 @@ jobs:
     timeout-minutes: 20
 
     outputs:
+      skip: ${{ steps.bump-guard.outputs.skip }}
+      has_commits: ${{ steps.commits.outputs.has_commits }}
       new_version: ${{ steps.version.outputs.new_version }}
       bump_type: ${{ steps.ai.outputs.bump_type }}
+      reason: ${{ steps.ai.outputs.reason }}
       previous_version: ${{ steps.latest-tag.outputs.tag }}
+      commit_log: ${{ steps.commits.outputs.log }}
 
     permissions:
-      contents: write
+      contents: read
 
     steps:
       - name: Skip if push is only the automated version bump or a changelog feed
@@ -138,6 +230,7 @@ jobs:
         if: steps.bump-guard.outputs.skip != 'true'
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           fetch-depth: 0
           token: ${{ secrets.GH_TOKEN }}
 
@@ -355,12 +448,172 @@ jobs:
           echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
           echo "Version bump: ${PREFIX}${CURRENT} → ${NEW_VERSION} ($BUMP)"
 
+      - name: Skip — no new commits
+        if: steps.bump-guard.outputs.skip != 'true' && steps.commits.outputs.has_commits != 'true'
+        run: |
+          echo "No new commits since last release. Skipping version bump."
+          echo "## No Release Needed" >> "$GITHUB_STEP_SUMMARY"
+          echo "No new commits since last release." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Summary — skipped after version bump commit
+        if: steps.bump-guard.outputs.skip == 'true'
+        run: |
+          echo "## Skipped" >> "$GITHUB_STEP_SUMMARY"
+          echo "Push is only the automated semver file bump; auto-release will not run again until substantive commits land." >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
+  # Job 2: Resolve the dev image reference to scan (opt-in)
+  # ============================================================================
+  # The image was already built by CI for this commit, so we scan it by SHA and
+  # fall back to the latest dev tag (same resolution order release-promote.yml
+  # uses when it promotes).
+  resolve-image:
+    name: Resolve Dev Image
+    needs: bump
+    if: |
+      inputs.image_scan_enabled &&
+      needs.bump.outputs.skip != 'true' &&
+      needs.bump.outputs.has_commits == 'true' &&
+      inputs.dry_run == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    outputs:
+      image_ref: ${{ steps.resolve.outputs.image_ref }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Validate scan inputs
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          DEV_PROJECT: ${{ inputs.dev_gcp_project_id }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${IMAGE_NAME}" ] || missing="${missing} image_name"
+          [ -n "${DEV_PROJECT}" ] || missing="${missing} dev_gcp_project_id"
+          if [ -n "${missing}" ]; then
+            echo "::error::image_scan_enabled is true but required input(s) are empty:${missing}"
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+          token_format: access_token
+          create_credentials_file: false
+
+      - name: Install crane
+        uses: NeuralTrust/workflows/.github/actions/setup-crane@main
+
+      - name: Login to Artifact Registry (crane)
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          REGISTRY: ${{ inputs.registry }}
+        run: |
+          set -euo pipefail
+          echo "$ACCESS_TOKEN" | crane auth login "$REGISTRY" -u oauth2accesstoken --password-stdin
+
+      - name: Resolve dev image reference
+        id: resolve
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          DEV_PROJECT: ${{ inputs.dev_gcp_project_id }}
+          REPOSITORY: ${{ inputs.repository }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          P: ${{ inputs.image_tag_prefix }}
+          S: ${{ inputs.image_tag_suffix }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          DEV_BASE="${REGISTRY}/${DEV_PROJECT}/${REPOSITORY}/${IMAGE_NAME}"
+          SHA_REF="${DEV_BASE}:${P}${SHA}${S}"
+          LATEST_REF="${DEV_BASE}:${P}latest${S}"
+
+          if crane manifest "${SHA_REF}" > /dev/null 2>&1; then
+            REF="${SHA_REF}"
+            echo "Dev image found by commit SHA: ${REF}"
+          elif crane manifest "${LATEST_REF}" > /dev/null 2>&1; then
+            REF="${LATEST_REF}"
+            echo "::notice::Dev image not found by SHA — scanning the latest dev tag instead: ${REF}"
+          else
+            echo "::error::No dev image found at ${SHA_REF} or ${LATEST_REF}. The pre-release scan gate cannot verify this release; build the dev image first or set image_scan_enabled: false."
+            exit 1
+          fi
+
+          echo "image_ref=${REF}" >> "$GITHUB_OUTPUT"
+
+  # ============================================================================
+  # Job 3: Blocking image vulnerability scan (opt-in)
+  # ============================================================================
+  scan:
+    name: Pre-Release Image Scan
+    needs: [bump, resolve-image]
+    uses: NeuralTrust/workflows/.github/workflows/image-scan.yml@main
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      image_ref: ${{ needs.resolve-image.outputs.image_ref }}
+      severity: ${{ inputs.image_scan_severity }}
+      block_vulnerability_findings: true
+      accept_vulnerability_risk: ${{ inputs.accept_vulnerability_risk }}
+      upload_sarif: true
+    secrets:
+      WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
+      WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+  # ============================================================================
+  # Job 4: Publish — version files, changelog, tag and GitHub Release
+  # ============================================================================
+  # Runs only when the scan gate passed (or was not requested). Nothing before
+  # this job mutates the repo, so a blocked scan leaves no orphan tag, no bump
+  # commit and no draft release to clean up.
+  publish:
+    name: Publish Release
+    needs: [bump, resolve-image, scan]
+    if: |
+      always() &&
+      needs.bump.result == 'success' &&
+      needs.bump.outputs.skip != 'true' &&
+      needs.bump.outputs.has_commits == 'true' &&
+      inputs.dry_run == false &&
+      (needs.resolve-image.result == 'success' || needs.resolve-image.result == 'skipped') &&
+      (needs.scan.result == 'success' || needs.scan.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Restore commit log
+        # The log is passed as a job output rather than an artifact: it is the
+        # same truncated list (100 commits) already used for the AI prompt, and
+        # a job output avoids an artifact round-trip for a few KB of text.
+        env:
+          COMMIT_LOG: ${{ needs.bump.outputs.commit_log }}
+        run: printf '%s\n' "$COMMIT_LOG" > "${RUNNER_TEMP}/commits.txt"
+
       - name: Promote CHANGELOG Unreleased → versioned section
-        if: steps.bump-guard.outputs.skip != 'true' && steps.commits.outputs.has_commits == 'true' && inputs.update_changelog == true && inputs.dry_run == false
+        if: inputs.update_changelog == true
         env:
           CHANGELOG_PATH: ${{ inputs.changelog_path }}
           UNRELEASED_HEADING: ${{ inputs.unreleased_heading }}
-          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+          NEW_VERSION: ${{ needs.bump.outputs.new_version }}
         run: |
           if [ ! -f "${CHANGELOG_PATH}" ]; then
             echo "${CHANGELOG_PATH} does not exist; skipping promotion."
@@ -421,13 +674,13 @@ jobs:
           PY
 
       - name: Update version files
-        if: steps.bump-guard.outputs.skip != 'true' && steps.commits.outputs.has_commits == 'true' && inputs.version_update_script != '' && inputs.dry_run == false
+        if: inputs.version_update_script != ''
         env:
-          TAG: ${{ steps.version.outputs.new_version }}
-          VERSION: ${{ steps.version.outputs.new_version }}
+          TAG: ${{ needs.bump.outputs.new_version }}
+          TAG_PREFIX: ${{ inputs.tag_prefix }}
         run: |
           # Strip tag prefix to get bare version (e.g. v1.2.3 → 1.2.3)
-          VERSION="${TAG#${{ inputs.tag_prefix }}}"
+          VERSION="${TAG#"$TAG_PREFIX"}"
           export VERSION
 
           echo "Updating version files to ${VERSION} (tag: ${TAG})..."
@@ -436,23 +689,22 @@ jobs:
 
       - name: Commit and push version files
         id: commit-version
-        if: steps.bump-guard.outputs.skip != 'true' && steps.commits.outputs.has_commits == 'true' && inputs.dry_run == false
         uses: NeuralTrust/workflows/.github/actions/git-commit-push@main
         with:
           branch: ${{ github.ref_name }}
-          message: "chore: bump version to ${{ steps.version.outputs.new_version }}"
+          message: "chore: bump version to ${{ needs.bump.outputs.new_version }}"
           paths: |
             .
 
       - name: Create GitHub Release
-        if: steps.bump-guard.outputs.skip != 'true' && steps.commits.outputs.has_commits == 'true' && inputs.dry_run == false
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          VERSION: ${{ steps.version.outputs.new_version }}
-          BUMP: ${{ steps.ai.outputs.bump_type }}
-          REASON: ${{ steps.ai.outputs.reason }}
-          PREVIOUS: ${{ steps.latest-tag.outputs.tag }}
+          VERSION: ${{ needs.bump.outputs.new_version }}
+          BUMP: ${{ needs.bump.outputs.bump_type }}
+          REASON: ${{ needs.bump.outputs.reason }}
+          PREVIOUS: ${{ needs.bump.outputs.previous_version }}
           VERSION_COMMIT_SHA: ${{ steps.commit-version.outputs.sha }}
+          SCANNED_IMAGE: ${{ needs.resolve-image.outputs.image_ref }}
         run: |
           # Use the version-commit SHA if we pushed one, otherwise the original SHA
           TARGET_SHA="${VERSION_COMMIT_SHA}"
@@ -493,17 +745,42 @@ jobs:
             echo "- **Bump:** ${BUMP}"
             echo "- **Reason:** ${REASON}"
             echo "- **Previous:** \`${PREVIOUS:-none}\`"
+            if [ -n "${SCANNED_IMAGE}" ]; then
+              echo "- **Scanned image:** \`${SCANNED_IMAGE}\` (passed the blocking Trivy gate)"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Skip — no new commits
-        if: steps.bump-guard.outputs.skip != 'true' && steps.commits.outputs.has_commits != 'true'
-        run: |
-          echo "No new commits since last release. Skipping version bump."
-          echo "## No Release Needed" >> "$GITHUB_STEP_SUMMARY"
-          echo "No new commits since last release." >> "$GITHUB_STEP_SUMMARY"
+  # ============================================================================
+  # Job 5: Report a release blocked by the scan gate
+  # ============================================================================
+  blocked:
+    name: Release Blocked by Image Scan
+    needs: [bump, resolve-image, scan]
+    if: |
+      always() &&
+      needs.bump.outputs.skip != 'true' &&
+      needs.bump.outputs.has_commits == 'true' &&
+      (needs.resolve-image.result == 'failure' || needs.scan.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
 
-      - name: Summary — skipped after version bump commit
-        if: steps.bump-guard.outputs.skip == 'true'
+    steps:
+      - name: Explain the block
+        env:
+          VERSION: ${{ needs.bump.outputs.new_version }}
+          IMAGE_REF: ${{ needs.resolve-image.outputs.image_ref }}
         run: |
-          echo "## Skipped" >> "$GITHUB_STEP_SUMMARY"
-          echo "Push is only the automated semver file bump; auto-release will not run again until substantive commits land." >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Release Blocked"
+            echo ""
+            echo "\`${VERSION}\` was **not** created: the pre-release image gate did not pass."
+            if [ -n "${IMAGE_REF}" ]; then
+              echo ""
+              echo "- **Image:** \`${IMAGE_REF}\`"
+            fi
+            echo ""
+            echo "No tag, version-bump commit or GitHub Release was produced, so nothing needs cleaning up."
+            echo "Fix the CVEs (or document accepted risk in \`.trivyignore\`) and re-run."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::Release ${VERSION} blocked by the pre-release image scan gate."
+          exit 1

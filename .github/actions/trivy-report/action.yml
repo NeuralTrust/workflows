@@ -1,0 +1,209 @@
+name: Trivy Findings Report
+description: >
+  Render a Trivy JSON report as a HIGH/CRITICAL CVE table in the job summary and,
+  on pull requests, as a single sticky PR comment that is updated in place.
+
+inputs:
+  report_path:
+    description: Path to a Trivy JSON report.
+    required: true
+  title:
+    description: Heading used in the summary and the PR comment.
+    required: false
+    default: Trivy findings
+  marker:
+    description: >
+      Hidden HTML marker identifying the sticky comment. One marker per logical
+      scan, so a repo can have both a code-scan and an image-scan comment.
+    required: false
+    default: trivy-scan
+  subtitle:
+    description: Optional line rendered under the heading (e.g. the image ref).
+    required: false
+    default: ''
+  comment_on_pr:
+    description: >
+      Post/update the sticky PR comment. Requires pull-requests write on the
+      calling job; when the token lacks it the step warns instead of failing.
+    required: false
+    default: 'true'
+  max_rows:
+    description: Maximum number of CVE rows rendered before truncating.
+    required: false
+    default: '50'
+  github_token:
+    description: Token used for the PR comment API calls.
+    required: false
+    default: ''
+
+outputs:
+  total:
+    description: Number of HIGH/CRITICAL findings in the report.
+    value: ${{ steps.render.outputs.total }}
+  markdown_path:
+    description: Path to the rendered markdown fragment.
+    value: ${{ steps.render.outputs.markdown_path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Render findings table
+      id: render
+      shell: bash
+      env:
+        REPORT_PATH: ${{ inputs.report_path }}
+        TITLE: ${{ inputs.title }}
+        SUBTITLE: ${{ inputs.subtitle }}
+        MARKER: ${{ inputs.marker }}
+        MAX_ROWS: ${{ inputs.max_rows }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        set -euo pipefail
+        OUT="${RUNNER_TEMP}/trivy-report-${MARKER}.md"
+
+        if [ ! -f "$REPORT_PATH" ]; then
+          echo "::warning::Trivy JSON report not found at ${REPORT_PATH}; nothing to render."
+          {
+            echo "<!-- ${MARKER} -->"
+            echo "## ${TITLE}"
+            echo ""
+            echo "Report not produced — see the [workflow run](${RUN_URL}) for scanner errors."
+          } > "$OUT"
+          {
+            echo "total=0"
+            echo "markdown_path=${OUT}"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # One row per (severity, package, CVE). Only fixable HIGH/CRITICAL are
+        # rendered: those are what the gate blocks on, and unfixable noise makes
+        # the comment unactionable.
+        REPORT_PATH="$REPORT_PATH" OUT="$OUT" python3 - <<'PY'
+        import json
+        import os
+
+        report_path = os.environ["REPORT_PATH"]
+        out_path = os.environ["OUT"]
+        title = os.environ["TITLE"]
+        subtitle = os.environ["SUBTITLE"]
+        marker = os.environ["MARKER"]
+        run_url = os.environ["RUN_URL"]
+        max_rows = int(os.environ["MAX_ROWS"])
+
+        with open(report_path, encoding="utf-8") as fh:
+            report = json.load(fh)
+
+        wanted = {"CRITICAL", "HIGH"}
+        rows = []
+        for result in report.get("Results") or []:
+            target = result.get("Target", "")
+            for vuln in result.get("Vulnerabilities") or []:
+                severity = (vuln.get("Severity") or "").upper()
+                if severity not in wanted:
+                    continue
+                rows.append(
+                    {
+                        "severity": severity,
+                        "package": vuln.get("PkgName") or vuln.get("PkgID") or "-",
+                        "installed": vuln.get("InstalledVersion") or "-",
+                        "fixed": vuln.get("FixedVersion") or "no fix yet",
+                        "id": vuln.get("VulnerabilityID") or "-",
+                        "url": vuln.get("PrimaryURL") or "",
+                        "target": target,
+                    }
+                )
+
+        # CRITICAL first, then fixable before unfixable, then stable by id.
+        order = {"CRITICAL": 0, "HIGH": 1}
+        rows.sort(key=lambda r: (order[r["severity"]], r["fixed"] == "no fix yet", r["id"]))
+
+        # De-duplicate: the same CVE often appears once per target/layer.
+        seen = set()
+        unique = []
+        for row in rows:
+            key = (row["id"], row["package"], row["installed"])
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(row)
+
+        critical = sum(1 for r in unique if r["severity"] == "CRITICAL")
+        high = len(unique) - critical
+
+        lines = [f"<!-- {marker} -->", f"## {title}", ""]
+        if subtitle:
+            lines += [subtitle, ""]
+
+        if not unique:
+            lines += [f"No HIGH or CRITICAL vulnerabilities found. ([run]({run_url}))"]
+        else:
+            lines += [
+                f"**{critical} CRITICAL** / **{high} HIGH** — see the [workflow run]({run_url}) for the full report.",
+                "",
+                "| Severity | Package | Installed | Fixed in | CVE |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+            for row in unique[:max_rows]:
+                cve = f"[{row['id']}]({row['url']})" if row["url"] else row["id"]
+                lines.append(
+                    f"| {row['severity']} | `{row['package']}` | `{row['installed']}` "
+                    f"| `{row['fixed']}` | {cve} |"
+                )
+            if len(unique) > max_rows:
+                lines += ["", f"…and {len(unique) - max_rows} more. Full list in the run logs."]
+            lines += [
+                "",
+                "Fix by upgrading to the **Fixed in** version. If a CVE is not "
+                "exploitable here, document it in `.trivyignore` with a revisit date.",
+            ]
+
+        with open(out_path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+            fh.write(f"total={len(unique)}\n")
+            fh.write(f"markdown_path={out_path}\n")
+
+        print(f"Rendered {len(unique)} HIGH/CRITICAL findings to {out_path}.")
+        PY
+
+    - name: Append to job summary
+      shell: bash
+      env:
+        MARKDOWN_PATH: ${{ steps.render.outputs.markdown_path }}
+      run: cat "$MARKDOWN_PATH" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upsert sticky PR comment
+      if: inputs.comment_on_pr == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token || github.token }}
+        MARKDOWN_PATH: ${{ steps.render.outputs.markdown_path }}
+        MARKER: ${{ inputs.marker }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        set -uo pipefail
+
+        # A missing pull-requests:write scope must not fail a security scan —
+        # the findings are already in the job summary and the blocking gate is
+        # the scan step itself, not this comment.
+        existing=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+          --jq "[.[] | select(.body | contains(\"<!-- ${MARKER} -->\"))] | first | .id // empty" 2>/dev/null || echo "")
+
+        if [ -n "$existing" ]; then
+          if gh api -X PATCH "repos/${REPO}/issues/comments/${existing}" \
+            -F "body=@${MARKDOWN_PATH}" > /dev/null; then
+            echo "Updated sticky comment ${existing}."
+          else
+            echo "::warning::Could not update the Trivy PR comment (missing pull-requests: write?)."
+          fi
+        else
+          if gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            -F "body=@${MARKDOWN_PATH}" > /dev/null; then
+            echo "Created sticky comment."
+          else
+            echo "::warning::Could not create the Trivy PR comment (missing pull-requests: write?)."
+          fi
+        fi

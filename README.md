@@ -71,7 +71,6 @@ Every repo follows the same standardized pipeline:
 | [`release-promote.yml`](#smart-release-promote--rebuild) | **Recommended** — Smart release: promote from dev or rebuild (single image) |
 | [`multi-image-release-promote.yml`](#multi-image-smart-release) | **Recommended** — Smart release for multi-image services |
 | [`python-publish.yml`](#python-package-publish) | Build and publish Python package to GCP Artifact Registry (uv/poetry) |
-| [`release-deploy.yml`](#release-deploy-legacy) | Legacy — Always rebuilds (single image, release tag) |
 | [`multi-image-release.yml`](#multi-image-release-legacy) | Legacy — Always rebuilds (multiple images, release tag) |
 
 ### CI / Quality
@@ -81,17 +80,15 @@ Every repo follows the same standardized pipeline:
 | [`tests.yml`](#tests--linting) | Generic test runner (Go/Python/Node/Rust) + optional services |
 | [`sast.yml`](#sast--security) | Trivy + Gitleaks + language SAST (Gosec/Bandit/njsscan) |
 | [`image-scan.yml`](#docker-image-scanning) | Trivy container image scan (warn on dev, block on prod release) |
-| [`dast.yml`](#dast) | OWASP ZAP scan of running app (APIs/frontend); JWT or login-based auth |
 | [`seo-check.yml`](#seo-static-audit) | Static Next.js SEO audit (metadata, sitemap/robots presence); job summary |
 | [`seo-live-url.yml`](#seo-live-url) | Live site: homepage / `robots.txt` / sitemap content audit + Lighthouse SEO |
 | [`ai-release-bump.yml`](#ai-release-bump) | AI-powered semver classification + GitHub Release creation (also promotes `## [Unreleased]` in CHANGELOG) |
-| [`openspec-changelog.yml`](#openspec-changelog-feed) | Append openspec proposal summaries to `## [Unreleased]` in CHANGELOG on PR merge |
 
 ### Post-Deploy
 
 | Workflow | Description |
 |----------|-------------|
-| [`smoke-test.yml`](#smoke-test) | Post-deploy health check with version polling |
+| [`smoke-test.yml`](#smoke-test) | Post-deploy verification: HTTP health polling and/or FluxCD rollout check |
 | [`e2e-playwright.yml`](#e2e-playwright) | Playwright E2E tests from the `e2e-tests` image + Allure reporting |
 
 ### Building Blocks
@@ -99,7 +96,6 @@ Every repo follows the same standardized pipeline:
 | Workflow | Description |
 |----------|-------------|
 | [`build-push-image.yml`](#build--push-image) | Standalone Docker build + push (for advanced composition) |
-| [`update-kustomization.yml`](#update-kustomization) | Update kustomization.yaml + commit/push |
 
 ---
 
@@ -117,8 +113,6 @@ Is your dev and prod registry in the same GCP project?
 │  └─ 2+ images → multi-image-release-promote.yml
 │
 └─ YES (same project)
-   │
-   ├─ 1 image  → release-deploy.yml (always rebuilds)
    │
    └─ 2+ images → multi-image-release.yml
 ```
@@ -423,92 +417,11 @@ It does **not** append installation instructions, container image tables, or an 
 The bump-guard skips this workflow when the head commit message starts with:
 
 - `chore: bump version to …` — this workflow's own version bump commit.
-- `docs(changelog):` — entries written by [`openspec-changelog.yml`](#openspec-changelog-feed).
+- `docs(changelog):` — the prefix historically used by changelog-feed automation.
 
 If you configure additional automated commits that push to `main`, prefix them similarly so they don't retrigger the release pipeline.
 
 > **Important:** `GH_TOKEN` must be a PAT (not `GITHUB_TOKEN`) so the created release event can trigger other workflows.
-
----
-
-## OpenSpec Changelog Feed
-
-**`openspec-changelog.yml`** — On every PR merged into `main`, scans the PR for `proposal.md` files under the configured openspec directories and appends a one-line entry per change to `## [Unreleased]` in `CHANGELOG.md`. The entry is categorized following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-
-### Proposal frontmatter contract
-
-Each `openspec/changes/<name>/proposal.md` (and `openspec/fixes/<name>/proposal.md`) drives one changelog entry:
-
-```yaml
----
-linear: ENG-415          # optional, used to link the Linear issue
-type: breaking           # required: breaking | feat | fix | refactor | perf | chore | docs | security
-changelog: "Forwarding rules ahora apuntan directo a upstreams; /services removido y service_id → upstream_id."
----
-
-# Proposal: Deprecate the Service entity
-```
-
-Mapping `type:` → section:
-
-| `type` | Section |
-|---|---|
-| `breaking` | `### Breaking` |
-| `feat` / `feature` | `### Added` |
-| `fix` | `### Fixed` |
-| `refactor` / `perf` / `chore` | `### Changed` |
-| `docs` | `### Docs` |
-| `security` | `### Security` |
-
-### Quick Start
-
-```yaml
-# .github/workflows/changelog.yml
-name: OpenSpec Changelog Feed
-on:
-  pull_request:
-    types: [closed]
-    branches: [main]
-
-permissions:
-  contents: write
-
-jobs:
-  feed:
-    if: github.event.pull_request.merged == true
-    uses: NeuralTrust/workflows/.github/workflows/openspec-changelog.yml@main
-    secrets:
-      GH_TOKEN: ${{ secrets.GH_TOKEN }}
-```
-
-### Inputs
-
-| Input | Default | Description |
-|-------|---------|-------------|
-| `changelog_path` | `CHANGELOG.md` | Path of the CHANGELOG file to update |
-| `unreleased_heading` | `## [Unreleased]` | Heading for the unreleased section (must match exactly) |
-| `scope_dirs` | `openspec/changes,openspec/fixes` | Comma-separated list of openspec directories to scan |
-| `linear_team` | `neuraltrust` | Linear team slug used when proposal carries `linear: ENG-XXX` |
-| `commit_message_prefix` | `docs(changelog):` | Prefix used for the changelog commit. Must be allow-listed by `ai-release-bump.yml` bump-guard. |
-
-### How it composes with auto-release
-
-```
-PR merged to main
-        │
-        ├─▶ openspec-changelog.yml ── appends to ## [Unreleased] and pushes
-        │       commit: docs(changelog): add entry for #NN
-        │       (auto-release skips this push via bump-guard)
-        │
-        └─▶ auto-release.yml (push to main from the merge commit)
-              ├─ AI determines semver bump
-              ├─ Promotes ## [Unreleased] → ## [vX.Y.Z] — YYYY-MM-DD
-              └─ Creates GitHub Release at the bump commit
-```
-
-The Unreleased section accumulates entries from each merged PR, and `auto-release.yml` snapshots them under a versioned heading at release time.
-
-> **Important:** `GH_TOKEN` must be a PAT with `contents:write` on the caller repo, since the workflow pushes to `main`.
 
 ---
 
@@ -737,33 +650,6 @@ jobs:
 
 ---
 
-## DAST (Dynamic Application Security Testing)
-
-**`dast.yml`** — Scans a **running** application (API or frontend) with OWASP ZAP. Use it after deploy so the target URL is live.
-
-- **APIs with JWT**: Pass the token via secret (`auth_method: jwt_static`) or obtain it from your login endpoint (`auth_method: jwt_login`). ZAP sends `Authorization: Bearer <token>` on every request so protected endpoints are scanned.
-- **Frontend (many screens)**: Point ZAP at the app URL; it spiders and scans. For login-protected UIs, use JWT if your app uses it, or see [docs/DAST.md](docs/DAST.md) for form-based auth options.
-
-Full guide (auth options, inputs, secrets): **[docs/DAST.md](docs/DAST.md)**.
-
-```yaml
-# Example: API with JWT from login (run after deploy)
-jobs:
-  dast:
-    needs: deploy
-    uses: NeuralTrust/workflows/.github/workflows/dast.yml@main
-    with:
-      target_url: https://api.dev.example.com
-      auth_method: jwt_login
-      auth_login_url: https://api.dev.example.com/auth/login
-      jwt_response_path: .access_token
-    secrets:
-      AUTH_USERNAME: ${{ secrets.DAST_TEST_USER }}
-      AUTH_PASSWORD: ${{ secrets.DAST_TEST_PASSWORD }}
-```
-
----
-
 ## SEO static audit
 
 **`seo-check.yml`** — Fast static scan via `scripts/seo-static-audit.mjs` (metadata, `robots` / sitemap routes, common gaps). See workflow file header for `workflow_call` inputs.
@@ -830,25 +716,6 @@ jobs:
 4. Updates `kustomization.yaml` (image tag) and `config.env` (`APPLICATION_VERSION`) in parallel with the scan
 5. Commits and pushes overlay updates (deploy workflows use `paths-ignore: k8s/**` so this does not retrigger builds)
 6. Sends Slack notification
-
----
-
-## Release Deploy (Legacy)
-
-**`release-deploy.yml`** — Always rebuilds the Docker image. Use `release-promote.yml` instead for cross-project registries.
-
-```yaml
-jobs:
-  release:
-    uses: NeuralTrust/workflows/.github/workflows/release-deploy.yml@main
-    with:
-      image_name: my-service
-      gcp_project_id: ${{ vars.PROD_GCP_PROJECT_ID }}
-    secrets:
-      WIF_PROVIDER: ${{ secrets.PROD_WIF_PROVIDER }}
-      WIF_SERVICE_ACCOUNT: ${{ secrets.PROD_WIF_SERVICE_ACCOUNT }}
-      GH_TOKEN: ${{ secrets.GH_TOKEN }}
-```
 
 ---
 
@@ -1220,18 +1087,55 @@ its own Actions surface:
 
 | Feature | File | What it does |
 |---------|------|--------------|
-| **Dependabot** | [`.github/dependabot.yml`](.github/dependabot.yml) | Weekly `github-actions` updates across `.github/workflows/**` and `.github/actions/**`. Minor/patch grouped into one PR. |
-| **Workflows CI** | [`.github/workflows/workflows-ci.yml`](.github/workflows/workflows-ci.yml) | Runs on any change to `.github/**`. **actionlint** (blocking) catches broken syntax/shell; **zizmor** (informational) audits for Actions security issues and saves SARIF as a run artifact. |
+| **Dependabot** | [`.github/dependabot.yml`](.github/dependabot.yml) | Weekly `github-actions` updates across `.github/workflows/**` and `.github/actions/**`. Minor/patch grouped into one PR, with a 7-day cooldown so a yanked or compromised release has time to be pulled. |
+| **Workflows CI** | [`.github/workflows/workflows-ci.yml`](.github/workflows/workflows-ci.yml) | Runs on any change to `.github/**` or the hygiene scripts. All three jobs are **blocking**: **actionlint** (syntax/shell), **hygiene** (reusable-workflow rules), **zizmor** (Actions security, ratcheted against a baseline). |
 | **OpenSSF Scorecard** | [`.github/workflows/scorecard.yml`](.github/workflows/scorecard.yml) | Scheduled supply-chain posture check (branch protection, token scopes, pinned deps, dangerous patterns); SARIF saved as a run artifact. |
 | **CODEOWNERS** | [`.github/CODEOWNERS`](.github/CODEOWNERS) | Requires owner review for changes under `.github/` when branch protection enforces it. |
 | **zizmor policy** | [`.github/zizmor.yml`](.github/zizmor.yml) | Accepts release-tag (`ref-pin`) pins so intentional `@vN` pins maintained by Dependabot are not flagged as `unpinned-uses`. |
+| **zizmor baseline** | [`.github/zizmor-baseline.json`](.github/zizmor-baseline.json) | Per-file accepted finding counts enforced by [`scripts/zizmor-ratchet.py`](scripts/zizmor-ratchet.py). |
+| **Hygiene checks** | [`scripts/workflow-hygiene.py`](scripts/workflow-hygiene.py) | Reusable-workflow rules that actionlint and zizmor can't express. |
 
-**zizmor posture:** matching the SAST workflow (`Trivy` blocks, other scanners
-are informational), zizmor is non-blocking for now and surfaces findings in the
-job log / `zizmor-sarif` run artifact. There is a backlog of `template-injection` findings in the legacy
-deploy workflows (`${{ inputs.* }}` / `${{ github.ref_name }}` interpolated
-directly into `run:` blocks); once those are moved to `env:` vars, flip the
-zizmor step to blocking by adding a `uvx zizmor --min-severity high .` gate.
+### Reusable-workflow hygiene (blocking)
+
+`scripts/workflow-hygiene.py` enforces two rules on every workflow that exposes
+`workflow_call`. Run it locally before pushing:
+
+```bash
+python3 scripts/workflow-hygiene.py
+```
+
+| Rule | Why |
+|---|---|
+| No `uses: ./.github/actions/...` | A reusable workflow runs in the **caller's** checkout, so a local path resolves against the consumer repo, not this one. Composite actions must use `NeuralTrust/workflows/.github/actions/<name>@main`. This is the exact bug that broke consumer deploys. |
+| Must declare workflow-level `concurrency:` | Without one, a caller invoking the same reusable workflow twice in a run has no way to scope queueing, and superseded runs keep burning runner minutes. |
+
+Self-triggered workflows in this repo (e.g. `workflows-ci.yml`, `scorecard.yml`)
+are **not** covered by the concurrency rule — they aren't consumed by other repos
+and set their own concurrency directly.
+
+### zizmor posture (blocking, ratcheted)
+
+zizmor is a **blocking** gate, but is ratcheted rather than all-or-nothing. The
+repo carries a backlog of `template-injection` findings where `${{ inputs.* }}`
+is interpolated directly into `run:` blocks. Those counts are pinned per file in
+`.github/zizmor-baseline.json`; a PR fails when any file goes **above** its
+baseline. New findings block, fixes are always allowed.
+
+Disabling the audit outright was rejected: it would hide genuinely new findings.
+A blanket `--fix` was also rejected, since it rewrites expansions inside quoted
+heredocs where shell expansion never happens.
+
+```bash
+# reproduce the gate locally
+uvx zizmor@1.25.2 --config .github/zizmor.yml --no-exit-codes --format json . > zizmor.json
+python3 scripts/zizmor-ratchet.py zizmor.json
+
+# after fixing findings, lower the baseline so the fix can't regress
+python3 scripts/zizmor-ratchet.py zizmor.json --update
+```
+
+To work the backlog down, move the interpolation into an `env:` block and use
+shell expansion (`${VAR}`, not `${{ env.VAR }}`), then re-run with `--update`.
 
 **To enable the gates fully** (recommended), turn on branch protection for
 `main` with: require PR review, require "Workflows CI" status check, and require

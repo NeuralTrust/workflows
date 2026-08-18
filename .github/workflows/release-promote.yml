@@ -190,6 +190,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       # ----------------------------------------------------------------
@@ -301,7 +302,7 @@ jobs:
         run: |
           P="${{ inputs.tag_prefix }}"
           S="${{ inputs.tag_suffix }}"
-          RELEASE_TAG="${P}${{ github.ref_name }}${S}"
+          RELEASE_TAG="${P}${GITHUB_REF_NAME}${S}"
 
           PROD_BASE="${{ inputs.registry }}/${{ inputs.gcp_project_id }}/${{ inputs.repository }}/${{ inputs.image_name }}"
           DEV_BASE="${{ inputs.registry }}/${{ inputs.dev_gcp_project_id }}/${{ inputs.repository }}/${{ inputs.image_name }}"
@@ -544,6 +545,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
+          persist-credentials: true
           token: ${{ secrets.GH_TOKEN }}
           ref: main
           fetch-depth: 0
@@ -657,7 +659,7 @@ jobs:
               --arg image "${{ inputs.image_name }}" \
               --arg tag "${{ needs.release.outputs.release_tag }}" \
               --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-              --arg actor "${{ github.actor }}" \
+              --arg actor "${GITHUB_ACTOR}" \
               '{
                 "attachments": [{
                   "color": $color,

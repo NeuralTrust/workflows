@@ -1,0 +1,50 @@
+{
+  ".github/actions/setup-kreuzberg/action.yml": {
+    "template-injection": 1
+  },
+  ".github/workflows/ai-release-bump.yml": {
+    "template-injection": 24
+  },
+  ".github/workflows/build-push-image.yml": {
+    "template-injection": 3
+  },
+  ".github/workflows/docker-build-deploy.yml": {
+    "template-injection": 8
+  },
+  ".github/workflows/e2e-playwright.yml": {
+    "template-injection": 6
+  },
+  ".github/workflows/image-scan.yml": {
+    "template-injection": 9
+  },
+  ".github/workflows/multi-image-deploy.yml": {
+    "template-injection": 5
+  },
+  ".github/workflows/multi-image-release-promote.yml": {
+    "template-injection": 27
+  },
+  ".github/workflows/multi-image-release.yml": {
+    "template-injection": 2
+  },
+  ".github/workflows/python-publish.yml": {
+    "template-injection": 8
+  },
+  ".github/workflows/release-promote.yml": {
+    "template-injection": 36
+  },
+  ".github/workflows/sast.yml": {
+    "template-injection": 23
+  },
+  ".github/workflows/seo-check.yml": {
+    "template-injection": 3
+  },
+  ".github/workflows/seo-live-url.yml": {
+    "template-injection": 11
+  },
+  ".github/workflows/smoke-test.yml": {
+    "template-injection": 19
+  },
+  ".github/workflows/tests.yml": {
+    "template-injection": 33
+  }
+}

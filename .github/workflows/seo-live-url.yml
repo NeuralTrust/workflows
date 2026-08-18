@@ -21,6 +21,17 @@ name: SEO live URL
 on:
   workflow_call:
     inputs:
+      concurrency_key:
+        description: >
+          Optional discriminator for this workflow's concurrency group. Leave
+          empty (default) to keep every call in its own group — required when a
+          caller invokes this workflow more than once in the same run, since a
+          shared group would make the sibling calls cancel each other. Set it to
+          a stable string (e.g. the calling job id) to collapse superseded runs
+          of that job across pushes.
+        required: false
+        type: string
+        default: ''
       base_url:
         description: 'Production (or preview) origin, e.g. https://neuraltrust.ai'
         required: true
@@ -77,6 +88,13 @@ on:
         description: 'Optional PAT to checkout private NeuralTrust/workflows'
         required: false
 
+# A reusable workflow shares its concurrency group with every caller, so the
+# group must carry caller context. github.run_id keeps each call isolated by
+# default; callers that want superseded runs cancelled pass concurrency_key.
+concurrency:
+  group: seo-live-url-${{ github.workflow }}-${{ github.ref }}-${{ inputs.concurrency_key || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   live:
     name: Lighthouse SEO (live)
@@ -92,6 +110,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
@@ -149,6 +169,7 @@ jobs:
         if: inputs.content_audit_enabled
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           repository: ${{ github.repository_owner }}/workflows
           ref: ${{ inputs.workflows_ref }}
           path: _nt_workflows

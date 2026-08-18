@@ -45,6 +45,17 @@ name: Image Vulnerability Scan
 on:
   workflow_call:
     inputs:
+      concurrency_key:
+        description: >
+          Optional discriminator for this workflow's concurrency group. Leave
+          empty (default) to keep every call in its own group — required when a
+          caller invokes this workflow more than once in the same run, since a
+          shared group would make the sibling calls cancel each other. Set it to
+          a stable string (e.g. the calling job id) to collapse superseded runs
+          of that job across pushes.
+        required: false
+        type: string
+        default: ''
       image_ref:
         description: >
           Full image reference to scan, including registry, project, repo and tag
@@ -111,6 +122,15 @@ on:
         required: false
         type: boolean
         default: true
+      pr_comment:
+        description: >
+          On pull requests, post a sticky comment listing each HIGH/CRITICAL CVE
+          with its fix version. The comment is updated in place on every run.
+          The caller must grant `pull-requests: write`; without it the step warns
+          and the table remains available in the job summary.
+        required: false
+        type: boolean
+        default: true
       registry:
         description: 'Artifact Registry host used for docker login'
         required: false
@@ -129,15 +149,31 @@ on:
         required: true
         description: 'GCP service account email for WIF authentication'
 
+# A reusable workflow shares its concurrency group with every caller, so the
+# group must carry caller context. github.run_id keeps each call isolated by
+# default; callers that want superseded runs cancelled pass concurrency_key.
+concurrency:
+  group: image-scan-${{ github.workflow }}-${{ github.ref }}-${{ inputs.concurrency_key || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   scan:
     name: Trivy Image Scan
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 25
 
+    # `pull-requests: write` is only needed for the sticky findings comment; when
+    # the caller does not grant it the comment step degrades to a warning.
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Detect Trivy ignore file
         id: trivyignore
@@ -179,6 +215,33 @@ jobs:
             echo "exit_code=0" >> "$GITHUB_OUTPUT"
             echo "mode=warn" >> "$GITHUB_OUTPUT"
           fi
+
+      # JSON report first with exit-code 0, so the findings table can be rendered
+      # even when the blocking table scan below fails the job.
+      - name: Run Trivy image scan (JSON report)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: 'v0.71.0'
+          scan-type: 'image'
+          image-ref: ${{ inputs.image_ref }}
+          scanners: ${{ inputs.scanners }}
+          severity: ${{ inputs.severity }}
+          format: 'json'
+          output: 'trivy-image.json'
+          exit-code: '0'
+          ignore-unfixed: ${{ inputs.ignore_unfixed }}
+          vuln-type: 'os,library'
+          trivyignores: ${{ steps.trivyignore.outputs.path }}
+
+      - name: Report HIGH/CRITICAL findings
+        if: always()
+        uses: NeuralTrust/workflows/.github/actions/trivy-report@main
+        with:
+          report_path: trivy-image.json
+          title: Trivy image scan — HIGH/CRITICAL
+          subtitle: "Image: `${{ inputs.image_ref }}`"
+          marker: trivy-image
+          comment_on_pr: ${{ inputs.pr_comment }}
 
       # Human-readable scan — ALWAYS runs, so findings are visible in the job log.
       # With block_vulnerability_findings, this is the blocking gate. In
@@ -250,5 +313,5 @@ jobs:
               echo "- **Ignore file:** \`${{ steps.trivyignore.outputs.path }}\`"
             fi
             echo ""
-            echo "Full findings are in the scan logs above; the SARIF report is saved as the \`trivy-image-sarif\` run artifact."
+            echo "The HIGH/CRITICAL table above lists each finding with its fix version. Full findings are in the scan logs; the SARIF report is saved as the \`trivy-image-sarif\` run artifact."
           } >> "$GITHUB_STEP_SUMMARY"

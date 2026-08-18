@@ -8,16 +8,19 @@
 #
 #   - actionlint: syntax, shellcheck on run: blocks, expression/type checks
 #                 (BLOCKING — a broken workflow must never reach main)
-#   - hygiene:    reusable-workflow rules that lints can't express — most
-#                 importantly, reusable workflows must reference composite
-#                 actions by full repo ref, never by local ./ path (BLOCKING).
-#   - zizmor:     GitHub Actions security static analysis (INFORMATIONAL). Findings
-#                 print to the log and the SARIF is saved as a run artifact (we have
+#   - hygiene:    reusable-workflow rules that lints can't express (BLOCKING):
+#                 composite actions must be referenced by full repo ref, never
+#                 by local ./ path, and every reusable workflow must declare a
+#                 workflow-level concurrency block. See scripts/workflow-hygiene.py.
+#   - zizmor:     GitHub Actions security static analysis (BLOCKING, ratcheted).
+#                 The repo carries ~150 pre-existing template-injection findings
+#                 on `inputs.*`; those counts are pinned per file in
+#                 .github/zizmor-baseline.json and a PR fails when any file goes
+#                 above its baseline. New findings block; fixes are always
+#                 allowed. The unpinned-uses audit is relaxed to "ref-pin" via
+#                 .github/zizmor.yml since the repo pins to release tags and lets
+#                 Dependabot bump them. SARIF is saved as a run artifact (we have
 #                 no GitHub Advanced Security, so the Security tab isn't available).
-#                 The unpinned-uses audit is relaxed to "ref-pin" via
-#                 .github/zizmor.yml since the repo pins to release tags and
-#                 lets Dependabot bump them. Flip the gate step below to blocking
-#                 once the pre-existing template-injection findings are cleared.
 # ==============================================================================
 
 name: Workflows CI
@@ -29,11 +32,17 @@ on:
       - ".github/workflows/**"
       - ".github/actions/**"
       - ".github/zizmor.yml"
+      - ".github/zizmor-baseline.json"
+      - "scripts/workflow-hygiene.py"
+      - "scripts/zizmor-ratchet.py"
   pull_request:
     paths:
       - ".github/workflows/**"
       - ".github/actions/**"
       - ".github/zizmor.yml"
+      - ".github/zizmor-baseline.json"
+      - "scripts/workflow-hygiene.py"
+      - "scripts/zizmor-ratchet.py"
   workflow_dispatch:
 
 # Least privilege by default; jobs opt into more where required.
@@ -77,24 +86,12 @@ jobs:
           persist-credentials: false
 
       # A reusable workflow runs in the CALLER's checkout, so `uses: ./...`
-      # resolves against the consumer repo, not this one. Composite actions
-      # must therefore be referenced by full repo ref. This is the exact bug
-      # that broke consumer deploys; catch it before it reaches main.
-      - name: Reusable workflows must not reference local action paths
-        run: |
-          set -euo pipefail
-          bad=0
-          for f in .github/workflows/*.yml .github/workflows/*.yaml; do
-            [ -e "$f" ] || continue
-            if grep -q 'workflow_call:' "$f" && grep -nE 'uses:[[:space:]]*\./\.github/actions/' "$f"; then
-              echo "::error file=${f}::Reusable workflow references a local action path (./.github/actions/...). Use NeuralTrust/workflows/.github/actions/<name>@main — local paths resolve against the caller repo and break consumers."
-              bad=1
-            fi
-          done
-          if [ "$bad" -eq 0 ]; then
-            echo "OK: no reusable workflow references local action paths."
-          fi
-          exit "$bad"
+      # resolves against the consumer repo, not this one; and a reusable
+      # workflow without a concurrency block gives callers no way to scope
+      # queueing. Both rules are enforced by the same script so they can be
+      # reproduced locally with `python3 scripts/workflow-hygiene.py`.
+      - name: Run reusable-workflow hygiene checks
+        run: python3 scripts/workflow-hygiene.py
 
   zizmor:
     name: zizmor (Actions security)
@@ -111,16 +108,24 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
-      # Informational: never fails the job. zizmor also prints findings to the log;
-      # the SARIF below is saved as an artifact for later inspection.
-      - name: Run zizmor (SARIF, informational)
-        continue-on-error: true
+      # Produce both machine-readable JSON (for the ratchet gate) and SARIF (for
+      # the artifact). --no-exit-codes keeps zizmor's own findings-present exit
+      # status from failing the step; the ratchet below owns the pass/fail call.
+      - name: Run zizmor
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          uvx zizmor@1.25.2 \
-            --config .github/zizmor.yml \
-            --format sarif --output zizmor.sarif .
+          set -euo pipefail
+          uvx zizmor@1.25.2 --config .github/zizmor.yml \
+            --no-exit-codes --format json . > zizmor.json
+          uvx zizmor@1.25.2 --config .github/zizmor.yml \
+            --no-exit-codes --format sarif . > zizmor.sarif
+
+      # Blocking gate. Fails when any file exceeds its pinned finding count in
+      # .github/zizmor-baseline.json, so new findings can't slip in while the
+      # pre-existing template-injection debt is worked down.
+      - name: Enforce zizmor baseline (ratchet)
+        run: python3 scripts/zizmor-ratchet.py zizmor.json
 
       # We don't have GitHub Advanced Security, so SARIF can't go to the Security
       # tab. Save it as a downloadable artifact instead. Short retention.

@@ -31,6 +31,17 @@ name: Python Publish
 on:
   workflow_call:
     inputs:
+      concurrency_key:
+        description: >
+          Optional discriminator for this workflow's concurrency group. Leave
+          empty (default) to keep every call in its own group — required when a
+          caller invokes this workflow more than once in the same run, since a
+          shared group would make the sibling calls cancel each other. Set it to
+          a stable string (e.g. the calling job id) to collapse superseded runs
+          of that job across pushes.
+        required: false
+        type: string
+        default: ''
       gcp_project_id:
         description: 'GCP Project ID that owns the Artifact Registry'
         required: true
@@ -68,6 +79,13 @@ on:
         required: true
         description: 'GCP service account email for WIF authentication'
 
+# A reusable workflow shares its concurrency group with every caller, so the
+# group must carry caller context. github.run_id keeps each call isolated by
+# default; callers that want superseded runs cancelled pass concurrency_key.
+concurrency:
+  group: python-publish-${{ github.workflow }}-${{ github.ref }}-${{ inputs.concurrency_key || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   publish:
     name: Build & Publish (${{ inputs.build_tool }})
@@ -81,6 +99,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Set up Python ${{ inputs.python_version }}
         uses: actions/setup-python@v5
@@ -146,5 +166,5 @@ jobs:
             echo "- **Build tool:** \`${{ inputs.build_tool }}\`"
             echo "- **Python:** \`${{ inputs.python_version }}\`"
             echo "- **Registry:** \`${REGISTRY}\`"
-            echo "- **Tag:** \`${{ github.ref_name }}\`"
+            echo "- **Tag:** \`${GITHUB_REF_NAME}\`"
           } >> "$GITHUB_STEP_SUMMARY"

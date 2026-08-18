@@ -19,6 +19,11 @@ updates:
       time: "06:00"
       timezone: Europe/Madrid
     open-pull-requests-limit: 10
+    # Wait a week before proposing a new release. A freshly published tag that
+    # is later yanked (or found compromised) has time to be pulled before it
+    # lands in a PR against the repo every other pipeline depends on.
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: chore
       include: scope
