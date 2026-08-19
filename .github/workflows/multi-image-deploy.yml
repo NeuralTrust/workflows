@@ -164,8 +164,10 @@ jobs:
           cache_mode: ${{ matrix.image.cache_mode || inputs.cache_mode }}
 
   # ============================================================================
-  # Job 2: Image Vulnerability Scan (warn mode — never blocks dev deploys)
+  # Job 2: Image Vulnerability Scan
   # ============================================================================
+  # Fails this job on HIGH/CRITICAL fixable CVEs. Deploy is not gated — the
+  # kustomize job only needs build. The parent run is red when this fails.
   scan:
     name: Image Vulnerability Scan (${{ matrix.image.name }})
     needs: build
@@ -179,7 +181,7 @@ jobs:
       id-token: write
     with:
       image_ref: '${{ inputs.registry }}/${{ inputs.gcp_project_id }}/${{ inputs.repository }}/${{ matrix.image.name }}:${{ matrix.image.tag_prefix }}${{ github.sha }}${{ matrix.image.tag_suffix }}'
-      exit_code: '0'
+      block_vulnerability_findings: true
       upload_sarif: false
     secrets:
       WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}

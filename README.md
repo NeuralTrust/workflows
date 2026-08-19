@@ -137,7 +137,7 @@ Before any prod tag is applied or kustomization is updated, the release image is
 | **Promote** | Dev source image (by commit SHA) | Crane copy runs **after** scan passes — a dirty dev image never gets a prod release tag |
 | **Rebuild** | Freshly built prod image | Kustomize update runs **after** scan passes |
 
-Dev deploys use the same scanner in **warn mode** (`exit_code: 0`) — findings appear in the job log and step summary (and the `trivy-image-sarif` run artifact) but never block deployment.
+Dev deploys use the same scanner with `block_vulnerability_findings: true`. HIGH/CRITICAL findings fail the scan job (and the parent run), but kustomize only needs the build, so develop still ships.
 
 ### How detection works
 
@@ -712,7 +712,7 @@ jobs:
 
 1. Builds Docker image with tags: `COMMIT_SHA`, `latest`, `cache`
 2. Injects `APP_VERSION=<commit-sha>` as a build arg
-3. Scans the pushed image via [`image-scan.yml`](#docker-image-scanning) (CRITICAL/HIGH, warn mode — never blocks dev)
+3. Scans the pushed image via [`image-scan.yml`](#docker-image-scanning) (CRITICAL/HIGH; scan job fails on findings, deploy is not gated)
 4. Updates `kustomization.yaml` (image tag) and `config.env` (`APPLICATION_VERSION`) in parallel with the scan
 5. Commits and pushes overlay updates (deploy workflows use `paths-ignore: k8s/**` so this does not retrigger builds)
 6. Sends Slack notification
