@@ -88,12 +88,12 @@ jobs:
 
     steps:
       - name: Checkout calling repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Checkout workflow scripts
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
           repository: ${{ github.repository_owner }}/workflows
@@ -102,7 +102,7 @@ jobs:
           token: ${{ secrets.GH_TOKEN || github.token }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ inputs.node_version }}
 

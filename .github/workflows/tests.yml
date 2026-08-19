@@ -288,7 +288,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
           token: ${{ secrets.GH_TOKEN || github.token }}
@@ -304,7 +304,7 @@ jobs:
       # ---- Go ----
       - name: Set up Go
         if: inputs.language == 'go'
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ inputs.language_version }}
           cache: true
@@ -357,7 +357,7 @@ jobs:
 
       - name: Set up Python (sqlfluff)
         if: inputs.sqlfluff_enabled && inputs.sqlfluff_paths != ''
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ inputs.sqlfluff_python_version }}
 
@@ -376,7 +376,7 @@ jobs:
       # ---- Python ----
       - name: Set up Python
         if: inputs.language == 'python'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ inputs.language_version }}
 
@@ -416,7 +416,7 @@ jobs:
       # ---- Node ----
       - name: Set up Node
         if: inputs.language == 'node'
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ inputs.language_version }}
           cache: 'npm'
@@ -441,7 +441,7 @@ jobs:
 
       - name: Cache Rust dependencies
         if: inputs.language == 'rust'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -489,7 +489,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
           token: ${{ secrets.GH_TOKEN || github.token }}
@@ -638,7 +638,7 @@ jobs:
       # ---- Go ----
       - name: Set up Go
         if: inputs.language == 'go'
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ inputs.language_version }}
           cache: true
@@ -676,7 +676,7 @@ jobs:
       # ---- Python ----
       - name: Set up Python
         if: inputs.language == 'python'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ inputs.language_version }}
 
@@ -706,7 +706,7 @@ jobs:
       # ---- Node ----
       - name: Set up Node
         if: inputs.language == 'node'
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ inputs.language_version }}
           cache: 'npm'
@@ -725,7 +725,7 @@ jobs:
 
       - name: Cache Rust dependencies
         if: inputs.language == 'rust'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
