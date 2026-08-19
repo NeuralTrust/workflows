@@ -379,6 +379,7 @@ jobs:
     secrets:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 ```
 
 ### Inputs
@@ -411,6 +412,8 @@ The workflow creates a minimal GitHub Release body:
 - **Commits** — list since the previous tag
 
 It does **not** append installation instructions, container image tables, or an AI semver footer. Repos that need those (e.g. `neuraltrust-platform`) extend the release in a follow-up workflow (`publish-chart.yml` appends **Container images** and **Installation**).
+
+If release creation fails (image-scan gate, missing dev image, publish error, or bump failure), the workflow posts a Slack message with the reason. Pass `SLACK_WEBHOOK_URL` from the caller; without it the job still fails and writes the reason to the step summary.
 
 ### Loop Guard
 
@@ -1043,6 +1046,8 @@ Add a `.trivyignore` file at the repo root (same convention as `sast.yml`) to su
 ## Slack Notifications
 
 Deploy and release workflows send Slack notifications on success or failure.
+
+**Auto-release** (`ai-release-bump.yml`) posts only on failure, with the reason the GitHub Release was not created (image-scan gate, missing dev image, publish error, or bump failure).
 
 **Smart release notifications** include the strategy used:
 - "promoted from dev" (for develop→main releases)

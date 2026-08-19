@@ -10,6 +10,7 @@
 # Job graph:
 #   bump ──► resolve-image ──► scan ──► publish
 #            (opt-in)          (opt-in)  tag + Release + version files
+#                                         └──► notify-failure (Slack + reason)
 #
 # `bump` only COMPUTES the next version. Nothing is tagged, committed or
 # published until the optional image-scan gate has passed, so a vulnerable
@@ -24,6 +25,7 @@
 #       secrets:
 #         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 #         GH_TOKEN: ${{ secrets.GH_TOKEN }}
+#         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 #
 # Usage (blocking image-scan gate before the release is created):
 #   jobs:
@@ -41,6 +43,7 @@
 #         GH_TOKEN: ${{ secrets.GH_TOKEN }}
 #         WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
 #         WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+#         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 #
 # Note: GH_TOKEN must be a PAT (not GITHUB_TOKEN) so the created release
 #       event can trigger other workflows (release.yml).
@@ -171,6 +174,9 @@ on:
       WIF_SERVICE_ACCOUNT:
         required: false
         description: 'GCP service account email for WIF (required when image_scan_enabled)'
+      SLACK_WEBHOOK_URL:
+        required: false
+        description: 'Slack Incoming Webhook URL. Used only when release creation fails.'
     outputs:
       new_version:
         description: 'The new version tag (e.g., v1.2.3)'
@@ -750,36 +756,99 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
-  # Job 5: Report a release blocked by the scan gate
+  # Job 5: Slack + summary when a release was expected but not created
   # ============================================================================
-  blocked:
-    name: Release Blocked by Image Scan
-    needs: [bump, resolve-image, scan]
+  notify-failure:
+    name: Notify Release Failure
+    needs: [bump, resolve-image, scan, publish]
     if: |
       always() &&
+      inputs.dry_run == false &&
       needs.bump.outputs.skip != 'true' &&
-      needs.bump.outputs.has_commits == 'true' &&
-      (needs.resolve-image.result == 'failure' || needs.scan.result == 'failure')
+      (needs.bump.result == 'failure' ||
+       (needs.bump.outputs.has_commits == 'true' &&
+        (needs.resolve-image.result == 'failure' ||
+         needs.scan.result == 'failure' ||
+         needs.publish.result == 'failure')))
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     steps:
-      - name: Explain the block
+      - name: Report failure and notify Slack
         env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           VERSION: ${{ needs.bump.outputs.new_version }}
           IMAGE_REF: ${{ needs.resolve-image.outputs.image_ref }}
+          BUMP_RESULT: ${{ needs.bump.result }}
+          RESOLVE_RESULT: ${{ needs.resolve-image.result }}
+          SCAN_RESULT: ${{ needs.scan.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          if [ "$SCAN_RESULT" = "failure" ]; then
+            REASON="Pre-release image scan found HIGH/CRITICAL fixable CVEs"
+            [ -n "$IMAGE_REF" ] && REASON="${REASON} in ${IMAGE_REF}"
+          elif [ "$RESOLVE_RESULT" = "failure" ]; then
+            REASON="Dev image not found in the registry; the pre-release scan cannot verify this release"
+          elif [ "$PUBLISH_RESULT" = "failure" ]; then
+            REASON="Publish failed while creating the tag, version files, or GitHub Release"
+          elif [ "$BUMP_RESULT" = "failure" ]; then
+            REASON="Semver bump job failed before a version was computed"
+          else
+            REASON="Release was not created"
+          fi
+
           {
-            echo "## Release Blocked"
+            echo "## Release Not Created"
             echo ""
-            echo "\`${VERSION}\` was **not** created: the pre-release image gate did not pass."
+            echo "- **Version:** \`${VERSION:-unknown}\`"
+            echo "- **Reason:** ${REASON}"
             if [ -n "${IMAGE_REF}" ]; then
-              echo ""
               echo "- **Image:** \`${IMAGE_REF}\`"
             fi
             echo ""
-            echo "No tag, version-bump commit or GitHub Release was produced, so nothing needs cleaning up."
-            echo "Fix the CVEs (or document accepted risk in \`.trivyignore\`) and re-run."
+            echo "No tag, version-bump commit or GitHub Release was produced."
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "::error::Release ${VERSION} blocked by the pre-release image scan gate."
-          exit 1
+          echo "::error::Release ${VERSION:-unknown} was not created: ${REASON}"
+
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::warning::No Slack webhook configured; failure was not posted to Slack."
+            exit 0
+          fi
+
+          curl -sf "$SLACK_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n \
+              --arg repo "$REPO" \
+              --arg version "${VERSION:-unknown}" \
+              --arg reason "$REASON" \
+              --arg url "$RUN_URL" \
+              --arg actor "${GITHUB_ACTOR}" \
+              '{
+                "attachments": [{
+                  "color": "#dc3545",
+                  "blocks": [
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": (":x: *Release not created* | `" + $repo + "`")
+                      }
+                    },
+                    {
+                      "type": "section",
+                      "text": {"type": "mrkdwn", "text": ("*Reason:* " + $reason)}
+                    },
+                    {
+                      "type": "section",
+                      "fields": [
+                        {"type": "mrkdwn", "text": ("*Version:*\n`" + $version + "`")},
+                        {"type": "mrkdwn", "text": ("*Actor:*\n" + $actor)},
+                        {"type": "mrkdwn", "text": ("*Workflow:*\n<" + $url + "|View Run>")}
+                      ]
+                    }
+                  ]
+                }]
+              }'
+            )" || echo "::warning::Slack notification failed"
