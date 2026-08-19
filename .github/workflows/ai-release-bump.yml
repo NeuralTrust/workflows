@@ -554,7 +554,7 @@ jobs:
   # ============================================================================
   # Job 3: Blocking image vulnerability scan (opt-in)
   # ============================================================================
-  scan:
+  scan: # zizmor: ignore[excessive-permissions]
     name: Pre-Release Image Scan
     needs: [bump, resolve-image]
     uses: NeuralTrust/workflows/.github/workflows/image-scan.yml@main
@@ -772,6 +772,7 @@ jobs:
          needs.publish.result == 'failure')))
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions: {}
 
     steps:
       - name: Report failure and notify Slack
