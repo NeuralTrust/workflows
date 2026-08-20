@@ -131,7 +131,7 @@ jobs:
         uses: NeuralTrust/workflows/.github/actions/free-disk-space@main
 
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -202,7 +202,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: true
           token: ${{ secrets.GH_TOKEN }}
