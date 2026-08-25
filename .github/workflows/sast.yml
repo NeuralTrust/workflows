@@ -147,6 +147,15 @@ on:
         default: '2.22.8'
 
       # ======================================================================
+      # Go module access (Gosec)
+      # ======================================================================
+      go_private_modules:
+        description: 'Enable private Go module access for github.com/NeuralTrust/* (gosec must compile the packages it analyses; without this it silently skips any package importing a private module). Requires the GH_TOKEN secret.'
+        required: false
+        type: boolean
+        default: false
+
+      # ======================================================================
       # Bandit (Python)
       # ======================================================================
       bandit_enabled:
@@ -184,6 +193,11 @@ on:
         required: false
         type: string
         default: '.'
+
+    secrets:
+      GH_TOKEN:
+        required: false
+        description: 'GitHub token for private Go module access (see go_private_modules)'
 
 # No workflow-level `concurrency:` here — a reusable workflow cannot key a group
 # per calling job (github.run_id/workflow/ref are identical across sibling and
@@ -423,6 +437,24 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: 'go.mod'
+
+      - name: Configure private Go modules
+        if: inputs.go_private_modules
+        env:
+          TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          {
+            echo "GOPRIVATE=github.com/NeuralTrust/*"
+            echo "GONOPROXY=github.com/NeuralTrust/*"
+            echo "GONOSUMDB=github.com/NeuralTrust/*"
+            echo "GIT_TERMINAL_PROMPT=0"
+          } >> "$GITHUB_ENV"
+          git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global credential.helper store
+          echo "https://${TOKEN}@github.com" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+          echo "machine github.com login ${TOKEN} password x-oauth-basic" > ~/.netrc
+          chmod 600 ~/.netrc
 
       - name: Install Gosec
         run: |
