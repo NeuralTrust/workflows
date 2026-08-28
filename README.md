@@ -78,7 +78,7 @@ Every repo follows the same standardized pipeline:
 | Workflow | Description |
 |----------|-------------|
 | [`tests.yml`](#tests--linting) | Generic test runner (Go/Python/Node/Rust) + optional services |
-| [`sast.yml`](#sast--security) | Trivy + Gitleaks + language SAST (Gosec/Bandit/njsscan) |
+| [`sast.yml`](#sast--security) | Trivy + Gitleaks + language SAST and reachable Go vulnerability scanning |
 | [`image-scan.yml`](#docker-image-scanning) | Trivy container image scan (warn on dev, block on prod release) |
 | [`seo-check.yml`](#seo-static-audit) | Static Next.js SEO audit (metadata, sitemap/robots presence); job summary |
 | [`seo-live-url.yml`](#seo-live-url) | Live site: homepage / `robots.txt` / sitemap content audit + Lighthouse SEO |
@@ -577,11 +577,12 @@ The workflow runs two parallel jobs:
 | **Trivy** | SCA (dependencies) | Known CVEs in dependencies, IaC misconfigs, license issues |
 | **Gitleaks** | Secret detection | Hardcoded secrets/credentials in git history |
 
-**Language SAST (source code analysis, opt-in per language):**
+**Language analysis (opt-in per language):**
 
 | Tool | Language | What it finds |
 |------|----------|---------------|
 | **Gosec** | Go | SQL injection, weak crypto, command injection, hardcoded creds |
+| **govulncheck** | Go | Vulnerabilities that are reachable from the repository's compiled call graph |
 | **Bandit** | Python | SQL injection, insecure functions (`eval`, `exec`, `pickle`), hardcoded passwords, weak crypto |
 | **njsscan** | Node/JS | XSS, prototype pollution, insecure regex, eval injection, command injection |
 | *(not needed)* | Rust | Rust's type system + borrow checker + clippy covers most issues |
@@ -595,7 +596,15 @@ jobs:
     uses: NeuralTrust/workflows/.github/workflows/sast.yml@main
     with:
       gosec_enabled: true
+      govulncheck_enabled: true
 ```
+
+`govulncheck` is blocking when enabled. By default it reads the Go toolchain
+from `go.mod`, scans `./...`, and installs the pinned scanner version. Consumers
+with a container/toolchain version newer than their `go.mod` directive can set
+`govulncheck_go_version` explicitly so CI scans with the production toolchain.
+Private-module consumers must also set `go_private_modules: true` and pass
+`GH_TOKEN`.
 
 ```yaml
 # Python projects
@@ -646,6 +655,13 @@ jobs:
 | `gitleaks_enabled` | `false` | Enable informational secret detection across full git history |
 | `gosec_enabled` | `false` | Enable Go SAST |
 | `gosec_args` | `./...` | Gosec arguments |
+| `govulncheck_enabled` | `false` | Enable blocking reachable Go vulnerability scanning |
+| `govulncheck_version` | `1.3.0` | `golang.org/x/vuln` scanner version (`latest` is also accepted) |
+| `govulncheck_go_version` | *(from `go.mod`)* | Optional explicit Go toolchain version |
+| `govulncheck_go_mod_path` | `go.mod` | Module file used by `setup-go` and its dependency cache |
+| `govulncheck_working_directory` | `.` | Directory in which the scanner runs |
+| `govulncheck_package_pattern` | `./...` | Go package pattern scanned by `govulncheck` |
+| `go_private_modules` | `false` | Authenticate Go scanners for `github.com/NeuralTrust/*`; requires `GH_TOKEN` |
 | `bandit_enabled` | `false` | Enable Python SAST |
 | `bandit_args` | `-r . -ll` | Bandit arguments |
 | `njsscan_enabled` | `false` | Enable Node/JS SAST |
