@@ -13,7 +13,8 @@
 # checkout, so it cannot reproduce the cross-repo "./.github/actions/..." failure
 # on its own — the `reusable-hygiene` job in workflows-ci.yml is the dedicated
 # guard for that specific class. This smoke test covers everything else: that the
-# reusable workflow is invocable and runs to completion.
+# reusable workflow is invocable and runs to completion. The local workflow path
+# deliberately executes the pull request revision rather than the copy on main.
 # ==============================================================================
 
 name: Consumer Smoke Test
@@ -42,7 +43,7 @@ jobs:
     name: Invoke sast.yml as a consumer
     permissions:
       contents: read  # sast.yml saves SARIF as an artifact; no extra scopes needed
-    uses: NeuralTrust/workflows/.github/workflows/sast.yml@main
+    uses: ./.github/workflows/sast.yml
     with:
       scan_type: config
       trivy_scanners: config,secret

@@ -7,11 +7,12 @@
 #   - Gitleaks:  secret/credential detection in git history   (optional, informational)
 #   - Bandit:    Python source code SAST                      (optional, informational)
 #   - Gosec:     Go source code SAST                          (optional, informational)
+#   - govulncheck: Reachable Go vulnerability scanning        (optional, blocking)
 #   - njsscan:   Node/JS source code SAST                     (optional, informational)
 #
-# Only Trivy failures block auto-approve. All other scanners run with
-# continue-on-error: true — findings appear in the UI as warnings but
-# do not fail the workflow.
+# Trivy and enabled govulncheck failures block CI. The other scanners run with
+# continue-on-error: true — findings appear in the UI as warnings but do not
+# fail the workflow.
 #
 # Usage (basic — all repos):
 #   jobs:
@@ -34,6 +35,7 @@
 #       uses: NeuralTrust/workflows/.github/workflows/sast.yml@main
 #       with:
 #         gosec_enabled: true
+#         govulncheck_enabled: true
 #         gitleaks_enabled: true
 #
 # Usage (Node project):
@@ -147,10 +149,39 @@ on:
         default: '2.22.8'
 
       # ======================================================================
-      # Go module access (Gosec)
+      # govulncheck (Go)
+      # ======================================================================
+      govulncheck_enabled:
+        description: 'Enable blocking reachable-vulnerability scanning for Go'
+        required: false
+        type: boolean
+        default: false
+      govulncheck_version:
+        description: 'golang.org/x/vuln version to install (e.g., 1.3.0 or latest)'
+        required: false
+        type: string
+        default: '1.3.0'
+      govulncheck_go_mod_path:
+        description: 'Path to the go.mod whose Go toolchain govulncheck must use'
+        required: false
+        type: string
+        default: 'go.mod'
+      govulncheck_working_directory:
+        description: 'Working directory for the govulncheck command'
+        required: false
+        type: string
+        default: '.'
+      govulncheck_package_pattern:
+        description: 'Single Go package pattern scanned by govulncheck'
+        required: false
+        type: string
+        default: './...'
+
+      # ======================================================================
+      # Go module access (Gosec and govulncheck)
       # ======================================================================
       go_private_modules:
-        description: 'Enable private Go module access for github.com/NeuralTrust/* (gosec must compile the packages it analyses; without this it silently skips any package importing a private module). Requires the GH_TOKEN secret.'
+        description: 'Enable private Go module access for github.com/NeuralTrust/* (Go scanners must compile the packages they analyse). Requires the GH_TOKEN secret.'
         required: false
         type: boolean
         default: false
@@ -474,6 +505,78 @@ jobs:
             echo "## Gosec Go Security Scanner"
             echo ""
             echo "- **Args:** \`${{ inputs.gosec_args }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
+  # govulncheck: Reachable Go Vulnerability Scanner
+  # ============================================================================
+  govulncheck:
+    name: Go Vulnerability Scan (govulncheck)
+    runs-on: ubuntu-latest
+    if: inputs.govulncheck_enabled
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ inputs.govulncheck_go_mod_path }}
+          cache-dependency-path: ${{ inputs.govulncheck_go_mod_path }}
+
+      - name: Configure private Go modules
+        if: inputs.go_private_modules
+        env:
+          TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          {
+            echo "GOPRIVATE=github.com/NeuralTrust/*"
+            echo "GONOPROXY=github.com/NeuralTrust/*"
+            echo "GONOSUMDB=github.com/NeuralTrust/*"
+            echo "GIT_TERMINAL_PROMPT=0"
+          } >> "$GITHUB_ENV"
+          git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global credential.helper store
+          echo "https://${TOKEN}@github.com" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+          echo "machine github.com login ${TOKEN} password x-oauth-basic" > ~/.netrc
+          chmod 600 ~/.netrc
+
+      - name: Install govulncheck
+        working-directory: ${{ inputs.govulncheck_working_directory }}
+        env:
+          GOVULNCHECK_VERSION: ${{ inputs.govulncheck_version }}
+        run: |
+          if [ "$GOVULNCHECK_VERSION" = "latest" ]; then
+            go install golang.org/x/vuln/cmd/govulncheck@latest
+          else
+            go install "golang.org/x/vuln/cmd/govulncheck@v${GOVULNCHECK_VERSION}"
+          fi
+
+      - name: Run govulncheck
+        working-directory: ${{ inputs.govulncheck_working_directory }}
+        env:
+          GOVULNCHECK_PACKAGE_PATTERN: ${{ inputs.govulncheck_package_pattern }}
+        run: govulncheck "$GOVULNCHECK_PACKAGE_PATTERN"
+
+      - name: Summary
+        if: always()
+        env:
+          GOVULNCHECK_PACKAGE_PATTERN: ${{ inputs.govulncheck_package_pattern }}
+          GOVULNCHECK_VERSION: ${{ inputs.govulncheck_version }}
+        run: |
+          {
+            echo "## govulncheck"
+            echo ""
+            echo "- **Version:** \`${GOVULNCHECK_VERSION}\`"
+            echo "- **Package pattern:** \`${GOVULNCHECK_PACKAGE_PATTERN}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
