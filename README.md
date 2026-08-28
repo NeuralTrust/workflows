@@ -441,6 +441,11 @@ If you configure additional automated commits that push to `main`, prefix them s
 | `node` | `actions/setup-node` | `npx eslint .` | `npm test` |
 | `rust` | `dtolnay/rust-toolchain` | `cargo fmt --check && cargo clippy -D warnings` | `cargo test --verbose` |
 
+Go lint installs the pinned `golangci_version` from source with the selected
+`language_version` toolchain. This avoids running a prebuilt linter compiled by
+an older Go release against code that uses a newer language or standard-library
+surface.
+
 ### Optional Services
 
 Start service containers with health checks and auto-exported env vars:

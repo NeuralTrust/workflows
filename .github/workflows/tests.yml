@@ -126,6 +126,11 @@ on:
         required: false
         type: string
         default: ''
+      golangci_version:
+        description: 'golangci-lint version compiled with the active Go toolchain'
+        required: false
+        type: string
+        default: 'v2.13.2'
       sqlfluff_enabled:
         description: 'Run sqlfluff on SQL migration paths after the default lint steps'
         required: false
@@ -343,7 +348,8 @@ jobs:
         if: inputs.language == 'go' && inputs.lint_command == ''
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12.2
+          version: ${{ inputs.golangci_version }}
+          install-mode: goinstall
           working-directory: ${{ inputs.working_directory }}
           args: --timeout=10m ./...
 
@@ -351,7 +357,8 @@ jobs:
         if: inputs.language == 'go' && inputs.lint_command == '' && inputs.golangci_extra_build_tags != ''
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12.2
+          version: ${{ inputs.golangci_version }}
+          install-mode: goinstall
           working-directory: ${{ inputs.working_directory }}
           args: --timeout=10m --build-tags=${{ inputs.golangci_extra_build_tags }} ./...
 
@@ -471,6 +478,7 @@ jobs:
             echo ""
             echo "- **Language:** ${{ inputs.language }} ${{ inputs.language_version }}"
             echo "- **Custom command:** ${{ inputs.lint_command != '' && 'Yes' || 'Default' }}"
+            echo "- **golangci-lint:** ${{ inputs.language == 'go' && inputs.golangci_version || '—' }}"
             echo "- **golangci extra build tags:** ${{ inputs.golangci_extra_build_tags != '' && inputs.golangci_extra_build_tags || '—' }}"
             echo "- **sqlfluff:** ${{ inputs.sqlfluff_enabled && inputs.sqlfluff_paths != '' && format('✓ ({0})', inputs.sqlfluff_paths) || '—' }}"
           } >> "$GITHUB_STEP_SUMMARY"
