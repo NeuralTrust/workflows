@@ -446,6 +446,10 @@ Go lint installs the pinned `golangci_version` from source with the selected
 an older Go release against code that uses a newer language or standard-library
 surface.
 
+Callers that need a temporary Go build experiment can set `go_experiment`; the
+value is exported as `GOEXPERIMENT` in both the lint and test jobs. Leave it
+empty for the toolchain default.
+
 ### Optional Services
 
 Start service containers with health checks and auto-exported env vars:
@@ -536,6 +540,8 @@ jobs:
 | `setup_commands` | No | — | Commands to run before tests (e.g., install deps, copy env files) |
 | `uv_sync_args` | No | `--frozen --all-extras --all-groups` | Arguments for `uv sync` (Python only). Override when extras conflict, e.g. `--frozen --extra cpu --extra dev` |
 | `go_private_modules` | No | `false` | Enable private Go module access for `github.com/NeuralTrust/*` |
+| `golangci_version` | No | `v2.13.2` | golangci-lint version built with the selected Go toolchain |
+| `go_experiment` | No | — | Optional `GOEXPERIMENT` value for Go lint and test jobs |
 | `kreuzberg_enabled` | No | `false` | Install Kreuzberg FFI + Tesseract OCR before tests (Go CGO builds) |
 | `kreuzberg_version` | No | `v4.1.0` | Kreuzberg FFI release version (only when `kreuzberg_enabled: true`) |
 

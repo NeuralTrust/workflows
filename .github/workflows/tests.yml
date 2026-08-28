@@ -131,6 +131,11 @@ on:
         required: false
         type: string
         default: 'v2.13.2'
+      go_experiment:
+        description: 'Optional GOEXPERIMENT value used by Go lint and test jobs'
+        required: false
+        type: string
+        default: ''
       sqlfluff_enabled:
         description: 'Run sqlfluff on SQL migration paths after the default lint steps'
         required: false
@@ -287,6 +292,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     if: inputs.lint_enabled
+    env:
+      GOEXPERIMENT: ${{ inputs.go_experiment }}
     permissions:
       contents: read
       id-token: write
@@ -474,6 +481,7 @@ jobs:
         if: always()
         env:
           SUMMARY_GOLANGCI_VERSION: ${{ inputs.language == 'go' && inputs.golangci_version || '—' }}
+          SUMMARY_GOEXPERIMENT: ${{ inputs.go_experiment != '' && inputs.go_experiment || '—' }}
         run: |
           {
             echo "## Lint (${{ inputs.language }})"
@@ -481,6 +489,7 @@ jobs:
             echo "- **Language:** ${{ inputs.language }} ${{ inputs.language_version }}"
             echo "- **Custom command:** ${{ inputs.lint_command != '' && 'Yes' || 'Default' }}"
             echo "- **golangci-lint:** ${SUMMARY_GOLANGCI_VERSION}"
+            echo "- **GOEXPERIMENT:** ${SUMMARY_GOEXPERIMENT}"
             echo "- **golangci extra build tags:** ${{ inputs.golangci_extra_build_tags != '' && inputs.golangci_extra_build_tags || '—' }}"
             echo "- **sqlfluff:** ${{ inputs.sqlfluff_enabled && inputs.sqlfluff_paths != '' && format('✓ ({0})', inputs.sqlfluff_paths) || '—' }}"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -493,6 +502,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     if: inputs.test_enabled
+    env:
+      GOEXPERIMENT: ${{ inputs.go_experiment }}
     permissions:
       contents: read
       id-token: write
@@ -858,12 +869,15 @@ jobs:
 
       - name: Summary
         if: always()
+        env:
+          SUMMARY_GOEXPERIMENT: ${{ inputs.go_experiment != '' && inputs.go_experiment || '—' }}
         run: |
           {
             echo "## Test (${{ inputs.language }})"
             echo ""
             echo "- **Language:** ${{ inputs.language }} ${{ inputs.language_version }}"
             echo "- **Custom command:** ${{ inputs.test_command != '' && 'Yes' || 'Default' }}"
+            echo "- **GOEXPERIMENT:** ${SUMMARY_GOEXPERIMENT}"
             echo "- **Services:**"
             echo "  - PostgreSQL: ${{ inputs.postgres_enabled && format('{0} (v{1})', '✓', inputs.postgres_version) || '—' }}"
             echo "  - ClickHouse: ${{ inputs.clickhouse_enabled && format('{0} (v{1})', '✓', inputs.clickhouse_version) || '—' }}"
