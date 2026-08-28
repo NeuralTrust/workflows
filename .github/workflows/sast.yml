@@ -161,6 +161,11 @@ on:
         required: false
         type: string
         default: '1.3.0'
+      govulncheck_go_version:
+        description: 'Explicit Go toolchain version; empty resolves it from govulncheck_go_mod_path'
+        required: false
+        type: string
+        default: ''
       govulncheck_go_mod_path:
         description: 'Path to the go.mod whose Go toolchain govulncheck must use'
         required: false
@@ -525,7 +530,15 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Go
+      - name: Set up explicit Go version
+        if: inputs.govulncheck_go_version != ''
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ inputs.govulncheck_go_version }}
+          cache-dependency-path: ${{ inputs.govulncheck_go_mod_path }}
+
+      - name: Set up Go from go.mod
+        if: inputs.govulncheck_go_version == ''
         uses: actions/setup-go@v7
         with:
           go-version-file: ${{ inputs.govulncheck_go_mod_path }}
