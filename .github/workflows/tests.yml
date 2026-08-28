@@ -472,13 +472,15 @@ jobs:
 
       - name: Summary
         if: always()
+        env:
+          SUMMARY_GOLANGCI_VERSION: ${{ inputs.language == 'go' && inputs.golangci_version || '—' }}
         run: |
           {
             echo "## Lint (${{ inputs.language }})"
             echo ""
             echo "- **Language:** ${{ inputs.language }} ${{ inputs.language_version }}"
             echo "- **Custom command:** ${{ inputs.lint_command != '' && 'Yes' || 'Default' }}"
-            echo "- **golangci-lint:** ${{ inputs.language == 'go' && inputs.golangci_version || '—' }}"
+            echo "- **golangci-lint:** ${SUMMARY_GOLANGCI_VERSION}"
             echo "- **golangci extra build tags:** ${{ inputs.golangci_extra_build_tags != '' && inputs.golangci_extra_build_tags || '—' }}"
             echo "- **sqlfluff:** ${{ inputs.sqlfluff_enabled && inputs.sqlfluff_paths != '' && format('✓ ({0})', inputs.sqlfluff_paths) || '—' }}"
           } >> "$GITHUB_STEP_SUMMARY"
