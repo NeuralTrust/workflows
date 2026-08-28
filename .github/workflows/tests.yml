@@ -742,12 +742,21 @@ jobs:
           SECRETS_PAYLOAD: ${{ secrets.TEST_SECRETS }}
         run: |
           if [ -n "$SECRETS_PAYLOAD" ]; then
-            echo "Exporting test secrets..."
             while IFS= read -r line; do
               [ -z "$line" ] && continue
+
+              key=${line%%=*}
+              value=${line#*=}
+              if [ "$key" = "$line" ] || ! [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+                echo "Invalid TEST_SECRETS entry; expected KEY=VALUE" >&2
+                exit 1
+              fi
+
+              if [ -n "$value" ]; then
+                echo "::add-mask::$value"
+              fi
               echo "$line" >> "$GITHUB_ENV"
             done <<< "$SECRETS_PAYLOAD"
-            echo "Test secrets exported"
           fi
 
       - name: Run setup commands
