@@ -78,7 +78,7 @@ Every repo follows the same standardized pipeline:
 | Workflow | Description |
 |----------|-------------|
 | [`tests.yml`](#tests--linting) | Generic test runner (Go/Python/Node/Rust) + optional services |
-| [`sast.yml`](#sast--security) | Trivy + Gitleaks + language SAST (Gosec/Bandit/njsscan) |
+| [`sast.yml`](#sast--security) | Trivy + Gitleaks + language SAST and reachable Go vulnerability scanning |
 | [`image-scan.yml`](#docker-image-scanning) | Trivy container image scan (warn on dev, block on prod release) |
 | [`seo-check.yml`](#seo-static-audit) | Static Next.js SEO audit (metadata, sitemap/robots presence); job summary |
 | [`seo-live-url.yml`](#seo-live-url) | Live site: homepage / `robots.txt` / sitemap content audit + Lighthouse SEO |
@@ -441,6 +441,15 @@ If you configure additional automated commits that push to `main`, prefix them s
 | `node` | `actions/setup-node` | `npx eslint .` | `npm test` |
 | `rust` | `dtolnay/rust-toolchain` | `cargo fmt --check && cargo clippy -D warnings` | `cargo test --verbose` |
 
+Go lint installs the pinned `golangci_version` from source with the selected
+`language_version` toolchain. This avoids running a prebuilt linter compiled by
+an older Go release against code that uses a newer language or standard-library
+surface.
+
+Callers that need a temporary Go build experiment can set `go_experiment`; the
+value is exported as `GOEXPERIMENT` in both the lint and test jobs. Leave it
+empty for the toolchain default.
+
 ### Optional Services
 
 Start service containers with health checks and auto-exported env vars:
@@ -531,6 +540,8 @@ jobs:
 | `setup_commands` | No | — | Commands to run before tests (e.g., install deps, copy env files) |
 | `uv_sync_args` | No | `--frozen --all-extras --all-groups` | Arguments for `uv sync` (Python only). Override when extras conflict, e.g. `--frozen --extra cpu --extra dev` |
 | `go_private_modules` | No | `false` | Enable private Go module access for `github.com/NeuralTrust/*` |
+| `golangci_version` | No | `v2.13.2` | golangci-lint version built with the selected Go toolchain |
+| `go_experiment` | No | — | Optional `GOEXPERIMENT` value for Go lint and test jobs |
 | `kreuzberg_enabled` | No | `false` | Install Kreuzberg FFI + Tesseract OCR before tests (Go CGO builds) |
 | `kreuzberg_version` | No | `v4.1.0` | Kreuzberg FFI release version (only when `kreuzberg_enabled: true`) |
 
@@ -577,11 +588,12 @@ The workflow runs two parallel jobs:
 | **Trivy** | SCA (dependencies) | Known CVEs in dependencies, IaC misconfigs, license issues |
 | **Gitleaks** | Secret detection | Hardcoded secrets/credentials in git history |
 
-**Language SAST (source code analysis, opt-in per language):**
+**Language analysis (opt-in per language):**
 
 | Tool | Language | What it finds |
 |------|----------|---------------|
 | **Gosec** | Go | SQL injection, weak crypto, command injection, hardcoded creds |
+| **govulncheck** | Go | Vulnerabilities that are reachable from the repository's compiled call graph |
 | **Bandit** | Python | SQL injection, insecure functions (`eval`, `exec`, `pickle`), hardcoded passwords, weak crypto |
 | **njsscan** | Node/JS | XSS, prototype pollution, insecure regex, eval injection, command injection |
 | *(not needed)* | Rust | Rust's type system + borrow checker + clippy covers most issues |
@@ -595,7 +607,15 @@ jobs:
     uses: NeuralTrust/workflows/.github/workflows/sast.yml@main
     with:
       gosec_enabled: true
+      govulncheck_enabled: true
 ```
+
+`govulncheck` is blocking when enabled. By default it reads the Go toolchain
+from `go.mod`, scans `./...`, and installs the pinned scanner version. Consumers
+with a container/toolchain version newer than their `go.mod` directive can set
+`govulncheck_go_version` explicitly so CI scans with the production toolchain.
+Private-module consumers must also set `go_private_modules: true` and pass
+`GH_TOKEN`.
 
 ```yaml
 # Python projects
@@ -646,6 +666,13 @@ jobs:
 | `gitleaks_enabled` | `false` | Enable informational secret detection across full git history |
 | `gosec_enabled` | `false` | Enable Go SAST |
 | `gosec_args` | `./...` | Gosec arguments |
+| `govulncheck_enabled` | `false` | Enable blocking reachable Go vulnerability scanning |
+| `govulncheck_version` | `1.3.0` | `golang.org/x/vuln` scanner version (`latest` is also accepted) |
+| `govulncheck_go_version` | *(from `go.mod`)* | Optional explicit Go toolchain version |
+| `govulncheck_go_mod_path` | `go.mod` | Module file used by `setup-go` and its dependency cache |
+| `govulncheck_working_directory` | `.` | Directory in which the scanner runs |
+| `govulncheck_package_pattern` | `./...` | Go package pattern scanned by `govulncheck` |
+| `go_private_modules` | `false` | Authenticate Go scanners for `github.com/NeuralTrust/*`; requires `GH_TOKEN` |
 | `bandit_enabled` | `false` | Enable Python SAST |
 | `bandit_args` | `-r . -ll` | Bandit arguments |
 | `njsscan_enabled` | `false` | Enable Node/JS SAST |
