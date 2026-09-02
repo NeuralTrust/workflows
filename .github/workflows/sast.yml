@@ -473,6 +473,9 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: 'go.mod'
+          # go.mod pins the minor line (e.g. 'go 1.27'), which setup-go treats as
+          # a spec — resolve it to the newest patch, not a cached older one.
+          check-latest: true
 
       - name: Configure private Go modules
         if: inputs.go_private_modules
@@ -535,6 +538,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ inputs.govulncheck_go_version }}
+          check-latest: true
           cache-dependency-path: ${{ inputs.govulncheck_go_mod_path }}
 
       - name: Set up Go from go.mod
@@ -542,6 +546,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: ${{ inputs.govulncheck_go_mod_path }}
+          check-latest: true
           cache-dependency-path: ${{ inputs.govulncheck_go_mod_path }}
 
       - name: Configure private Go modules

@@ -470,7 +470,7 @@ jobs:
     uses: NeuralTrust/workflows/.github/workflows/tests.yml@main
     with:
       language: go
-      language_version: '1.25.1'
+      language_version: '1.27'
 ```
 
 ```yaml
@@ -480,7 +480,7 @@ jobs:
     uses: NeuralTrust/workflows/.github/workflows/tests.yml@main
     with:
       language: go
-      language_version: '1.25.1'
+      language_version: '1.27'
       go_private_modules: true
       lint_enabled: true
       coverage_enabled: true
@@ -495,7 +495,7 @@ jobs:
     uses: NeuralTrust/workflows/.github/workflows/tests.yml@main
     with:
       language: go
-      language_version: '1.25.1'
+      language_version: '1.27'
       go_private_modules: true
       lint_enabled: false
       postgres_enabled: true

@@ -10,7 +10,7 @@
 #       uses: NeuralTrust/workflows/.github/workflows/tests.yml@main
 #       with:
 #         language: go
-#         language_version: '1.25.1'
+#         language_version: '1.27'
 #
 # Usage (with services):
 #   jobs:
@@ -18,7 +18,7 @@
 #       uses: NeuralTrust/workflows/.github/workflows/tests.yml@main
 #       with:
 #         language: go
-#         language_version: '1.25.1'
+#         language_version: '1.27'
 #         postgres_enabled: true
 #         postgres_db: my_app
 #         redis_enabled: true
@@ -38,7 +38,7 @@
 #       uses: NeuralTrust/workflows/.github/workflows/tests.yml@main
 #       with:
 #         language: go
-#         language_version: '1.25.1'
+#         language_version: '1.27'
 #         kreuzberg_enabled: true
 #         kreuzberg_version: 'v4.1.0'
 #
@@ -48,7 +48,7 @@
 #       uses: NeuralTrust/workflows/.github/workflows/tests.yml@main
 #       with:
 #         language: go
-#         language_version: '1.26.4'
+#         language_version: '1.27'
 #         golangci_extra_build_tags: integration
 #         sqlfluff_enabled: true
 #         sqlfluff_paths: internal/infra/migrations
@@ -319,6 +319,9 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ inputs.language_version }}
+          # Callers pin the minor line (e.g. '1.27'), so resolve it to the newest
+          # patch instead of reusing whatever 1.27.x the runner has cached.
+          check-latest: true
           cache: true
 
       - name: Configure private Go modules
@@ -662,6 +665,9 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ inputs.language_version }}
+          # Callers pin the minor line (e.g. '1.27'), so resolve it to the newest
+          # patch instead of reusing whatever 1.27.x the runner has cached.
+          check-latest: true
           cache: true
 
       - name: Configure private Go modules
