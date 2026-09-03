@@ -142,11 +142,28 @@ on:
         required: false
         type: string
         default: './...'
+      # Keep this at or above the newest Go release any caller targets. gosec
+      # analyses source with the golang.org/x/tools it was built against, so a
+      # gosec older than the caller's Go cannot read that Go's export data and
+      # dies before reporting anything:
+      #
+      #   internal error: package "context" without types was imported
+      #   from "command-line-arguments"
+      #
+      # 2.22.8 vendors x/tools v0.36.0 and fails that way on every Go 1.27
+      # module; 2.29.0 vendors v0.49.0 and scans clean. Reproduced both ways on
+      # go1.27.1 against NeuralTrust/watchdog. Same failure gosec hit for Go
+      # 1.18 (securego/gosec#797) and Go 1.20 (#921), both fixed by bumping
+      # x/tools — so the fix is always to raise gosec, never to pin Go down.
+      #
+      # Newer x/tools reads older Go fine, so this is safe for callers still on
+      # 1.26. It may surface findings an older gosec missed, which is the point;
+      # the job is continue-on-error, so new findings warn rather than block.
       gosec_version:
-        description: 'Gosec version to install (e.g., 2.21.4)'
+        description: 'Gosec version to install (e.g., 2.21.4). Must be >= the newest Go any caller targets — see the note above.'
         required: false
         type: string
-        default: '2.22.8'
+        default: '2.29.0'
 
       # ======================================================================
       # govulncheck (Go)
