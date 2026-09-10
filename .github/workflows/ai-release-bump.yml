@@ -489,6 +489,10 @@ jobs:
 
     outputs:
       image_ref: ${{ steps.resolve.outputs.image_ref }}
+      # Set only by the lookup itself. Empty means the job died before the
+      # lookup ran (auth, crane install, registry login), which is a different
+      # problem from a missing image and must not be reported as one.
+      failure_reason: ${{ steps.resolve.outputs.failure_reason }}
 
     steps:
       - name: Validate scan inputs
@@ -549,6 +553,7 @@ jobs:
             echo "::notice::Dev image not found by SHA — scanning the latest dev tag instead: ${REF}"
           else
             echo "::error::No dev image found at ${SHA_REF} or ${LATEST_REF}. The pre-release scan gate cannot verify this release; build the dev image first or set image_scan_enabled: false."
+            echo "failure_reason=No dev image found at ${SHA_REF} or ${LATEST_REF}; build the dev image first or set image_scan_enabled: false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
@@ -785,6 +790,7 @@ jobs:
           IMAGE_REF: ${{ needs.resolve-image.outputs.image_ref }}
           BUMP_RESULT: ${{ needs.bump.result }}
           RESOLVE_RESULT: ${{ needs.resolve-image.result }}
+          RESOLVE_REASON: ${{ needs.resolve-image.outputs.failure_reason }}
           SCAN_RESULT: ${{ needs.scan.result }}
           PUBLISH_RESULT: ${{ needs.publish.result }}
           REPO: ${{ github.repository }}
@@ -794,7 +800,14 @@ jobs:
             REASON="Pre-release image scan found HIGH/CRITICAL fixable CVEs"
             [ -n "$IMAGE_REF" ] && REASON="${REASON} in ${IMAGE_REF}"
           elif [ "$RESOLVE_RESULT" = "failure" ]; then
-            REASON="Dev image not found in the registry; the pre-release scan cannot verify this release"
+            # Only the lookup sets RESOLVE_REASON. Without it the job failed
+            # earlier — GCP auth, crane install or registry login — and calling
+            # that a missing image sends the reader after the wrong problem.
+            if [ -n "$RESOLVE_REASON" ]; then
+              REASON="$RESOLVE_REASON"
+            else
+              REASON="Could not resolve the dev image to scan; the job failed before the lookup ran (GCP auth or registry access). Check the run log and re-run — this is often transient"
+            fi
           elif [ "$PUBLISH_RESULT" = "failure" ]; then
             REASON="Publish failed while creating the tag, version files, or GitHub Release"
           elif [ "$BUMP_RESULT" = "failure" ]; then
