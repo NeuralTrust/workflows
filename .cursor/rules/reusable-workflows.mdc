@@ -104,11 +104,11 @@ and `actions: read` are **not** needed anywhere — drop them from new callers.
   change — with no build, no diff and no failing step to notice. So
   `release-promote.yml` and `multi-image-release-promote.yml` require the released
   commit and the dev commit to match outside `promote_ignore_paths` (default
-  `k8s/**`, `CHANGELOG.md`), and neither promotes the dev `latest` tag on an
-  image-not-found miss unless `allow_latest_fallback` is set. **A rebuild reproduces
-  the released tree exactly, so every uncertainty must fail safe to rebuild, never to
-  promote.** When a repo keeps tripping the gate the fix is to back-merge `main` into
-  `develop`, not to widen the ignore list.
+  `k8s/**`, `.github/**`, `CHANGELOG.md`), and neither promotes the dev `latest`
+  tag on an image-not-found miss unless `allow_latest_fallback` is set. **A rebuild
+  reproduces the released tree exactly, so every uncertainty must fail safe to
+  rebuild, never to promote.** When a repo keeps tripping the gate the fix is to
+  back-merge `main` into `develop`, not to widen the ignore list.
 
 ## 6. Changing the consumer contract
 

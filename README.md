@@ -239,7 +239,7 @@ jobs:
 | `overlay_path` | No | `k8s/overlays/prod` | Primary prod overlay. If `k8s/overlays/prod-us` exists, release jobs update it in the same commit (US regional Flux) |
 | `config_env_file` | No | `config.env` | Config env file name in overlay |
 | `dev_branch` | No | `develop` | Dev branch name (for PR detection) |
-| `promote_ignore_paths` | No | `k8s/**`, `CHANGELOG.md` | Pathspecs that cannot reach the image, for the content-equivalence gate |
+| `promote_ignore_paths` | No | `k8s/**`, `.github/**`, `CHANGELOG.md` | Pathspecs that cannot reach the image, for the content-equivalence gate |
 | `allow_latest_fallback` | No | `false` | Promote the dev `latest` tag when no image matches the dev commit SHA |
 
 ### Why a promote can become a rebuild

@@ -145,6 +145,7 @@ on:
         type: string
         default: |
           k8s/**
+          .github/**
           CHANGELOG.md
       allow_latest_fallback:
         description: >
