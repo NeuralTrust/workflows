@@ -240,7 +240,6 @@ jobs:
 | `config_env_file` | No | `config.env` | Config env file name in overlay |
 | `dev_branch` | No | `develop` | Dev branch name (for PR detection) |
 | `promote_ignore_paths` | No | `k8s/**`, `.github/**`, `CHANGELOG.md` | Pathspecs that cannot reach the image, for the content-equivalence gate |
-| `allow_latest_fallback` | No | `false` | Promote the dev `latest` tag when no image matches the dev commit SHA |
 
 ### Why a promote can become a rebuild
 
@@ -252,8 +251,12 @@ but the dev image predates them. Promoting it would ship a tree that was never
 built for this release and revert those changes, with no build and no diff to
 show it.
 
-So the release compares the two commits outside `promote_ignore_paths` and
-downgrades to a rebuild on any drift, logging the offending files. A rebuild
+The dev head is usually a commit that never built an image — the deploy
+overlay bump, docs, CI config — so the release first walks first-parent from the
+dev commit to the nearest ancestor that has an image in the dev registry, and
+treats that as the artifact's source. It then compares that built commit with
+the released commit outside `promote_ignore_paths` and downgrades to a rebuild on
+any drift, logging the offending files. A rebuild
 reproduces the released tree exactly, so it is always the safe answer — the
 promote is only an optimisation. If a repo keeps rebuilding, back-merge `main`
 into the dev branch rather than widening `promote_ignore_paths`.
@@ -307,7 +310,7 @@ release (detect strategy + build if rebuild) → scan (image-scan.yml) → promo
 
 Each image is scanned for fixable CRITICAL/HIGH CVEs **before** crane copy or kustomize update — same gate as single-image `release-promote.yml`.
 
-It also takes the same `promote_ignore_paths` and `allow_latest_fallback` inputs, and applies the same content-equivalence gate described under [Smart Release](#why-a-promote-can-become-a-rebuild) — the check runs once in the detect job and downgrades every image to a rebuild together.
+It also takes the same `promote_ignore_paths` input and applies the same source resolution and content-equivalence gate described under [Smart Release](#why-a-promote-can-become-a-rebuild), once per image in the matrix job.
 
 ---
 

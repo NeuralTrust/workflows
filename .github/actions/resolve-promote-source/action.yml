@@ -1,0 +1,157 @@
+name: Resolve Promote Source
+description: >
+  Decide whether a release can promote an already-built dev image, and which one.
+  Walks first-parent from the dev commit to the nearest ancestor that has an image
+  in the dev registry, then requires that commit and the release candidate to have
+  the same content outside the ignored paths. Anything else resolves to rebuild.
+  Requires a checkout with full history and crane authenticated to the registry.
+
+inputs:
+  dev_sha:
+    description: Dev-branch commit the release was cut from (PR head or merge second parent).
+    required: true
+  candidate_sha:
+    description: Commit on the release branch whose content the promoted image must match.
+    required: true
+  dev_image_base:
+    description: Dev image reference without a tag (registry/project/repository/image).
+    required: true
+  tag_prefix:
+    description: Prefix applied to dev image tags.
+    required: false
+    default: ''
+  tag_suffix:
+    description: Suffix applied to dev image tags.
+    required: false
+    default: ''
+  ignore_paths:
+    description: >
+      Newline-separated git pathspecs that cannot reach the built image. Differences
+      confined to these paths do not block a promote.
+    required: false
+    default: |
+      k8s/**
+      .github/**
+      CHANGELOG.md
+  max_walk:
+    description: How many first-parent commits to walk back from dev_sha looking for an image.
+    required: false
+    default: '30'
+
+outputs:
+  strategy:
+    description: promote or rebuild.
+    value: ${{ steps.resolve.outputs.strategy }}
+  source_sha:
+    description: Commit whose dev image will be promoted (empty on rebuild).
+    value: ${{ steps.resolve.outputs.source_sha }}
+  source_ref:
+    description: Full dev image reference to promote (empty on rebuild).
+    value: ${{ steps.resolve.outputs.source_ref }}
+  walked:
+    description: Number of first-parent steps taken from dev_sha to reach source_sha.
+    value: ${{ steps.resolve.outputs.walked }}
+  reason:
+    description: Why the result is rebuild (empty on promote).
+    value: ${{ steps.resolve.outputs.reason }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve promote source
+      id: resolve
+      shell: bash
+      env:
+        DEV_SHA: ${{ inputs.dev_sha }}
+        CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        DEV_IMAGE_BASE: ${{ inputs.dev_image_base }}
+        P: ${{ inputs.tag_prefix }}
+        S: ${{ inputs.tag_suffix }}
+        IGNORE_PATHS: ${{ inputs.ignore_paths }}
+        MAX_WALK: ${{ inputs.max_walk }}
+      run: |
+        set -uo pipefail
+
+        STRATEGY="rebuild"
+        SOURCE_SHA=""
+        SOURCE_REF=""
+        WALKED=0
+        REASON=""
+
+        emit() {
+          {
+            echo "strategy=${STRATEGY}"
+            echo "source_sha=${SOURCE_SHA}"
+            echo "source_ref=${SOURCE_REF}"
+            echo "walked=${WALKED}"
+            echo "reason=${REASON}"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$STRATEGY" = "promote" ]; then
+            echo "Promote source: ${SOURCE_REF} (${WALKED} commit(s) behind ${DEV_SHA})"
+          else
+            echo "::warning title=Promote downgraded to rebuild::${REASON}"
+          fi
+        }
+
+        for sha in "$DEV_SHA" "$CANDIDATE_SHA"; do
+          if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "$sha" 2>/dev/null || true
+          fi
+          if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+            REASON="commit ${sha} is not reachable in this checkout, so the promoted tree cannot be verified"
+            emit; exit 0
+          fi
+        done
+
+        # The dev branch head is often a commit that never built an image
+        # (deploy-overlay bumps, docs, CI config). The image for the code it
+        # carries is tagged with an earlier commit, so walk first-parent until
+        # a tagged image exists. The content check below covers the commits
+        # walked over: if one of them changed something that reaches the image,
+        # it shows up as drift against the candidate and forces a rebuild.
+        COMMIT="$DEV_SHA"
+        for ((i = 0; i < MAX_WALK; i++)); do
+          REF="${DEV_IMAGE_BASE}:${P}${COMMIT}${S}"
+          if crane manifest "$REF" > /dev/null 2>&1; then
+            SOURCE_SHA="$COMMIT"
+            SOURCE_REF="$REF"
+            WALKED="$i"
+            break
+          fi
+          PARENT=$(git rev-parse --verify --quiet "${COMMIT}^") || break
+          COMMIT="$PARENT"
+        done
+
+        if [ -z "$SOURCE_SHA" ]; then
+          REASON="no dev image found within ${MAX_WALK} first-parent commits of ${DEV_SHA}"
+          emit; exit 0
+        fi
+
+        # Content-equivalence gate. A dev→main PR proves where the release came
+        # from, not what it contains: main also receives hotfixes and dependency
+        # bumps, and while the dev branch is behind, the merge keeps main's side
+        # of those files. The built image predates them, so promoting it would
+        # ship a tree that was never built for this release and revert every
+        # main-only change with nothing failing. Only a rebuild reproduces the
+        # released tree, so any drift outside the ignored paths resolves to it.
+        PATHSPEC=(".")
+        while IFS= read -r ignore_path; do
+          [ -n "$ignore_path" ] || continue
+          PATHSPEC+=(":(exclude)${ignore_path}")
+        done <<< "$IGNORE_PATHS"
+
+        if ! DRIFT=$(git diff --name-only "$SOURCE_SHA" "$CANDIDATE_SHA" -- "${PATHSPEC[@]}" 2>/dev/null); then
+          REASON="could not diff ${SOURCE_SHA}..${CANDIDATE_SHA}, so the promoted tree cannot be verified"
+          emit; exit 0
+        fi
+
+        if [ -n "$DRIFT" ]; then
+          COUNT=$(printf '%s\n' "$DRIFT" | wc -l | tr -d ' ')
+          echo "Files that differ between the built dev commit ${SOURCE_SHA} and the release ${CANDIDATE_SHA}:"
+          printf '%s\n' "$DRIFT" | sed 's/^/  - /'
+          REASON="release ${CANDIDATE_SHA} differs from built dev commit ${SOURCE_SHA} in ${COUNT} image-relevant file(s); the dev image is not this release. Back-merge main into the dev branch to restore promotes"
+          emit; exit 0
+        fi
+
+        STRATEGY="promote"
+        emit

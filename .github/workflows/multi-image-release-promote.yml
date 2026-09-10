@@ -6,10 +6,12 @@
 #   develop → main PR  →  SCAN → PROMOTE: crane copy all images from dev to prod
 #   hotfix / direct push →  REBUILD → SCAN: docker build all images
 #
-# A promote also requires the released commit and the dev commit to match
-# outside `promote_ignore_paths` — see the gate in the detect job. Coming from
-# the dev branch is not enough: while it is behind main, the merge keeps main's
-# hotfixes that the dev images were never built with. Any drift → rebuild.
+# Each image is resolved with the resolve-promote-source action: walk
+# first-parent from the dev commit to the nearest ancestor that has an image,
+# then require that built commit and the released commit to match outside
+# `promote_ignore_paths`. Coming from the dev branch is not enough: while it is
+# behind main, the merge keeps main's hotfixes that the dev images were never
+# built with. Any drift → rebuild.
 #
 # Per-image job flow (matrix):
 #   release → scan (image-scan.yml) → promote-copy → update-kustomization
@@ -102,15 +104,6 @@ on:
           k8s/**
           .github/**
           CHANGELOG.md
-      allow_latest_fallback:
-        description: >
-          When no dev image is tagged with the dev commit SHA, promote the dev
-          `latest` tag instead of rebuilding. Off by default, because `latest`
-          is whatever the dev branch built most recently and is not provably
-          this release, so the content-equivalence gate cannot vouch for it.
-        required: false
-        type: boolean
-        default: false
     secrets:
       WIF_PROVIDER:
         required: true
@@ -160,7 +153,6 @@ jobs:
           REPO: ${{ github.repository }}
           RELEASE_SHA: ${{ github.sha }}
           DEV_BRANCH: ${{ inputs.dev_branch }}
-          IGNORE_PATHS: ${{ inputs.promote_ignore_paths }}
         run: |
           RESULT="rebuild"
           DEV_SHA=""
@@ -201,52 +193,6 @@ jobs:
             else
               echo "No develop→main PR found — hotfix or direct push"
               REASON="no develop→main PR or merge at the released commit (hotfix / direct push)"
-            fi
-          fi
-
-          # ----------------------------------------------------------------
-          # Content-equivalence gate
-          # ----------------------------------------------------------------
-          # A dev→main PR proves where the release came from, not what it
-          # contains. `main` also receives hotfixes and dependency bumps, and
-          # while the dev branch is behind, the merge keeps main's side of those
-          # files. The dev images predate them, so promoting them ships a tree
-          # that was never built for this release and reverts every main-only
-          # change — with no build, no diff and no failing step to notice.
-          #
-          # A rebuild reproduces the released tree exactly, so every
-          # uncertainty fails safe to rebuild.
-          if [ "$RESULT" = "promote" ]; then
-            if ! git cat-file -e "${DEV_SHA}^{commit}" 2>/dev/null; then
-              git fetch --no-tags --depth=1 origin "$DEV_SHA" 2>/dev/null || true
-            fi
-
-            if ! git cat-file -e "${DEV_SHA}^{commit}" 2>/dev/null; then
-              RESULT="rebuild"
-              REASON="dev commit ${DEV_SHA} is not reachable in this checkout, so the promoted tree cannot be verified"
-            else
-              # ':(exclude)' pathspecs let git do the glob matching.
-              PATHSPEC=(".")
-              while IFS= read -r ignore_path; do
-                [ -n "$ignore_path" ] || continue
-                PATHSPEC+=(":(exclude)${ignore_path}")
-              done <<< "$IGNORE_PATHS"
-
-              DRIFT=$(git diff --name-only "$DEV_SHA" "$RELEASE_SHA" -- "${PATHSPEC[@]}" 2>/dev/null || echo '__diff_failed__')
-
-              if [ "$DRIFT" = "__diff_failed__" ]; then
-                RESULT="rebuild"
-                REASON="could not diff ${DEV_SHA}..${RELEASE_SHA}, so the promoted tree cannot be verified"
-              elif [ -n "$DRIFT" ]; then
-                RESULT="rebuild"
-                DRIFT_COUNT=$(printf '%s\n' "$DRIFT" | wc -l | tr -d ' ')
-                REASON="the released commit differs from dev commit ${DEV_SHA} in ${DRIFT_COUNT} image-relevant file(s) — main carries changes develop lacks, so the dev images are not this release"
-                echo "Files that differ between the dev images' commit and the release:"
-                printf '%s\n' "$DRIFT" | sed 's/^/  - /'
-                echo "::warning title=Promote downgraded to rebuild::${REASON}. Back-merge main into ${DEV_BRANCH} to restore fast promotes."
-              else
-                echo "Content-equivalence OK: the release matches dev commit ${DEV_SHA} outside the ignored paths"
-              fi
             fi
           fi
 
@@ -301,6 +247,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Compute image metadata
         id: meta
@@ -346,42 +293,29 @@ jobs:
           echo "$ACCESS_TOKEN" | \
             crane auth login ${{ inputs.registry }} -u oauth2accesstoken --password-stdin
 
+      - name: Resolve promote source
+        id: source
+        if: needs.detect.outputs.strategy == 'promote'
+        uses: NeuralTrust/workflows/.github/actions/resolve-promote-source@main
+        with:
+          dev_sha: ${{ needs.detect.outputs.dev_sha }}
+          candidate_sha: ${{ github.sha }}
+          dev_image_base: ${{ steps.meta.outputs.dev_image_base }}
+          tag_prefix: ${{ matrix.image.tag_prefix }}
+          tag_suffix: ${{ matrix.image.tag_suffix }}
+          ignore_paths: ${{ inputs.promote_ignore_paths }}
+
       - name: Resolve per-image strategy
         id: strategy
         env:
           INTENT: ${{ needs.detect.outputs.strategy }}
-          DEV_SHA: ${{ needs.detect.outputs.dev_sha }}
-          IMAGE_NAME: ${{ matrix.image.name }}
-          DEV_BASE: ${{ steps.meta.outputs.dev_image_base }}
-          P: ${{ matrix.image.tag_prefix }}
-          S: ${{ matrix.image.tag_suffix }}
-          ALLOW_LATEST: ${{ inputs.allow_latest_fallback }}
+          SOURCE_STRATEGY: ${{ steps.source.outputs.strategy }}
+          SOURCE_REF: ${{ steps.source.outputs.source_ref }}
         run: |
           FINAL="rebuild"
-          SOURCE_REF=""
-
-          if [ "$INTENT" = "promote" ]; then
-            SHA_REF="${DEV_BASE}:${P}${DEV_SHA}${S}"
-            LATEST_REF="${DEV_BASE}:${P}latest${S}"
-
-            echo "Checking dev image by SHA: ${SHA_REF}"
-
-            if crane manifest "${SHA_REF}" > /dev/null 2>&1; then
-              echo "Dev image found by commit SHA"
-              FINAL="promote"
-              SOURCE_REF="$SHA_REF"
-            elif [ "$ALLOW_LATEST" = "true" ] && crane manifest "${LATEST_REF}" > /dev/null 2>&1; then
-              # Opt-in only: `latest` is the most recent dev build, which need
-              # not be this release's commit, so the content-equivalence gate
-              # in the detect job did not vouch for it.
-              echo "::warning title=Promoting unverified dev image::${IMAGE_NAME}: dev image not found by SHA; promoting \"${LATEST_REF}\" because allow_latest_fallback is on. Its source commit is unverified."
-              FINAL="promote"
-              SOURCE_REF="$LATEST_REF"
-            else
-              echo "::warning title=Promote downgraded to rebuild::${IMAGE_NAME}: no dev image tagged ${DEV_SHA} in the dev registry"
-            fi
+          if [ "$INTENT" = "promote" ] && [ "$SOURCE_STRATEGY" = "promote" ]; then
+            FINAL="promote"
           fi
-
           {
             echo "final=${FINAL}"
             echo "source_ref=${SOURCE_REF}"

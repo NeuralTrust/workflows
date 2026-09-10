@@ -102,13 +102,16 @@ and `actions: read` are **not** needed anywhere — drop them from new callers.
   commit keeps main's side of those files. The dev image predates them, so promoting
   it ships a tree that was never built for this release and reverts every main-only
   change — with no build, no diff and no failing step to notice. So
-  `release-promote.yml` and `multi-image-release-promote.yml` require the released
-  commit and the dev commit to match outside `promote_ignore_paths` (default
-  `k8s/**`, `.github/**`, `CHANGELOG.md`), and neither promotes the dev `latest`
-  tag on an image-not-found miss unless `allow_latest_fallback` is set. **A rebuild
-  reproduces the released tree exactly, so every uncertainty must fail safe to
-  rebuild, never to promote.** When a repo keeps tripping the gate the fix is to
-  back-merge `main` into `develop`, not to widen the ignore list.
+  `release-promote.yml` and `multi-image-release-promote.yml` resolve the source
+  image with the `resolve-promote-source` action: walk first-parent from the dev
+  commit to the nearest ancestor with an image (the dev head is usually an
+  overlay-bump or docs commit that never built — this is what the old blind `latest`
+  fallback approximated), then require that built commit and the released commit to
+  match outside `promote_ignore_paths` (default `k8s/**`, `.github/**`,
+  `CHANGELOG.md`). Never promote a tag whose source commit you cannot name.
+  **A rebuild reproduces the released tree exactly, so every uncertainty must fail
+  safe to rebuild, never to promote.** When a repo keeps tripping the gate the fix
+  is to back-merge `main` into `develop`, not to widen the ignore list.
 
 ## 6. Changing the consumer contract
 
