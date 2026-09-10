@@ -16,9 +16,14 @@
 #        A. associated merged develop→main PR (GitHub API; handles squash merges)
 #        B. merge commit whose second parent is on the dev branch
 #      A human commit (e.g. hotfix) stops the walk → rebuild.
-#   2. If a promote commit is found, verifies the dev image exists in the dev
-#      registry (by SHA, then by latest tag).
-#   3. If both pass → promote. Otherwise → rebuild.
+#   2. Content-equivalence gate: the promote candidate and the dev commit must
+#      match outside `promote_ignore_paths`. Coming from the dev branch is not
+#      enough — while that branch is behind main, the merge keeps main's
+#      hotfixes that the dev image was never built with. Any drift → rebuild.
+#   3. Verifies the dev image exists in the dev registry, by commit SHA. The
+#      `latest` tag is used only when allow_latest_fallback is on, since it is
+#      not provably this release.
+#   4. If all pass → promote. Otherwise → rebuild, which is always correct.
 #
 # Version injection:
 #   The workflow updates config.env in the prod overlay with
@@ -129,6 +134,27 @@ on:
         required: false
         type: string
         default: 'develop'
+      promote_ignore_paths:
+        description: >
+          Newline-separated git pathspecs that cannot reach the built image.
+          The content-equivalence gate downgrades a promote to a rebuild when
+          the release commit and the dev commit differ OUTSIDE this list.
+          Widen it only for paths you are certain never reach the image: a
+          wrong entry lets a stale image be promoted.
+        required: false
+        type: string
+        default: |
+          k8s/**
+          CHANGELOG.md
+      allow_latest_fallback:
+        description: >
+          When no dev image is tagged with the dev commit SHA, promote the dev
+          `latest` tag instead of rebuilding. Off by default, because `latest`
+          is whatever the dev branch built most recently and is not provably
+          this release, so the content-equivalence gate cannot vouch for it.
+        required: false
+        type: boolean
+        default: false
       accept_vulnerability_risk:
         description: >
           Accepted risk mode for the pre-promote Trivy image scan.
@@ -204,6 +230,7 @@ jobs:
           RELEASE_SHA: ${{ github.sha }}
           RELEASE_TAG: ${{ github.ref_name }}
           DEV_BRANCH: ${{ inputs.dev_branch }}
+          IGNORE_PATHS: ${{ inputs.promote_ignore_paths }}
         run: |
           set -uo pipefail
           echo "::group::Detecting release strategy"
@@ -286,10 +313,60 @@ jobs:
             esac
           done
 
+          # ----------------------------------------------------------------
+          # Content-equivalence gate
+          # ----------------------------------------------------------------
+          # A dev→main PR proves where the release came from, not what it
+          # contains. `main` also receives hotfixes and dependency bumps, and
+          # while the dev branch is behind, the merge keeps main's side of those
+          # files. The dev image predates them, so promoting it ships a tree
+          # that was never built for this release and reverts every main-only
+          # change — with no build, no diff and no failing step to notice.
+          #
+          # So require the promote candidate and the dev commit to match outside
+          # the paths that cannot reach the image. A rebuild reproduces the
+          # released tree exactly, so every uncertainty fails safe to rebuild.
+          EQUIV_REASON=""
+          if [ "$RESULT" = "promote" ]; then
+            if ! git cat-file -e "${DEV_SHA}^{commit}" 2>/dev/null; then
+              git fetch --no-tags --depth=1 origin "$DEV_SHA" 2>/dev/null || true
+            fi
+
+            if ! git cat-file -e "${DEV_SHA}^{commit}" 2>/dev/null; then
+              RESULT="rebuild"
+              EQUIV_REASON="dev commit ${DEV_SHA} is not reachable in this checkout, so the promoted tree cannot be verified"
+            else
+              # ':(exclude)' pathspecs let git do the glob matching.
+              PATHSPEC=(".")
+              while IFS= read -r ignore_path; do
+                [ -n "$ignore_path" ] || continue
+                PATHSPEC+=(":(exclude)${ignore_path}")
+              done <<< "$IGNORE_PATHS"
+
+              DRIFT=$(git diff --name-only "$DEV_SHA" "$CANDIDATE" -- "${PATHSPEC[@]}" 2>/dev/null || echo '__diff_failed__')
+
+              if [ "$DRIFT" = "__diff_failed__" ]; then
+                RESULT="rebuild"
+                EQUIV_REASON="could not diff ${DEV_SHA}..${CANDIDATE}, so the promoted tree cannot be verified"
+              elif [ -n "$DRIFT" ]; then
+                RESULT="rebuild"
+                DRIFT_COUNT=$(printf '%s\n' "$DRIFT" | wc -l | tr -d ' ')
+                EQUIV_REASON="${CANDIDATE} differs from dev commit ${DEV_SHA} in ${DRIFT_COUNT} image-relevant file(s) — main carries changes develop lacks, so the dev image is not this release"
+                echo "Files that differ between the dev image's commit and the release:"
+                printf '%s\n' "$DRIFT" | sed 's/^/  - /'
+                echo "::warning title=Promote downgraded to rebuild::${EQUIV_REASON}. Back-merge main into ${DEV_BRANCH} to restore fast promotes."
+              else
+                echo "Content-equivalence OK: ${CANDIDATE} matches dev commit ${DEV_SHA} outside the ignored paths"
+              fi
+            fi
+          fi
+
           {
             echo "initial=${RESULT}"
             echo "dev_sha=${DEV_SHA}"
             echo "pr_number=${PR_NUM}"
+            echo "candidate_sha=${CANDIDATE}"
+            echo "equivalence_reason=${EQUIV_REASON}"
           } >> "$GITHUB_OUTPUT"
           echo "Strategy (initial): ${RESULT}"
           echo "::endgroup::"
@@ -350,15 +427,20 @@ jobs:
       # ----------------------------------------------------------------
       - name: Resolve final strategy
         id: strategy
+        env:
+          INITIAL: ${{ steps.detect.outputs.initial }}
+          DEV_SHA: ${{ steps.detect.outputs.dev_sha }}
+          EQUIV_REASON: ${{ steps.detect.outputs.equivalence_reason }}
+          DEV_BASE: ${{ steps.meta.outputs.dev_image_base }}
+          P: ${{ inputs.tag_prefix }}
+          S: ${{ inputs.tag_suffix }}
+          ALLOW_LATEST: ${{ inputs.allow_latest_fallback }}
         run: |
-          INITIAL="${{ steps.detect.outputs.initial }}"
+          FINAL="rebuild"
+          SOURCE_REF=""
+          REASON="$EQUIV_REASON"
 
           if [ "$INITIAL" = "promote" ]; then
-            DEV_SHA="${{ steps.detect.outputs.dev_sha }}"
-            P="${{ inputs.tag_prefix }}"
-            S="${{ inputs.tag_suffix }}"
-            DEV_BASE="${{ steps.meta.outputs.dev_image_base }}"
-
             SHA_REF="${DEV_BASE}:${P}${DEV_SHA}${S}"
             LATEST_REF="${DEV_BASE}:${P}latest${S}"
 
@@ -366,23 +448,38 @@ jobs:
 
             if crane manifest "${SHA_REF}" > /dev/null 2>&1; then
               echo "Dev image found by commit SHA"
-              echo "final=promote" >> "$GITHUB_OUTPUT"
-              echo "source_ref=${SHA_REF}" >> "$GITHUB_OUTPUT"
-            elif crane manifest "${LATEST_REF}" > /dev/null 2>&1; then
-              echo "::notice::Dev image not found by SHA (overlay may be ahead of that commit) — using latest tag from dev registry"
-              echo "final=promote" >> "$GITHUB_OUTPUT"
-              echo "source_ref=${LATEST_REF}" >> "$GITHUB_OUTPUT"
+              FINAL="promote"
+              SOURCE_REF="$SHA_REF"
+            elif [ "$ALLOW_LATEST" = "true" ] && crane manifest "${LATEST_REF}" > /dev/null 2>&1; then
+              # Opt-in only: `latest` is the most recent dev build, which need
+              # not be this release's commit, so the content-equivalence gate
+              # above did not vouch for it.
+              echo "::warning title=Promoting unverified dev image::Dev image not found by SHA; promoting \"${LATEST_REF}\" because allow_latest_fallback is on. Its source commit is unverified."
+              FINAL="promote"
+              SOURCE_REF="$LATEST_REF"
             else
-              echo "::warning::Dev image not found by SHA or latest tag — falling back to rebuild"
-              echo "final=rebuild" >> "$GITHUB_OUTPUT"
+              REASON="no dev image tagged ${DEV_SHA} in the dev registry"
+              echo "::warning title=Promote downgraded to rebuild::${REASON}"
             fi
-          else
-            echo "Strategy: rebuild (hotfix / direct push)"
-            echo "final=rebuild" >> "$GITHUB_OUTPUT"
+          elif [ -z "$REASON" ]; then
+            REASON="no develop→main PR or merge at the released commit (hotfix / direct push)"
+            echo "Strategy: rebuild — ${REASON}"
           fi
 
-          echo "## Release Strategy" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Strategy:** \`$( [ "$INITIAL" = "promote" ] && echo "${{ steps.detect.outputs.initial }}" || echo "rebuild")\` → \`$(cat "$GITHUB_OUTPUT" | grep '^final=' | cut -d= -f2)\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "final=${FINAL}"
+            echo "source_ref=${SOURCE_REF}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Release Strategy"
+            echo "- **Strategy:** \`${FINAL}\`"
+            if [ "$FINAL" = "promote" ]; then
+              echo "- **Promoted from:** \`${SOURCE_REF}\`"
+            elif [ -n "$REASON" ]; then
+              echo "- **Rebuilt because:** ${REASON}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # ================================================================
       # PROMOTE PATH — crane copy is deferred to the promote-copy job,

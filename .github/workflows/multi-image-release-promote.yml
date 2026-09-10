@@ -6,6 +6,11 @@
 #   develop → main PR  →  SCAN → PROMOTE: crane copy all images from dev to prod
 #   hotfix / direct push →  REBUILD → SCAN: docker build all images
 #
+# A promote also requires the released commit and the dev commit to match
+# outside `promote_ignore_paths` — see the gate in the detect job. Coming from
+# the dev branch is not enough: while it is behind main, the merge keeps main's
+# hotfixes that the dev images were never built with. Any drift → rebuild.
+#
 # Per-image job flow (matrix):
 #   release → scan (image-scan.yml) → promote-copy → update-kustomization
 #
@@ -84,6 +89,27 @@ on:
         required: false
         type: string
         default: 'develop'
+      promote_ignore_paths:
+        description: >
+          Newline-separated git pathspecs that cannot reach the built images.
+          The content-equivalence gate downgrades a promote to a rebuild when
+          the release commit and the dev commit differ OUTSIDE this list.
+          Widen it only for paths you are certain never reach an image: a
+          wrong entry lets a stale image be promoted.
+        required: false
+        type: string
+        default: |
+          k8s/**
+          CHANGELOG.md
+      allow_latest_fallback:
+        description: >
+          When no dev image is tagged with the dev commit SHA, promote the dev
+          `latest` tag instead of rebuilding. Off by default, because `latest`
+          is whatever the dev branch built most recently and is not provably
+          this release, so the content-equivalence gate cannot vouch for it.
+        required: false
+        type: boolean
+        default: false
     secrets:
       WIF_PROVIDER:
         required: true
@@ -130,60 +156,122 @@ jobs:
         id: detect
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ github.sha }}
+          DEV_BRANCH: ${{ inputs.dev_branch }}
+          IGNORE_PATHS: ${{ inputs.promote_ignore_paths }}
         run: |
-          PR_DATA=$(gh api repos/${{ github.repository }}/commits/${{ github.sha }}/pulls 2>/dev/null || echo '[]')
+          RESULT="rebuild"
+          DEV_SHA=""
+          REASON=""
+
+          PR_DATA=$(gh api "repos/${REPO}/commits/${RELEASE_SHA}/pulls" 2>/dev/null || echo '[]')
 
           # Use 'objects' filter to skip any non-object entries in the API response
-          DEV_PR=$(echo "$PR_DATA" | jq -r '
+          DEV_PR=$(echo "$PR_DATA" | jq -r --arg dev "$DEV_BRANCH" '
             [.[] | objects | select(
               .base.ref == "main" and
-              (.head.ref == "${{ inputs.dev_branch }}" or .head.ref == "dev") and
+              (.head.ref == $dev or .head.ref == "dev") and
               .merged_at != null
             )] | first // empty' 2>/dev/null || echo '')
 
           if [ -n "$DEV_PR" ] && [ "$DEV_PR" != "null" ]; then
             PR_NUM=$(echo "$DEV_PR" | jq -r '.number')
             DEV_SHA=$(echo "$DEV_PR" | jq -r '.head.sha')
-            echo "Found merged PR #${PR_NUM} from ${{ inputs.dev_branch }} → main"
-            echo "initial=promote" >> "$GITHUB_OUTPUT"
-            echo "dev_sha=${DEV_SHA}" >> "$GITHUB_OUTPUT"
+            echo "Found merged PR #${PR_NUM} from ${DEV_BRANCH} → main"
+            RESULT="promote"
           else
             # Fallback: check merge commit parents, but ONLY promote if the
             # second parent actually belongs to the dev branch.
-            PARENT_COUNT=$(git cat-file -p ${{ github.sha }} | grep -c '^parent ' || true)
+            PARENT_COUNT=$(git cat-file -p "$RELEASE_SHA" | grep -c '^parent ' || true)
             if [ "$PARENT_COUNT" -gt 1 ]; then
-              DEV_SHA=$(git rev-parse ${{ github.sha }}^2)
+              DEV_SHA=$(git rev-parse "${RELEASE_SHA}^2")
               echo "Merge commit detected, second parent: ${DEV_SHA}"
               # Verify the second parent is on the dev branch
-              if git branch -r --contains "$DEV_SHA" 2>/dev/null | grep -qE "origin/(${{ inputs.dev_branch }}|dev)$"; then
-                echo "Second parent belongs to ${{ inputs.dev_branch }} branch"
-                echo "initial=promote" >> "$GITHUB_OUTPUT"
-                echo "dev_sha=${DEV_SHA}" >> "$GITHUB_OUTPUT"
+              if git branch -r --contains "$DEV_SHA" 2>/dev/null | grep -qE "origin/(${DEV_BRANCH}|dev)$"; then
+                echo "Second parent belongs to ${DEV_BRANCH} branch"
+                RESULT="promote"
               else
                 BRANCH_INFO=$(git branch -r --contains "$DEV_SHA" 2>/dev/null | head -5 || echo "unknown")
-                echo "Second parent is NOT on ${{ inputs.dev_branch }} — branches: ${BRANCH_INFO}"
+                echo "Second parent is NOT on ${DEV_BRANCH} — branches: ${BRANCH_INFO}"
+                REASON="the released merge's second parent is not on ${DEV_BRANCH} (feature branch or hotfix merge)"
                 echo "Treating as rebuild (feature branch or hotfix merge)"
-                echo "initial=rebuild" >> "$GITHUB_OUTPUT"
               fi
             else
               echo "No develop→main PR found — hotfix or direct push"
-              echo "initial=rebuild" >> "$GITHUB_OUTPUT"
+              REASON="no develop→main PR or merge at the released commit (hotfix / direct push)"
             fi
           fi
 
-      - name: Resolve final strategy
-        id: strategy
-        run: |
-          INITIAL="${{ steps.detect.outputs.initial }}"
+          # ----------------------------------------------------------------
+          # Content-equivalence gate
+          # ----------------------------------------------------------------
+          # A dev→main PR proves where the release came from, not what it
+          # contains. `main` also receives hotfixes and dependency bumps, and
+          # while the dev branch is behind, the merge keeps main's side of those
+          # files. The dev images predate them, so promoting them ships a tree
+          # that was never built for this release and reverts every main-only
+          # change — with no build, no diff and no failing step to notice.
+          #
+          # A rebuild reproduces the released tree exactly, so every
+          # uncertainty fails safe to rebuild.
+          if [ "$RESULT" = "promote" ]; then
+            if ! git cat-file -e "${DEV_SHA}^{commit}" 2>/dev/null; then
+              git fetch --no-tags --depth=1 origin "$DEV_SHA" 2>/dev/null || true
+            fi
 
-          if [ "$INITIAL" = "promote" ]; then
-            # Will verify per-image in the matrix job; set promote as intent
-            echo "final=promote" >> "$GITHUB_OUTPUT"
-          else
-            echo "final=rebuild" >> "$GITHUB_OUTPUT"
+            if ! git cat-file -e "${DEV_SHA}^{commit}" 2>/dev/null; then
+              RESULT="rebuild"
+              REASON="dev commit ${DEV_SHA} is not reachable in this checkout, so the promoted tree cannot be verified"
+            else
+              # ':(exclude)' pathspecs let git do the glob matching.
+              PATHSPEC=(".")
+              while IFS= read -r ignore_path; do
+                [ -n "$ignore_path" ] || continue
+                PATHSPEC+=(":(exclude)${ignore_path}")
+              done <<< "$IGNORE_PATHS"
+
+              DRIFT=$(git diff --name-only "$DEV_SHA" "$RELEASE_SHA" -- "${PATHSPEC[@]}" 2>/dev/null || echo '__diff_failed__')
+
+              if [ "$DRIFT" = "__diff_failed__" ]; then
+                RESULT="rebuild"
+                REASON="could not diff ${DEV_SHA}..${RELEASE_SHA}, so the promoted tree cannot be verified"
+              elif [ -n "$DRIFT" ]; then
+                RESULT="rebuild"
+                DRIFT_COUNT=$(printf '%s\n' "$DRIFT" | wc -l | tr -d ' ')
+                REASON="the released commit differs from dev commit ${DEV_SHA} in ${DRIFT_COUNT} image-relevant file(s) — main carries changes develop lacks, so the dev images are not this release"
+                echo "Files that differ between the dev images' commit and the release:"
+                printf '%s\n' "$DRIFT" | sed 's/^/  - /'
+                echo "::warning title=Promote downgraded to rebuild::${REASON}. Back-merge main into ${DEV_BRANCH} to restore fast promotes."
+              else
+                echo "Content-equivalence OK: the release matches dev commit ${DEV_SHA} outside the ignored paths"
+              fi
+            fi
           fi
 
-          echo "## Release Strategy: ${INITIAL}" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "initial=${RESULT}"
+            echo "dev_sha=${DEV_SHA}"
+            echo "reason=${REASON}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Strategy (initial): ${RESULT}"
+
+      - name: Resolve final strategy
+        id: strategy
+        env:
+          INITIAL: ${{ steps.detect.outputs.initial }}
+          REASON: ${{ steps.detect.outputs.reason }}
+        run: |
+          # Per-image dev-image existence is still verified in the matrix job;
+          # this only carries the repo-wide intent.
+          echo "final=${INITIAL}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Release Strategy: ${INITIAL}"
+            if [ "$INITIAL" = "rebuild" ] && [ -n "$REASON" ]; then
+              echo "- **Rebuilt because:** ${REASON}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
   # Job 1: Release all images in parallel (matrix)
@@ -259,14 +347,19 @@ jobs:
 
       - name: Resolve per-image strategy
         id: strategy
+        env:
+          INTENT: ${{ needs.detect.outputs.strategy }}
+          DEV_SHA: ${{ needs.detect.outputs.dev_sha }}
+          IMAGE_NAME: ${{ matrix.image.name }}
+          DEV_BASE: ${{ steps.meta.outputs.dev_image_base }}
+          P: ${{ matrix.image.tag_prefix }}
+          S: ${{ matrix.image.tag_suffix }}
+          ALLOW_LATEST: ${{ inputs.allow_latest_fallback }}
         run: |
-          INTENT="${{ needs.detect.outputs.strategy }}"
+          FINAL="rebuild"
+          SOURCE_REF=""
 
           if [ "$INTENT" = "promote" ]; then
-            DEV_SHA="${{ needs.detect.outputs.dev_sha }}"
-            P="${{ matrix.image.tag_prefix }}"
-            S="${{ matrix.image.tag_suffix }}"
-            DEV_BASE="${{ steps.meta.outputs.dev_image_base }}"
             SHA_REF="${DEV_BASE}:${P}${DEV_SHA}${S}"
             LATEST_REF="${DEV_BASE}:${P}latest${S}"
 
@@ -274,19 +367,24 @@ jobs:
 
             if crane manifest "${SHA_REF}" > /dev/null 2>&1; then
               echo "Dev image found by commit SHA"
-              echo "final=promote" >> "$GITHUB_OUTPUT"
-              echo "source_ref=${SHA_REF}" >> "$GITHUB_OUTPUT"
-            elif crane manifest "${LATEST_REF}" > /dev/null 2>&1; then
-              echo "::notice::${{ matrix.image.name }}: Dev image not found by SHA (overlay may be ahead of that commit) — using latest tag from dev registry"
-              echo "final=promote" >> "$GITHUB_OUTPUT"
-              echo "source_ref=${LATEST_REF}" >> "$GITHUB_OUTPUT"
+              FINAL="promote"
+              SOURCE_REF="$SHA_REF"
+            elif [ "$ALLOW_LATEST" = "true" ] && crane manifest "${LATEST_REF}" > /dev/null 2>&1; then
+              # Opt-in only: `latest` is the most recent dev build, which need
+              # not be this release's commit, so the content-equivalence gate
+              # in the detect job did not vouch for it.
+              echo "::warning title=Promoting unverified dev image::${IMAGE_NAME}: dev image not found by SHA; promoting \"${LATEST_REF}\" because allow_latest_fallback is on. Its source commit is unverified."
+              FINAL="promote"
+              SOURCE_REF="$LATEST_REF"
             else
-              echo "::warning::${{ matrix.image.name }}: Dev image not found by SHA or latest tag — falling back to rebuild"
-              echo "final=rebuild" >> "$GITHUB_OUTPUT"
+              echo "::warning title=Promote downgraded to rebuild::${IMAGE_NAME}: no dev image tagged ${DEV_SHA} in the dev registry"
             fi
-          else
-            echo "final=rebuild" >> "$GITHUB_OUTPUT"
           fi
+
+          {
+            echo "final=${FINAL}"
+            echo "source_ref=${SOURCE_REF}"
+          } >> "$GITHUB_OUTPUT"
 
       # ---- REBUILD PATH ----
       - name: Build and push Docker image

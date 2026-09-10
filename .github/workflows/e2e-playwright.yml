@@ -36,7 +36,7 @@ on:
   workflow_call:
     inputs:
       service:
-        description: 'Playwright service name (app, trustgate, admin-console, data-plane)'
+        description: 'Playwright service name; used for job naming and artifacts'
         required: true
         type: string
       base_url:

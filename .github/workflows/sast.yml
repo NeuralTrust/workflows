@@ -152,7 +152,7 @@ on:
       #
       # 2.22.8 vendors x/tools v0.36.0 and fails that way on every Go 1.27
       # module; 2.29.0 vendors v0.49.0 and scans clean. Reproduced both ways on
-      # go1.27.1 against NeuralTrust/watchdog. Same failure gosec hit for Go
+      # go1.27.1 against a consumer repo. Same failure gosec hit for Go
       # 1.18 (securego/gosec#797) and Go 1.20 (#921), both fixed by bumping
       # x/tools — so the fix is always to raise gosec, never to pin Go down.
       #

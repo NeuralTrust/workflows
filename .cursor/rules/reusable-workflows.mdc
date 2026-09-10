@@ -17,7 +17,7 @@ A reusable workflow runs in the **caller's** checkout, so `./.github/actions/...
 resolves against the consumer repo and fails with "Can't find action.yml".
 
 ```yaml
-# ❌ BAD — breaks every consumer (this caused a real TrustScan outage)
+# ❌ BAD — breaks every consumer (this has caused a real outage)
 - uses: ./.github/actions/docker-build-push
 # ✅ GOOD
 - uses: NeuralTrust/workflows/.github/actions/docker-build-push@main
@@ -96,6 +96,19 @@ and `actions: read` are **not** needed anywhere — drop them from new callers.
   both signals (associated dev→main PR, or merge with a dev-branch second parent) at
   each step. A human commit stops the walk → rebuild. Keep automated commit-message
   prefixes in sync between `ai-release-bump.yml` (bump-guard) and this walk.
+- **Never promote an image whose source tree you have not verified.** A `develop`→
+  `main` PR proves only *where* a release came from, not *what* it contains: `main`
+  also takes hotfixes and dependency bumps, and while `develop` is behind, the merge
+  commit keeps main's side of those files. The dev image predates them, so promoting
+  it ships a tree that was never built for this release and reverts every main-only
+  change — with no build, no diff and no failing step to notice. So
+  `release-promote.yml` and `multi-image-release-promote.yml` require the released
+  commit and the dev commit to match outside `promote_ignore_paths` (default
+  `k8s/**`, `CHANGELOG.md`), and neither promotes the dev `latest` tag on an
+  image-not-found miss unless `allow_latest_fallback` is set. **A rebuild reproduces
+  the released tree exactly, so every uncertainty must fail safe to rebuild, never to
+  promote.** When a repo keeps tripping the gate the fix is to back-merge `main` into
+  `develop`, not to widen the ignore list.
 
 ## 6. Changing the consumer contract
 

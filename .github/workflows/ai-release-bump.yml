@@ -471,8 +471,12 @@ jobs:
   # Job 2: Resolve the dev image reference to scan (opt-in)
   # ============================================================================
   # The image was already built by CI for this commit, so we scan it by SHA and
-  # fall back to the latest dev tag (same resolution order release-promote.yml
-  # uses when it promotes).
+  # fall back to the latest dev tag.
+  # NOTE: this is a scan target, not the released artifact. release-promote.yml
+  # no longer falls back to `latest` when it promotes (it rebuilds instead,
+  # unless allow_latest_fallback is set), so on that fallback path this job can
+  # scan a different image than the one that ships. The gate that matters for
+  # what ships is the content-equivalence check in release-promote.yml.
   resolve-image:
     name: Resolve Dev Image
     needs: bump

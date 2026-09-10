@@ -239,6 +239,24 @@ jobs:
 | `overlay_path` | No | `k8s/overlays/prod` | Primary prod overlay. If `k8s/overlays/prod-us` exists, release jobs update it in the same commit (US regional Flux) |
 | `config_env_file` | No | `config.env` | Config env file name in overlay |
 | `dev_branch` | No | `develop` | Dev branch name (for PR detection) |
+| `promote_ignore_paths` | No | `k8s/**`, `CHANGELOG.md` | Pathspecs that cannot reach the image, for the content-equivalence gate |
+| `allow_latest_fallback` | No | `false` | Promote the dev `latest` tag when no image matches the dev commit SHA |
+
+### Why a promote can become a rebuild
+
+A promote copies the image the dev branch already built, so it only ships the
+right bytes when the released commit and that dev commit have the same content.
+They diverge whenever `main` takes a hotfix or a dependency bump that the dev
+branch has not merged back: the merge commit keeps main's side of those files,
+but the dev image predates them. Promoting it would ship a tree that was never
+built for this release and revert those changes, with no build and no diff to
+show it.
+
+So the release compares the two commits outside `promote_ignore_paths` and
+downgrades to a rebuild on any drift, logging the offending files. A rebuild
+reproduces the released tree exactly, so it is always the safe answer — the
+promote is only an optimisation. If a repo keeps rebuilding, back-merge `main`
+into the dev branch rather than widening `promote_ignore_paths`.
 
 ### Secrets
 
@@ -288,6 +306,8 @@ release (detect strategy + build if rebuild) → scan (image-scan.yml) → promo
 ```
 
 Each image is scanned for fixable CRITICAL/HIGH CVEs **before** crane copy or kustomize update — same gate as single-image `release-promote.yml`.
+
+It also takes the same `promote_ignore_paths` and `allow_latest_fallback` inputs, and applies the same content-equivalence gate described under [Smart Release](#why-a-promote-can-become-a-rebuild) — the check runs once in the detect job and downgrades every image to a rebuild together.
 
 ---
 
@@ -978,7 +998,7 @@ with:
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `service` | Yes | — | Playwright service name (`app`, `trustgate`, `admin-console`, `data-plane`) |
+| `service` | Yes | — | Playwright service name; used for job naming and artifacts |
 | `base_url` | Yes | — | Base URL of the service under test |
 | `expected_version` | No | — | Commit SHA expected in health endpoint (empty = skip version gate) |
 | `health_path` | No | `/api/health` | Health check path for version polling |
@@ -1108,6 +1128,36 @@ PRs target the `develop` branch only. Since all changes must be tested before pr
 [`dependabot-retarget.yml`](.github/workflows/dependabot-retarget.yml) is the org-wide workaround: twice a day at 00:00 and 12:00 UTC (and `workflow_dispatch`) it searches NeuralTrust for open Dependabot PRs against `main` and moves them onto `develop` when that branch exists. Repos without `develop` stay on `main`. Dependabot rebase can reset the base back to `main`, which is why the job is scheduled rather than one-shot.
 
 Every service still needs a per-repo `.github/dependabot.yml` with `target-branch: develop` so *version* updates (weekly bumps) open against `develop` rather than `main`.
+
+### Private Go modules
+
+Most Go services import private modules from this organization. They
+are not on the public Go proxy, so an unauthenticated Dependabot cannot resolve
+the module graph — and when resolution fails the **whole `gomod` job fails and
+opens no PRs at all**, security fixes included, while `docker` and
+`github-actions` updates keep flowing. The repo looks healthy and is not:
+`gh api repos/NeuralTrust/<repo>/dependabot/alerts?state=open` shows the alerts
+piling up with no PR behind them.
+
+Access is granted **once, at the organization level**, with a Dependabot private
+registry of type `git_source` for `https://github.com` authenticated with the
+same `GH_TOKEN` PAT the pipelines use for `GOPRIVATE` fetches. Every repo with
+access uses it automatically — no `registries:` block in any `dependabot.yml`,
+so a service that adopts a private module later is covered without a config
+change.
+
+[`scripts/setup-dependabot-private-registry.sh`](scripts/setup-dependabot-private-registry.sh)
+creates or updates it idempotently (`--dry-run` to preview). It refuses a token
+that cannot read the private module repos, and looks the registry up by type and
+URL rather than a stored name. Check what exists with
+`gh api /orgs/NeuralTrust/private-registries`.
+
+Two things this does **not** cover, because they are per-repo:
+
+- `dependabot.yml` is read from the **default branch** (`main`). A file that
+  exists only on `develop` is inert.
+- A repo with no `dependabot.yml` at all gets security PRs only, never the
+  weekly version bumps.
 
 ---
 

@@ -35,11 +35,11 @@
 #         id-token: write            # GCP WIF auth for cluster credentials
 #       with:
 #         mode: gitops
-#         flux_kustomization: kafka-workers
-#         gke_cluster: neuraltrust-dev
+#         flux_kustomization: my-service
+#         gke_cluster: my-dev-cluster
 #         gke_location: europe-west1
 #         gcp_project_id: dev-project-id
-#         workload_namespace: kafka-workers
+#         workload_namespace: my-service
 #       secrets: inherit
 #
 # Usage (public HTTP service - probe only, as before):
@@ -53,7 +53,7 @@
 #       secrets: inherit
 #
 # Usage (internal HTTP service - Flux check plus probe from a runner that can
-# reach *.internal.neuraltrust.ai):
+# reach internal-only endpoints):
 #     smoke-test:
 #       needs: deploy
 #       uses: NeuralTrust/workflows/.github/workflows/smoke-test.yml@main
@@ -63,10 +63,10 @@
 #       with:
 #         mode: both
 #         runner: self-hosted-twingate
-#         health_url: https://svc.internal.neuraltrust.ai/health
+#         health_url: https://svc.internal.example.com/health
 #         expected_version: ${{ github.sha }}
 #         flux_kustomization: my-service
-#         gke_cluster: neuraltrust-dev
+#         gke_cluster: my-dev-cluster
 #         gke_location: europe-west1
 #         gcp_project_id: dev-project-id
 #       secrets: inherit
@@ -102,7 +102,7 @@ on:
         default: ''
       runner:
         description: >
-          Runner label. Internal endpoints (*.internal.neuraltrust.ai) are not
+          Runner label. Internal-only endpoints are not
           reachable from GitHub-hosted runners — use a self-hosted / Twingate-
           connected runner label for those, or prefer mode `gitops`.
         required: false
@@ -140,7 +140,7 @@ on:
       flux_kustomization:
         description: >
           Name of the FluxCD Kustomization to verify (as in the gitops repo,
-          e.g. `kafka-workers`). Required for mode `gitops` and `both`.
+          e.g. `my-service`). Required for mode `gitops` and `both`.
         required: false
         type: string
         default: ''
