@@ -2,19 +2,19 @@
 # =============================================================================
 # NeuralTrust — Dependabot access to private Go modules (org-level)
 # =============================================================================
-# Most Go services import private NeuralTrust modules — event-schemas/gen/go,
-# TrustGuard/pkg/metrics, TrustLens/pkg/inventory, agentguardian-api. Those are
-# not on the public Go proxy, so an unauthenticated Dependabot cannot resolve
-# the module graph. When that happens the whole `gomod` update job fails and
-# Dependabot opens NO pull requests for that ecosystem — not weekly version
-# bumps and not security fixes — while `docker` and `github-actions` updates
-# keep flowing, so the repo looks healthy. Five repos sat like that for months
-# (DataAgent, DataBridge, DataCore, LegacyGateway, LegacyGateway-EE).
+# Most Go services import private modules — event-schemas/gen/go,
+# TrustGuard/pkg/metrics, TrustGate/pkg/metrics, TrustLens/pkg/inventory,
+# agentguardian-api. Those are not on the public Go proxy, so an
+# unauthenticated Dependabot cannot resolve the module graph. When that happens
+# the whole `gomod` update job fails and Dependabot opens NO pull requests for
+# that ecosystem — not weekly version bumps and not security fixes — while
+# `docker` and `github-actions` updates keep flowing. A repo can sit like that
+# for months while looking healthy.
 #
 # The fix is ONE organization-level Dependabot private registry of type
-# `git_source` for https://github.com, authenticated with GH_TOKEN — the same
-# org-wide PAT the CI pipelines already use for `GOPRIVATE` fetches. Repos with
-# access use it automatically; no `registries:` block is needed in any
+# `git_source` for https://github.com, authenticated with a read-only token
+# that can reach every private module repo. Repos with access use it
+# automatically; no `registries:` block is needed in any
 # .github/dependabot.yml, so a repo that adopts a private module later is
 # covered without touching its config.
 #
@@ -33,22 +33,29 @@
 #   - jq
 #
 # Usage:
-#   ./scripts/setup-dependabot-private-registry.sh --token-env GH_TOKEN [options]
+#   ./scripts/setup-dependabot-private-registry.sh --token-env DEPENDABOT_PAT [options]
 #
-#   --token-env <VAR>       Env var holding the PAT to store (required)
+#   --token-env <VAR>       Env var holding the PAT to store (required).
+#                           Do NOT name it GH_TOKEN: gh would then use that
+#                           read-only PAT for this script's own admin calls
+#                           too, and they would fail with 403.
 #   --org <ORG>             GitHub org (default: NeuralTrust)
-#   --visibility <V>        all | private | selected (default: all, matching
-#                           the GH_TOKEN Actions org secret)
+#   --visibility <V>        all | private | selected (default: all). `private`
+#                           is least privilege when no public repo imports a
+#                           private module.
 #   --repos <A,B,C>         Repos for --visibility selected
 #   --module-repos <A,B>    Private repos the token must be able to read; the
-#                           script refuses to store a token that cannot
-#                           (default: event-schemas,TrustGuard,TrustLens,agentguardian-api)
+#                           script refuses to store a token that cannot.
+#                           LegacyGateway is in the default set because
+#                           LegacyGateway-EE reaches it through a `replace`
+#                           onto the TrustGate module path.
+#                           (default: event-schemas,TrustGuard,TrustLens,LegacyGateway,agentguardian-api)
 #   --dry-run               Show what would change, change nothing
 #
 # Example:
-#   export GH_TOKEN=github_pat_...
-#   ./scripts/setup-dependabot-private-registry.sh --token-env GH_TOKEN --dry-run
-#   ./scripts/setup-dependabot-private-registry.sh --token-env GH_TOKEN
+#   read -s DEPENDABOT_PAT && export DEPENDABOT_PAT
+#   ./scripts/setup-dependabot-private-registry.sh --token-env DEPENDABOT_PAT --dry-run
+#   ./scripts/setup-dependabot-private-registry.sh --token-env DEPENDABOT_PAT
 # =============================================================================
 
 set -euo pipefail
@@ -70,7 +77,7 @@ REGISTRY_TYPE="git_source"
 REGISTRY_USER="x-access-token"
 VISIBILITY="all"
 REPOS=""
-MODULE_REPOS="event-schemas,TrustGuard,TrustLens,agentguardian-api"
+MODULE_REPOS="event-schemas,TrustGuard,TrustLens,LegacyGateway,agentguardian-api"
 TOKEN_ENV=""
 DRY_RUN=false
 
@@ -82,7 +89,7 @@ while [[ $# -gt 0 ]]; do
     --repos)        REPOS="$2"; shift 2 ;;
     --module-repos) MODULE_REPOS="$2"; shift 2 ;;
     --dry-run)      DRY_RUN=true; shift ;;
-    -h|--help)      sed -n '3,50p' "$0"; exit 0 ;;
+    -h|--help)      sed -n '3,58p' "$0"; exit 0 ;;
     *)              error "Unknown argument: $1"; exit 1 ;;
   esac
 done

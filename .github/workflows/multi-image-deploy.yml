@@ -1,8 +1,14 @@
 # ==============================================================================
 # Reusable Workflow: Multi-Image Build & Deploy
 # ==============================================================================
-# Builds multiple Docker images in parallel using a matrix strategy, then
-# updates kustomization.yaml with COMMIT_SHA tags.
+# Builds multiple Docker images in parallel using a matrix strategy, scans each
+# one before it is pushed, then updates kustomization.yaml with COMMIT_SHA tags.
+#
+# Per matrix leg:  build -> scan -> push
+#
+# so an image with fixable CRITICAL/HIGH vulnerabilities never reaches the
+# registry and no overlay is updated to point at one. `accept_vulnerability_risk`
+# is the documented override for an urgent deploy; it applies to every image.
 #
 # Use this for services that produce multiple images (multi-target Dockerfiles,
 # separate backend/frontend, image variants, etc.).
@@ -87,6 +93,16 @@ on:
         required: false
         type: string
         default: 'inline'
+      accept_vulnerability_risk:
+        description: >-
+          Push and deploy every image even when the pre-push scan finds fixable
+          CRITICAL/HIGH vulnerabilities, reporting them as warnings. An
+          explicit, reviewable override — set it in the calling workflow so the
+          decision is visible in review, and clear it once the findings are
+          fixed.
+        required: false
+        type: boolean
+        default: false
     secrets:
       WIF_PROVIDER:
         required: true
@@ -121,6 +137,13 @@ jobs:
         image: ${{ fromJson(inputs.images) }}
       fail-fast: false
 
+    # Matrix job outputs are last-writer-wins. The composite only ever writes
+    # scan_blocked when it blocked, leaving it empty otherwise, so a passing leg
+    # cannot erase a blocked one.
+    outputs:
+      scan_result: ${{ steps.build.outputs.scan_result }}
+      scan_blocked: ${{ steps.build.outputs.scan_blocked }}
+
     permissions:
       contents: read
       id-token: write
@@ -145,6 +168,7 @@ jobs:
           create_credentials_file: false
 
       - name: Build and push Docker image
+        id: build
         uses: NeuralTrust/workflows/.github/actions/docker-build-push@main
         with:
           image_name: ${{ matrix.image.name }}
@@ -162,39 +186,23 @@ jobs:
           tag_prefix: ${{ matrix.image.tag_prefix }}
           tag_suffix: ${{ matrix.image.tag_suffix }}
           cache_mode: ${{ matrix.image.cache_mode || inputs.cache_mode }}
+          scan_before_push: 'true'
+          accept_vulnerability_risk: ${{ inputs.accept_vulnerability_risk }}
 
   # ============================================================================
-  # Job 2: Image Vulnerability Scan
+  # Job 2: Update Kustomization (only on develop/main branch pushes)
   # ============================================================================
-  # Fails this job on HIGH/CRITICAL fixable CVEs. Deploy is not gated — the
-  # kustomize job only needs build. The parent run is red when this fails.
-  scan:
-    name: Image Vulnerability Scan (${{ matrix.image.name }})
-    needs: build
-    strategy:
-      matrix:
-        image: ${{ fromJson(inputs.images) }}
-      fail-fast: false
-    uses: NeuralTrust/workflows/.github/workflows/image-scan.yml@main
-    permissions:
-      contents: read
-      id-token: write
-    with:
-      image_ref: '${{ inputs.registry }}/${{ inputs.gcp_project_id }}/${{ inputs.repository }}/${{ matrix.image.name }}:${{ matrix.image.tag_prefix }}${{ github.sha }}${{ matrix.image.tag_suffix }}'
-      block_vulnerability_findings: true
-      upload_sarif: false
-    secrets:
-      WIF_PROVIDER: ${{ secrets.WIF_PROVIDER }}
-      WIF_SERVICE_ACCOUNT: ${{ secrets.WIF_SERVICE_ACCOUNT }}
-
-  # ============================================================================
-  # Job 3: Update Kustomization (only on develop/main branch pushes)
-  # ============================================================================
+  # Each image is scanned inside its own build leg, before the push, so reaching
+  # this job already means every image passed. The scan_blocked check restates
+  # that invariant rather than relying on it.
   update-kustomization:
     name: Update Kustomization
     needs: build
     runs-on: ubuntu-latest
-    if: github.ref_type == 'branch' && (github.ref_name == 'develop' || github.ref_name == 'main')
+    if: >-
+      github.ref_type == 'branch'
+      && (github.ref_name == 'develop' || github.ref_name == 'main')
+      && needs.build.outputs.scan_blocked != 'true'
     timeout-minutes: 10
 
     permissions:
@@ -300,6 +308,8 @@ jobs:
       - name: Send Slack notification
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SCAN_BLOCKED: ${{ needs.build.outputs.scan_blocked }}
+          SCAN_RESULT: ${{ needs.build.outputs.scan_result }}
         run: |
           if [ -z "$SLACK_WEBHOOK_URL" ]; then
             echo "No Slack webhook configured, skipping"
@@ -308,11 +318,21 @@ jobs:
 
           BUILD="${{ needs.build.result }}"
           KUSTOMIZE="${{ needs.update-kustomization.result }}"
+          DETAIL=""
 
-          if [ "$BUILD" = "success" ] && { [ "$KUSTOMIZE" = "success" ] || [ "$KUSTOMIZE" = "skipped" ]; }; then
+          if [ "$SCAN_BLOCKED" = "true" ]; then
+            COLOR="#dc3545"
+            STATUS="Blocked by image scan"
+            EMOJI=":no_entry:"
+            DETAIL="fixable CRITICAL/HIGH vulnerabilities — image not pushed, overlay not updated"
+          elif [ "$BUILD" = "success" ] && { [ "$KUSTOMIZE" = "success" ] || [ "$KUSTOMIZE" = "skipped" ]; }; then
             COLOR="#36a64f"
             STATUS="Deployed"
             EMOJI=":white_check_mark:"
+            if [ "$SCAN_RESULT" = "accepted-risk" ]; then
+              COLOR="#f2c744"
+              DETAIL="accepted vulnerability risk — fixable CRITICAL/HIGH present"
+            fi
           else
             COLOR="#dc3545"
             STATUS="Failed"
@@ -334,6 +354,7 @@ jobs:
               --arg branch "${GITHUB_REF_NAME}" \
               --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
               --arg actor "${GITHUB_ACTOR}" \
+              --arg detail "$DETAIL" \
               '{
                 "attachments": [{
                   "color": $color,
@@ -347,12 +368,14 @@ jobs:
                     },
                     {
                       "type": "section",
-                      "fields": [
+                      "fields": ([
                         {"type": "mrkdwn", "text": ("*Images:*\n`" + $images + "`")},
                         {"type": "mrkdwn", "text": ("*Tag:*\n`" + ($tag | .[0:12]) + "`")},
                         {"type": "mrkdwn", "text": ("*Branch:*\n`" + $branch + "`")},
                         {"type": "mrkdwn", "text": ("*Workflow:*\n<" + $url + "|View Run>")}
-                      ]
+                      ] + (if $detail == "" then [] else [
+                        {"type": "mrkdwn", "text": ("*Reason:*\n" + $detail)}
+                      ] end))
                     }
                   ]
                 }]

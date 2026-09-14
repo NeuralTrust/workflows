@@ -1,5 +1,14 @@
+# With `scan_before_push: 'true'` the image is built once without pushing,
+# loaded into the local daemon and scanned there. Only a passing scan reaches
+# the push step, so an image carrying fixable CRITICAL/HIGH vulnerabilities
+# never exists in the registry — the gate runs on the exact artifact that would
+# have been pushed, not on a copy of it. The push step then rebuilds against
+# the same builder, so every layer is a local cache hit.
+
 name: Docker Build and Push
-description: Build and push a Docker image to Artifact Registry with shared NeuralTrust tagging.
+description: >-
+  Build and push a Docker image to Artifact Registry with shared NeuralTrust
+  tagging, optionally gated on a vulnerability scan of the built image.
 
 inputs:
   image_name:
@@ -98,6 +107,41 @@ inputs:
       Required when build_cache_stage is set.
     required: false
     default: ''
+  scan_before_push:
+    description: >-
+      Scan the image before it is pushed and fail the build on findings. The
+      image is built once with `load: true` instead of `push: true`, scanned in
+      the local daemon, and only then pushed. Off by default so existing
+      callers are unaffected.
+    required: false
+    default: 'false'
+  scan_severity:
+    description: Severities the pre-push scan gates on.
+    required: false
+    default: 'CRITICAL,HIGH'
+  scan_ignore_unfixed:
+    description: >-
+      Ignore vulnerabilities with no fix available. Findings nobody can act on
+      would otherwise block every push indefinitely.
+    required: false
+    default: 'true'
+  scan_scanners:
+    description: Trivy scanners for the pre-push scan.
+    required: false
+    default: 'vuln'
+  accept_vulnerability_risk:
+    description: >-
+      Report pre-push findings as warnings and push anyway. An explicit,
+      reviewable override for an urgent deploy — visible in the caller's
+      workflow, unlike a silent ignore file.
+    required: false
+    default: 'false'
+  trivyignore_path:
+    description: >-
+      Path to a Trivy ignore file. Empty auto-detects `.trivyignore` at the
+      repository root.
+    required: false
+    default: ''
 
 outputs:
   image_base:
@@ -124,6 +168,17 @@ outputs:
   has_git_tag:
     description: Whether a git ref tag was added.
     value: ${{ steps.meta.outputs.has_git_tag }}
+  scan_result:
+    description: >-
+      Pre-push scan outcome: passed, blocked or accepted-risk. Empty when
+      scan_before_push is off.
+    value: ${{ steps.scan_enforce.outputs.result }}
+  scan_blocked:
+    description: >-
+      'true' only when the pre-push scan blocked the push, empty otherwise, so
+      a passing matrix leg cannot overwrite a blocked one. Best-effort on the
+      blocking path — the job failing is the reliable signal.
+    value: ${{ steps.scan_enforce.outputs.blocked }}
 
 runs:
   using: composite
@@ -249,6 +304,145 @@ runs:
           echo "contexts=" >> "$GITHUB_OUTPUT"
           echo "::notice::${BUILDCACHE_REF} not found - building with a cold compiler cache"
         fi
+
+    # ---------------------------------------------------------------------
+    # Pre-push vulnerability gate. Phase 1 of a two-phase build: identical
+    # inputs to the push step below but exported to the local daemon instead of
+    # the registry, so the scan can inspect the real image before it can be
+    # pulled by anything. No `cache-to` here — inline cache is an image-exporter
+    # feature and the push step below writes it.
+    # ---------------------------------------------------------------------
+    - name: Build image for scan (not pushed)
+      if: inputs.scan_before_push == 'true'
+      uses: docker/build-push-action@v6
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.context }}/${{ inputs.dockerfile }}
+        target: ${{ inputs.build_target }}
+        push: false
+        load: true
+        tags: ${{ steps.meta.outputs.image_ref }}
+        build-args: ${{ steps.build-args.outputs.args }}
+        build-contexts: ${{ steps.build-cache.outputs.contexts }}
+        cache-from: |
+          type=registry,ref=${{ steps.meta.outputs.cache_ref }}
+          type=registry,ref=${{ steps.meta.outputs.latest_ref }}
+        secrets: |
+          GCP_ACCESS_TOKEN=${{ inputs.access_token }}
+          ${{ inputs.docker_secrets }}
+        provenance: false
+
+    - name: Detect Trivy ignore file
+      id: trivyignore
+      if: inputs.scan_before_push == 'true'
+      shell: bash
+      env:
+        TRIVYIGNORE_PATH: ${{ inputs.trivyignore_path }}
+      run: |
+        set -euo pipefail
+
+        if [ -n "$TRIVYIGNORE_PATH" ]; then
+          echo "path=${TRIVYIGNORE_PATH}" >> "$GITHUB_OUTPUT"
+        elif [ -f "${GITHUB_WORKSPACE}/.trivyignore" ]; then
+          echo "path=.trivyignore" >> "$GITHUB_OUTPUT"
+        else
+          echo "path=" >> "$GITHUB_OUTPUT"
+        fi
+
+    # JSON report first with exit-code 0, so the findings table renders even
+    # when the blocking table scan below fails.
+    - name: Scan built image (JSON report)
+      if: inputs.scan_before_push == 'true'
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        version: 'v0.71.0'
+        scan-type: 'image'
+        image-ref: ${{ steps.meta.outputs.image_ref }}
+        scanners: ${{ inputs.scan_scanners }}
+        severity: ${{ inputs.scan_severity }}
+        format: 'json'
+        output: ${{ runner.temp }}/trivy-image.json
+        exit-code: '0'
+        ignore-unfixed: ${{ inputs.scan_ignore_unfixed }}
+        vuln-type: 'os,library'
+        trivyignores: ${{ steps.trivyignore.outputs.path }}
+
+    - name: Report pre-push findings
+      if: always() && inputs.scan_before_push == 'true'
+      uses: NeuralTrust/workflows/.github/actions/trivy-report@main
+      with:
+        report_path: ${{ runner.temp }}/trivy-image.json
+        title: Trivy image scan (pre-push) — HIGH/CRITICAL
+        subtitle: "Image: `${{ steps.meta.outputs.image_ref }}`"
+        marker: trivy-image-prepush
+        comment_on_pr: 'false'
+
+    # The gate. continue-on-error so the enforce step below decides what a
+    # finding means — blocking, or an accepted risk that still pushes.
+    # SHA-pinned to the only post-incident-safe release, as in image-scan.yml.
+    - name: Scan built image (table gate)
+      id: scan_gate
+      if: inputs.scan_before_push == 'true'
+      continue-on-error: true
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        version: 'v0.71.0'
+        scan-type: 'image'
+        image-ref: ${{ steps.meta.outputs.image_ref }}
+        scanners: ${{ inputs.scan_scanners }}
+        severity: ${{ inputs.scan_severity }}
+        format: 'table'
+        exit-code: '1'
+        ignore-unfixed: ${{ inputs.scan_ignore_unfixed }}
+        vuln-type: 'os,library'
+        trivyignores: ${{ steps.trivyignore.outputs.path }}
+
+    - name: Enforce pre-push scan gate
+      id: scan_enforce
+      if: inputs.scan_before_push == 'true'
+      shell: bash
+      env:
+        GATE_OUTCOME: ${{ steps.scan_gate.outcome }}
+        ACCEPT_RISK: ${{ inputs.accept_vulnerability_risk }}
+        IMAGE_REF: ${{ steps.meta.outputs.image_ref }}
+        SCAN_SEVERITY: ${{ inputs.scan_severity }}
+      run: |
+        set -euo pipefail
+
+        # Outputs are written before any exit so a blocked build still reports
+        # why. They are best-effort on the blocking path: the composite aborts
+        # here, so a caller may see the job fail without reading scan_blocked.
+        # The ::error:: annotation below is what always states the cause.
+        emit() {
+          echo "result=$1" >> "$GITHUB_OUTPUT"
+          echo "blocked=$2" >> "$GITHUB_OUTPUT"
+        }
+
+        if [ "$GATE_OUTCOME" = "success" ]; then
+          emit passed ""
+          echo "No fixable ${SCAN_SEVERITY} vulnerabilities - pushing ${IMAGE_REF}"
+          exit 0
+        fi
+
+        if [ "$ACCEPT_RISK" = "true" ]; then
+          emit accepted-risk ""
+          echo "::warning title=Vulnerability risk accepted::Fixable ${SCAN_SEVERITY} vulnerabilities are present in ${IMAGE_REF} and the push is proceeding because accept_vulnerability_risk is set. Record each accepted CVE in .trivyignore with a revisit date."
+          exit 0
+        fi
+
+        emit blocked "true"
+        echo "::error title=Image scan blocked the push::${IMAGE_REF} has fixable ${SCAN_SEVERITY} vulnerabilities. Nothing was pushed to the registry."
+        {
+          echo "## Push blocked by image scan"
+          echo
+          echo "\`${IMAGE_REF}\` has fixable **${SCAN_SEVERITY}** vulnerabilities."
+          echo
+          echo "The image was **not** pushed and no deployment was updated."
+          echo
+          echo "Fix the findings listed above, or set \`accept_vulnerability_risk: true\`"
+          echo "on the calling workflow to push anyway and record the decision."
+        } >> "$GITHUB_STEP_SUMMARY"
+        exit 1
 
     - name: Build and push Docker image
       uses: docker/build-push-action@v6

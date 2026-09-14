@@ -87,6 +87,22 @@ on:
         required: false
         type: string
         default: 'inline'
+      scan_before_push:
+        description: >-
+          Scan the image before pushing and fail on fixable CRITICAL/HIGH
+          vulnerabilities, so nothing vulnerable reaches the registry. Off by
+          default: callers of this workflow scan elsewhere or deliberately run
+          warn-only.
+        required: false
+        type: boolean
+        default: false
+      accept_vulnerability_risk:
+        description: >-
+          With scan_before_push, report findings as warnings and push anyway.
+          An explicit, reviewable override for an urgent release.
+        required: false
+        type: boolean
+        default: false
     secrets:
       WIF_PROVIDER:
         required: true
@@ -107,6 +123,12 @@ on:
       image_tag:
         description: 'Image tag (prefix + commit SHA + suffix)'
         value: ${{ jobs.build-push.outputs.image_tag }}
+      scan_result:
+        description: 'Pre-push scan outcome: passed, blocked, accepted-risk, or empty when disabled'
+        value: ${{ jobs.build-push.outputs.scan_result }}
+      scan_blocked:
+        description: "'true' only when the pre-push scan blocked the push"
+        value: ${{ jobs.build-push.outputs.scan_blocked }}
 
 # No workflow-level `concurrency:` here — a reusable workflow cannot key a group
 # per calling job (github.run_id/workflow/ref are identical across sibling and
@@ -121,6 +143,8 @@ jobs:
     outputs:
       image_ref: ${{ steps.build.outputs.image_ref }}
       image_tag: ${{ steps.build.outputs.image_tag }}
+      scan_result: ${{ steps.build.outputs.scan_result }}
+      scan_blocked: ${{ steps.build.outputs.scan_blocked }}
 
     permissions:
       contents: read
@@ -162,6 +186,8 @@ jobs:
           extra_tags: ${{ inputs.extra_tags }}
           cache_mode: ${{ inputs.cache_mode }}
           include_git_tag: 'true'
+          scan_before_push: ${{ inputs.scan_before_push }}
+          accept_vulnerability_risk: ${{ inputs.accept_vulnerability_risk }}
 
       - name: Summary
         run: |

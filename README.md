@@ -8,8 +8,9 @@ Every repo follows the same standardized pipeline:
 
 ```
 ┌──────────────┐     ┌────────────────────────────────────────────────────────────────┐
-│ Push develop │────▶│ deploy.yml → build + image scan + kustomize + Slack notify     │──▶ Dev
-└──────────────┘     └────────────────────────────────────────────────────────────────┘
+│ Push develop │────▶│ deploy.yml → build → scan (blocks push) → push                 │──▶ Dev
+└──────────────┘     │            → kustomize → Slack notify                          │
+                     └────────────────────────────────────────────────────────────────┘
 
 ┌──────────────┐     ┌──────────────────────────────────────────────────────────────┐
 │ PR → main    │────▶│ ci.yml → Tests + SAST/security + metadata validation         │
@@ -760,15 +761,17 @@ jobs:
 | `overlay_dev_path` | No | `k8s/overlays/dev` | Dev overlay path |
 | `overlay_prod_path` | No | `k8s/overlays/prod` | Prod overlay path |
 | `free_disk_space` | No | `false` | Free ~30GB disk before build (needed for large base images like pytorch/cuda) |
+| `accept_vulnerability_risk` | No | `false` | Push and deploy despite fixable CRITICAL/HIGH findings, reporting them as warnings |
 
 ### What it does
 
-1. Builds Docker image with tags: `COMMIT_SHA`, `latest`, `cache`
+1. Builds the Docker image **without pushing it**, loading it into the local daemon
 2. Injects `APP_VERSION=<commit-sha>` as a build arg
-3. Scans the pushed image via [`image-scan.yml`](#docker-image-scanning) (CRITICAL/HIGH; scan job fails on findings, deploy is not gated)
-4. Updates `kustomization.yaml` (image tag) and `config.env` (`APPLICATION_VERSION`) in parallel with the scan
-5. Commits and pushes overlay updates (deploy workflows use `paths-ignore: k8s/**` so this does not retrigger builds)
-6. Sends Slack notification
+3. Scans that image with Trivy (CRITICAL/HIGH, fixable only). **Fixable findings stop the run here** — nothing is pushed and no overlay is updated. `accept_vulnerability_risk: true` downgrades this to a warning
+4. Pushes the image with tags `COMMIT_SHA`, `latest`, `cache` — the same builder, so every layer is a cache hit
+5. Updates `kustomization.yaml` (image tag) and `config.env` (`APPLICATION_VERSION`)
+6. Commits and pushes overlay updates (deploy workflows use `paths-ignore: k8s/**` so this does not retrigger builds)
+7. Sends Slack notification
 
 ---
 
@@ -801,6 +804,53 @@ jobs:
 | `build_args` | No | — | Extra build args |
 | `tag_prefix` | No | — | Tag prefix |
 | `tag_suffix` | No | — | Tag suffix |
+
+### Workflow Inputs
+
+Beyond `images`, `kustomize_images` and `gcp_project_id`, the same inputs as
+[Docker Build & Deploy](#docker-build--deploy) apply, including:
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `accept_vulnerability_risk` | No | `false` | Push and deploy every image despite fixable CRITICAL/HIGH findings, reporting them as warnings |
+
+Each image is scanned in its own matrix leg, before that image is pushed. One
+blocked image fails its leg and stops the kustomization update for the whole set.
+
+---
+
+## Build & Push Image
+
+**`build-push-image.yml`** — Standalone Docker build + push, for repos that
+compose the build with their own scan, release or deployment steps rather than
+using [Docker Build & Deploy](#docker-build--deploy).
+
+```yaml
+jobs:
+  build:
+    uses: NeuralTrust/workflows/.github/workflows/build-push-image.yml@main
+    with:
+      image_name: my-service
+      gcp_project_id: ${{ vars.DEV_GCP_PROJECT_ID }}
+    secrets:
+      WIF_PROVIDER: ${{ secrets.DEV_WIF_PROVIDER }}
+      WIF_SERVICE_ACCOUNT: ${{ secrets.DEV_WIF_SERVICE_ACCOUNT }}
+```
+
+Build, tagging and caching inputs match [Docker Build & Deploy](#docker-build--deploy).
+Two inputs govern scanning:
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `scan_before_push` | No | `false` | Scan the built image and refuse to push on fixable CRITICAL/HIGH findings |
+| `accept_vulnerability_risk` | No | `false` | With `scan_before_push`, report findings as warnings and push anyway |
+
+The gate is **off by default** here: callers of this workflow scan at another
+point in their pipeline or run warn-only by design. Turn it on unless something
+else already scans the image before it is deployed.
+
+Outputs: `image_ref`, `image_tag`, plus `scan_result` and `scan_blocked` when
+scanning is enabled.
 
 ---
 
@@ -1046,10 +1096,17 @@ Container images are scanned with **Trivy** via [`image-scan.yml`](#image-scan-r
 
 | Pipeline stage | Mode | Blocks? | What is scanned |
 |----------------|------|---------|-----------------|
-| **Dev deploy** (`docker-build-deploy.yml`, `multi-image-deploy.yml`) | Warn (`exit_code: 0`) | No | Image just pushed to dev registry |
+| **Dev deploy** (`docker-build-deploy.yml`, `multi-image-deploy.yml`) | Block, **before the push** | Yes | The locally built image, still in the runner's daemon |
 | **Prod release** (`release-promote.yml`, `multi-image-release-promote.yml`) | Block (`exit_code: 1`) | Yes | Dev source (promote) or rebuilt prod image (hotfix) |
 
-Both modes scan for **CRITICAL,HIGH** severity and count only **fixable** CVEs (`ignore_unfixed: true`).
+Every mode scans for **CRITICAL,HIGH** severity and counts only **fixable** CVEs (`ignore_unfixed: true`).
+
+The dev deploy gate runs inside the `docker-build-push` composite action rather than
+as a separate job, because a scan can only prevent a push if it happens before it.
+The image is built once with `load: true`, scanned in the daemon, and pushed only on
+a pass; the push step reuses the same builder, so it is a cache hit rather than a
+second build. Set `accept_vulnerability_risk: true` on the calling workflow to push
+anyway — a visible, reviewable override, unlike a silent `.trivyignore` entry.
 
 ### Image Scan (reusable workflow)
 
@@ -1083,6 +1140,10 @@ jobs:
 | `scanners` | `vuln` | Trivy scanners (`vuln` only by default; avoids secret false positives in dependency test fixtures) |
 | `trivyignore_path` | *(auto)* | Path to `.trivyignore`; auto-detected from repo root if present |
 | `upload_sarif` | `true` | Save the SARIF report as a downloadable run artifact (`trivy-image-sarif`). Name kept for backward compatibility — no longer a Security-tab upload |
+| `block_vulnerability_findings` | `false` | Block on findings regardless of `exit_code`. Equivalent to `exit_code: '1'`, expressed as intent |
+| `accept_vulnerability_risk` | `false` | Report findings as warnings and pass, overriding both of the above |
+| `pr_comment` | `true` | Post the findings table as a PR comment when running on a pull request |
+| `runner` | `ubuntu-latest` | Runner label for the scan job |
 | `registry` | `europe-west1-docker.pkg.dev` | Registry host for docker login |
 
 ### Suppressing false positives
@@ -1098,6 +1159,12 @@ Add a `.trivyignore` file at the repo root (same convention as `sast.yml`) to su
 Deploy and release workflows send Slack notifications on success or failure.
 
 **Auto-release** (`ai-release-bump.yml`) posts only on failure, with the reason the GitHub Release was not created (image-scan gate, missing dev image, publish error, or bump failure).
+
+**Deploy notifications** (`docker-build-deploy.yml`, `multi-image-deploy.yml`) report:
+- "Deployed" — built, scanned clean, pushed, overlay updated
+- "Deployed" in amber with *Reason: accepted vulnerability risk* — pushed with fixable CRITICAL/HIGH findings under `accept_vulnerability_risk`
+- "Blocked by image scan" — fixable CRITICAL/HIGH found; **image not pushed, overlay not updated**
+- "Failed" — anything else
 
 **Smart release notifications** include the strategy used:
 - "promoted from dev" (for develop→main releases)

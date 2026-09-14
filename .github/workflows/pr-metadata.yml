@@ -10,6 +10,11 @@
 # changes and have no single Linear issue, so the Linear-reference requirement is
 # skipped for them (title and description checks still apply).
 #
+# Pull requests opened by Dependabot are exempt from the same requirement: they
+# are generated from the dependency graph, so there is no issue to reference and
+# nothing a human can add to the branch name. Their titles and descriptions are
+# still validated.
+#
 # Usage:
 #   jobs:
 #     pr-metadata:
@@ -43,6 +48,7 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_BRANCH: ${{ github.event.pull_request.head.ref }}
           PR_BASE: ${{ github.event.pull_request.base.ref }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           python3 - <<'PYEOF'
           import os
@@ -66,11 +72,16 @@ jobs:
           body = os.environ.get("PR_BODY", "")
           branch = os.environ.get("PR_BRANCH", "")
           base = os.environ.get("PR_BASE", "")
+          author = os.environ.get("PR_AUTHOR", "")
           trimmed_body = body.strip()
 
           # Release PRs promoting develop -> main roll up many already-reviewed
           # PRs and have no single Linear issue to reference.
           is_release_pr = branch == "develop" and base == "main"
+
+          # Dependabot PRs are generated from the dependency graph: no issue
+          # exists to reference, and the branch name is not author-controlled.
+          is_dependabot_pr = author == "dependabot[bot]"
 
           errors = []
 
@@ -99,7 +110,8 @@ jobs:
               re.IGNORECASE,
           )
           searchable_metadata = "\n".join([title, body, branch])
-          if not is_release_pr and not linear_issue_pattern.search(searchable_metadata):
+          requires_linear_issue = not is_release_pr and not is_dependabot_pr
+          if requires_linear_issue and not linear_issue_pattern.search(searchable_metadata):
               errors.append(
                   "PR must reference a Linear issue in the title, description, or branch name. "
                   "Use an issue key like ENG-123 or a Linear issue URL."
