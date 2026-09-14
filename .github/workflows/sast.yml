@@ -418,8 +418,15 @@ jobs:
           fi
 
           echo "Auditing $(cat "$label_file") against the OSV database"
+
+          # The requirements above are fully pinned, so there is nothing to
+          # resolve. Without --no-deps --disable-pip, pip-audit builds a
+          # throwaway virtualenv and runs `pip install --dry-run`, which fails
+          # on any VCS or private-index requirement: pip tries to clone or
+          # download it with credentials this job does not have.
           status=0
-          pip-audit -r "$requirements" --format markdown > "$report" || status=$?
+          pip-audit -r "$requirements" --no-deps --disable-pip \
+            --format markdown > "$report" || status=$?
           cat "$report"
           exit "$status"
 

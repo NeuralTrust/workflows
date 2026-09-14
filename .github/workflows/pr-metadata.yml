@@ -74,7 +74,14 @@ jobs:
 
           errors = []
 
-          if not re.match(r"^(fix|feat|build|chore|ci|docs|style|refactor|perf|test):", title):
+          # Conventional Commits allows an optional scope and a `!` breaking-change
+          # marker after the type, e.g. `chore(deps):` or `feat!:`. Dependabot's
+          # configured prefixes are scoped, so a type-only pattern rejects every
+          # dependency PR it opens.
+          if not re.match(
+              r"^(fix|feat|build|chore|ci|docs|style|refactor|perf|test)(\([^()]+\))?!?:",
+              title,
+          ):
               errors.append(
                   "PR title must start with one of: "
                   + ", ".join(accepted_prefixes)
