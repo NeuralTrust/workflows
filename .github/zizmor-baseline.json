@@ -21,7 +21,7 @@
     "template-injection": 5
   },
   ".github/workflows/multi-image-release-promote.yml": {
-    "template-injection": 27
+    "template-injection": 18
   },
   ".github/workflows/multi-image-release.yml": {
     "template-injection": 2
@@ -30,10 +30,10 @@
     "template-injection": 8
   },
   ".github/workflows/release-promote.yml": {
-    "template-injection": 36
+    "template-injection": 30
   },
   ".github/workflows/sast.yml": {
-    "template-injection": 23
+    "template-injection": 18
   },
   ".github/workflows/seo-check.yml": {
     "template-injection": 3

@@ -395,35 +395,50 @@ jobs:
         run: uv pip install --system --no-config pip-audit
 
       - name: Run pip-audit
+        env:
+          AUDIT_PATH: ${{ inputs.pip_audit_path }}
         run: |
-          if [ -n "${{ inputs.pip_audit_path }}" ]; then
-            echo "Auditing from provided requirements file: ${{ inputs.pip_audit_path }}"
-            pip-audit -r "${{ inputs.pip_audit_path }}"
+          label_file="$RUNNER_TEMP/pip-audit-source.txt"
+          report="$RUNNER_TEMP/pip-audit.md"
+
+          if [ -n "$AUDIT_PATH" ]; then
+            printf '%s' "$AUDIT_PATH" > "$label_file"
+            requirements="$AUDIT_PATH"
           elif [ -f "uv.lock" ]; then
-            echo "uv.lock detected — exporting to requirements format for audit"
-            uv export --format requirements-txt --no-hashes --no-dev -o /tmp/audit-requirements.txt
-            pip-audit -r /tmp/audit-requirements.txt
+            printf '%s' 'uv.lock (exported)' > "$label_file"
+            requirements="$RUNNER_TEMP/audit-requirements.txt"
+            uv export --format requirements-txt --no-hashes --no-dev -o "$requirements"
           elif [ -f "requirements.txt" ]; then
-            echo "Auditing from requirements.txt"
-            pip-audit -r requirements.txt
+            printf '%s' 'requirements.txt' > "$label_file"
+            requirements="requirements.txt"
           else
-            echo "No requirements file found — auditing installed environment"
-            pip-audit
+            printf 'no Python dependency manifest found' > "$label_file"
+            echo "No requirements.txt, uv.lock or pip_audit_path — nothing to audit."
+            exit 0
           fi
+
+          echo "Auditing $(cat "$label_file") against the OSV database"
+          status=0
+          pip-audit -r "$requirements" --format markdown > "$report" || status=$?
+          cat "$report"
+          exit "$status"
 
       - name: Summary
         if: always()
         run: |
+          label_file="$RUNNER_TEMP/pip-audit-source.txt"
+          report="$RUNNER_TEMP/pip-audit.md"
           {
-            echo "## pip-audit Python Dependency Audit"
+            echo "## Python dependency audit (pip-audit)"
             echo ""
-            echo "Checked Python dependencies against the OSV vulnerability database."
-            if [ -n "${{ inputs.pip_audit_path }}" ]; then
-              echo "- **Source:** \`${{ inputs.pip_audit_path }}\`"
-            elif [ -f "uv.lock" ]; then
-              echo "- **Source:** \`uv.lock\` (exported)"
+            echo "- **Source:** $([ -s "$label_file" ] && cat "$label_file" || echo unknown)"
+            echo ""
+            # This job is continue-on-error, so the check stays green on a
+            # finding. The table below is where a vulnerability becomes visible.
+            if [ -s "$report" ]; then
+              cat "$report"
             else
-              echo "- **Source:** \`requirements.txt\` / installed environment"
+              echo "No known vulnerabilities found."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
