@@ -1,0 +1,206 @@
+# ==============================================================================
+# Org backup watchdog — is the weekly backup actually running?
+# ==============================================================================
+# WHY
+#   A workflow that fails sends you an email. A workflow that silently stops
+#   running (disabled cron, expired credential, deleted bucket, someone turned
+#   Actions off) sends you nothing — and you find out the day you need it.
+#
+# WHAT IT DOES
+#   Once a day, check the newest snapshot on three counts:
+#     1. it is younger than MAX_AGE_DAYS (the backup is still running at all)
+#     2. its manifest reports zero failures
+#     3. it holds at least MIN_REPOS repositories
+#   Checking only the date would be a trap: the backup writes its manifest even
+#   when it fails, so a run that saved 3 repos out of 123 still looks recent.
+#
+#   The backup runs weekly, so 8 days = one missed run plus a day of slack.
+#
+# HOW YOU HEAR ABOUT IT
+#   A failed run notifies whoever last edited this file's cron line, plus
+#   anyone watching the repo. Make sure that is more than one person.
+# ==============================================================================
+
+name: Org backup watchdog
+
+on:
+  schedule:
+    - cron: "0 8 * * *" # daily 08:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: org-backup-watchdog
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check the latest snapshot is fresh and complete
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # required to get a GCP token via Workload Identity Federation
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.BACKUP_WIF_PROVIDER }}
+          service_account: ${{ secrets.BACKUP_WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Check the latest snapshot is fresh and complete
+        env:
+          BUCKET: ${{ vars.BACKUP_GCS_BUCKET }}
+          MAX_AGE_DAYS: "8"
+          # A floor, not an exact count. It exists to catch a run that uploaded
+          # a handful of repos and stopped; raise it only after confirming the
+          # org really did shrink.
+          MIN_REPOS: "100"
+        run: |
+          set -euo pipefail
+
+          if [ -z "${BUCKET}" ]; then
+            echo "::error::Repository variable BACKUP_GCS_BUCKET is not set. See docs/backup/README.md."
+            exit 1
+          fi
+
+          bucket="${BUCKET#gs://}"
+          bucket="${bucket%/}"
+          prefix="gs://${bucket}/git-backups"
+
+          # Snapshot folders are named YYYY-MM-DD, so the last one in sort order
+          # is the newest. The `|| true` matters: under `pipefail` a grep that
+          # matches nothing would abort the script here and skip the diagnosis
+          # below, turning "no backups at all" into an unreadable error.
+          newest="$(
+            { gcloud storage ls "${prefix}/" 2>/dev/null || true; } \
+              | sed 's:/$::' \
+              | awk -F/ '{ print $NF }' \
+              | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' \
+              | sort \
+              | tail -1 \
+              || true
+          )"
+
+          if [ -z "${newest}" ]; then
+            echo "::error::No backup snapshots found in ${prefix}/. The backup has never succeeded."
+            exit 1
+          fi
+
+          age_days=$(( ( $(date -u +%s) - $(date -u -d "${newest}" +%s) ) / 86400 ))
+
+          # Freshness alone would be a trap. The backup job uploads its manifest
+          # BEFORE it exits non-zero, so a run that managed 3 repos out of 123
+          # still leaves a folder dated today. Read what the manifest says
+          # rather than trusting that the folder exists.
+          manifest="$(gcloud storage cat "${prefix}/${newest}/MANIFEST.txt" 2>/dev/null || true)"
+          if [ -z "${manifest}" ]; then
+            echo "::error::Snapshot ${newest} has no MANIFEST.txt — that backup never finished."
+            exit 1
+          fi
+
+          backed_up="$(printf '%s\n' "${manifest}" | awk '/^backed_up:/ { print $2 }')"
+          failed="$(printf '%s\n' "${manifest}" | awk '/^failed:/ { print $2 }')"
+
+          {
+            echo "### Org backup watchdog"
+            echo ""
+            echo "| Check | Value |"
+            echo "| --- | --- |"
+            echo "| Newest snapshot | \`${newest}\` |"
+            echo "| Age | ${age_days} days (limit ${MAX_AGE_DAYS}) |"
+            echo "| Repos backed up | ${backed_up:-?} (floor ${MIN_REPOS}) |"
+            echo "| Repos failed | ${failed:-?} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          problems=0
+
+          if [ "${age_days}" -gt "${MAX_AGE_DAYS}" ]; then
+            echo "::error::Newest backup is ${age_days} days old (limit ${MAX_AGE_DAYS}). The weekly backup is NOT running."
+            problems=$(( problems + 1 ))
+          fi
+
+          if [ "${failed:-1}" -ne 0 ]; then
+            echo "::error::Snapshot ${newest} reports ${failed:-unknown} failed repository(ies) — it is incomplete."
+            problems=$(( problems + 1 ))
+          fi
+
+          if [ "${backed_up:-0}" -lt "${MIN_REPOS}" ]; then
+            echo "::error::Snapshot ${newest} holds only ${backed_up:-0} repositories, expected at least ${MIN_REPOS}."
+            problems=$(( problems + 1 ))
+          fi
+
+          if [ "${problems}" -gt 0 ]; then
+            exit 1
+          fi
+
+          echo "Backup is fresh (${age_days}d) and complete (${backed_up} repos, 0 failed)."
+
+  # ----------------------------------------------------------------------------
+  # Tell someone. GitHub's own notification for a scheduled workflow goes to
+  # whoever last edited the cron line — one person, chosen by accident of git
+  # history. Opening an issue and @-mentioning the owners emails all of them,
+  # needs no SMTP credentials or third-party action, and leaves a trail that is
+  # harder to ignore than an email.
+  #
+  # One open issue is reused rather than filing a new one every run, so a
+  # backup that stays broken does not bury anyone's inbox.
+  # ----------------------------------------------------------------------------
+  notify:
+    name: Report a stale or incomplete backup
+    needs: [check]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Open or update the alert issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          OWNERS: "@vgmartinez @kadubarral-nt @telmolivella2"
+          TITLE: "Org backup is stale or incomplete"
+        run: |
+          set -euo pipefail
+
+          body="$(cat <<EOF
+          The daily watchdog found a problem with the most recent backup snapshot. **Either the weekly backup has stopped running, or it ran and did not finish.**
+          
+          - Failed check: ${RUN_URL}
+          
+          The run summary above says which of the three checks failed:
+          
+          1. **Too old** — the weekly backup is not running. Check that Actions is enabled and that the \`Org backup\` schedule has not been disabled (GitHub disables schedules on repos with no activity for 60 days).
+          2. **Reports failures** — the backup ran but some repositories did not make it. Open the latest \`Org backup\` run.
+          3. **Too few repositories** — the backup stopped partway. Same place to look.
+          
+          Close this issue once a fresh \`Org backup\` run has succeeded.
+          
+          Runbook: \`docs/backup/README.md\`
+          
+          ${OWNERS}
+          EOF
+          )"
+
+          existing="$(
+            gh issue list --repo "${REPO}" --state open --limit 100 \
+              --json number,title \
+              --jq '[.[] | select(.title == env.TITLE)][0].number // empty'
+          )"
+
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --repo "${REPO}" --body "${body}"
+            echo "Commented on existing issue #${existing}"
+          else
+            gh issue create --repo "${REPO}" --title "${TITLE}" --body "${body}"
+          fi

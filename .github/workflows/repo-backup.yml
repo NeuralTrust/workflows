@@ -1,0 +1,465 @@
+# ==============================================================================
+# Weekly org backup — every NeuralTrust repo into a GCS bucket
+# ==============================================================================
+# WHY
+#   If the GitHub org is lost (account compromise, billing lapse, a deleted
+#   repo, a force-push that rewrites history), the code is gone. This copies
+#   every repository into a Google Cloud Storage bucket that lives in its own
+#   GCP project, so losing GitHub does not lose the code.
+#
+# HOW
+#   For each repo:  mirror-clone -> git bundle -> verify -> upload to GCS.
+#   A bundle is the whole repository (all branches, tags and history) in ONE
+#   file, and it is restored with a plain `git clone repo.bundle`. No special
+#   tooling needed, ever.
+#
+# SIZE
+#   The whole org is ~0.65 GB across ~123 repos, so one runner does the lot
+#   sequentially in ~15 min. There is no need for a job-per-repo matrix.
+#
+#   A second, independent job exports the GitHub metadata that is NOT in git:
+#   pull requests, issues and their comments. That is where the *reasoning*
+#   behind each change lives. It runs in parallel, so if the GitHub API has a
+#   bad day the code bundles still complete.
+#
+# WHAT IS *NOT* BACKED UP
+#   Wikis (empty across the org), Actions secret VALUES (the API never returns
+#   them) and Git LFS objects (no repo uses LFS - see docs/backup/README.md).
+#
+# SETUP
+#   docs/backup/README.md — one script, four secrets, ~45 minutes.
+# ==============================================================================
+
+name: Org backup
+
+on:
+  schedule:
+    - cron: "0 3 * * 1" # Mondays 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never run two backups at once, and never cancel one that is in flight:
+# a half-written snapshot is worse than a late one.
+concurrency:
+  group: org-backup
+  cancel-in-progress: false
+
+jobs:
+  # Both jobs below write into the same dated folder. Resolving the date once
+  # here stops a run started just before midnight UTC from splitting itself
+  # across two snapshots.
+  setup:
+    name: Resolve snapshot date
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      backup_date: ${{ steps.date.outputs.backup_date }}
+    steps:
+      - name: Resolve date
+        id: date
+        run: echo "backup_date=$(date -u +%Y-%m-%d)" >> "${GITHUB_OUTPUT}"
+
+  backup:
+    name: Back up every repository
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write # required to get a GCP token via Workload Identity Federation
+
+    steps:
+      # A read-only GitHub App, not a PAT: it cannot write anything, it is
+      # scoped to this org, and it does not expire on someone's calendar.
+      - name: Mint GitHub App token
+        id: app_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.BACKUP_APP_ID }}
+          private-key: ${{ secrets.BACKUP_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }} # zizmor: ignore[github-app]
+          permission-contents: read
+          permission-metadata: read
+
+      # Workload Identity Federation — no JSON service-account key anywhere.
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.BACKUP_WIF_PROVIDER }}
+          service_account: ${{ secrets.BACKUP_WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Mirror, bundle and upload every repository
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          ORG: ${{ github.repository_owner }}
+          BUCKET: ${{ vars.BACKUP_GCS_BUCKET }}
+          BACKUP_DATE: ${{ needs.setup.outputs.backup_date }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${BUCKET}" ]; then
+            echo "::error::Repository variable BACKUP_GCS_BUCKET is not set. See docs/backup/README.md."
+            exit 1
+          fi
+
+          # Accept both "my-bucket" and "gs://my-bucket".
+          bucket="${BUCKET#gs://}"
+          bucket="${bucket%/}"
+
+          dest="gs://${bucket}/git-backups/${BACKUP_DATE}"
+          work="${RUNNER_TEMP}/backup"
+          mkdir -p "${work}"
+
+          # Send the token as an Authorization header rather than putting it in
+          # the clone URL, so it cannot leak into logs or .git/config.
+          auth="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\n')"
+          echo "::add-mask::${auth}"
+
+          # Every repo in the org. Archived ones are INCLUDED on purpose — they
+          # are the likeliest to be deleted. Forks are skipped; they have an
+          # upstream to restore from.
+          # List into a file rather than `mapfile < <(...)`: process
+          # substitution discards the exit status, so a paginated call that died
+          # halfway would quietly yield a short list and this job would call
+          # itself complete while missing repositories.
+          if ! gh api --paginate "orgs/${ORG}/repos?per_page=100&type=all" \
+               --jq '.[] | select(.fork == false) | .name' | sort > "${work}/repos.txt"; then
+            echo "::error::Could not list the repositories of '${ORG}'. Check the GitHub App installation."
+            exit 1
+          fi
+          mapfile -t repos < "${work}/repos.txt"
+
+          total="${#repos[@]}"
+          if [ "${total}" -eq 0 ]; then
+            echo "::error::Listed 0 repositories for org '${ORG}'. Check the GitHub App installation."
+            exit 1
+          fi
+          echo "Found ${total} repositories to back up."
+
+          ok=0
+          skipped=0
+          failed=0
+          : > "${work}/checksums.sha256"
+
+          for repo in "${repos[@]}"; do
+            mirror="${work}/${repo}.git"
+            bundle="${work}/${repo}.bundle"
+
+            if ! git -c "http.https://github.com/.extraheader=Authorization: Basic ${auth}" \
+                 clone --quiet --mirror "https://github.com/${ORG}/${repo}.git" "${mirror}"; then
+              echo "::error::clone failed: ${repo}"
+              failed=$(( failed + 1 ))
+              rm -rf "${mirror}"
+              continue
+            fi
+
+            # An empty repo has no refs and `git bundle` refuses to create one.
+            # Nothing to lose, so record it and move on.
+            if [ -z "$(git -C "${mirror}" for-each-ref)" ]; then
+              echo "skipped (no commits): ${repo}"
+              skipped=$(( skipped + 1 ))
+              rm -rf "${mirror}"
+              continue
+            fi
+
+            # Verify before upload. A bundle that does not verify is not a backup.
+            if ! git -C "${mirror}" bundle create "${bundle}" --all --quiet \
+               || ! git -C "${mirror}" bundle verify "${bundle}" >/dev/null 2>&1; then
+              echo "::error::bundle failed verification: ${repo}"
+              failed=$(( failed + 1 ))
+              rm -rf "${mirror}" "${bundle}"
+              continue
+            fi
+
+            if ! gcloud storage cp --quiet "${bundle}" "${dest}/${repo}.bundle"; then
+              echo "::error::upload failed: ${repo}"
+              failed=$(( failed + 1 ))
+              rm -rf "${mirror}" "${bundle}"
+              continue
+            fi
+
+            sha256sum "${bundle}" | sed "s|${work}/||" >> "${work}/checksums.sha256"
+            ok=$(( ok + 1 ))
+
+            # Delete as we go so the runner disk stays flat.
+            rm -rf "${mirror}" "${bundle}"
+          done
+
+          # checksums.sha256 is a plain `sha256sum -c` file, so a restore can be
+          # verified with one command and no extra tooling.
+          gcloud storage cp --quiet "${work}/checksums.sha256" "${dest}/checksums.sha256"
+
+          {
+            echo "backup_date:  ${BACKUP_DATE}"
+            echo "organization: ${ORG}"
+            echo "backed_up:    ${ok}"
+            echo "skipped:      ${skipped} (repositories with no commits)"
+            echo "failed:       ${failed}"
+            echo "workflow_run: ${RUN_URL}"
+            echo ""
+            echo "Restore:  gcloud storage cp ${dest}/<repo>.bundle . && git clone <repo>.bundle <repo>"
+            echo "Verify:   sha256sum -c checksums.sha256"
+          } > "${work}/MANIFEST.txt"
+          gcloud storage cp --quiet "${work}/MANIFEST.txt" "${dest}/MANIFEST.txt"
+
+          {
+            echo "### Org backup — ${BACKUP_DATE}"
+            echo ""
+            echo "| Result | Repos |"
+            echo "| --- | --- |"
+            echo "| Backed up | ${ok} |"
+            echo "| Skipped (no commits) | ${skipped} |"
+            echo "| Failed | ${failed} |"
+            echo ""
+            echo "Snapshot: \`${dest}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [ "${failed}" -gt 0 ]; then
+            echo "::error::${failed} repository(ies) failed. The snapshot is incomplete."
+            exit 1
+          fi
+
+          echo "Backed up ${ok} repositories to ${dest}"
+
+  # ----------------------------------------------------------------------------
+  # Everything GitHub knows that git does not: pull requests, issues and the
+  # discussion on them. The code is safe in the bundles above; this is the
+  # *reasoning* behind it — ~10k PRs' worth.
+  #
+  # Runs in PARALLEL with the backup job on purpose. A GitHub API hiccup here
+  # must never stop the code bundles from completing.
+  # ----------------------------------------------------------------------------
+  metadata:
+    name: Export pull requests and issues
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write # required to get a GCP token via Workload Identity Federation
+
+    steps:
+      - name: Mint GitHub App token
+        id: app_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.BACKUP_APP_ID }}
+          private-key: ${{ secrets.BACKUP_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }} # zizmor: ignore[github-app]
+          permission-contents: read
+          permission-metadata: read
+          permission-issues: read
+          permission-pull-requests: read
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.BACKUP_WIF_PROVIDER }}
+          service_account: ${{ secrets.BACKUP_WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Export and upload metadata
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          ORG: ${{ github.repository_owner }}
+          BUCKET: ${{ vars.BACKUP_GCS_BUCKET }}
+          BACKUP_DATE: ${{ needs.setup.outputs.backup_date }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${BUCKET}" ]; then
+            echo "::error::Repository variable BACKUP_GCS_BUCKET is not set. See docs/backup/README.md."
+            exit 1
+          fi
+
+          bucket="${BUCKET#gs://}"
+          bucket="${bucket%/}"
+          dest="gs://${bucket}/git-backups/${BACKUP_DATE}/github-metadata"
+          work="${RUNNER_TEMP}/metadata"
+          mkdir -p "${work}"
+
+          # List into a file rather than `mapfile < <(...)`: process
+          # substitution discards the exit status, so a paginated call that died
+          # halfway would quietly yield a short list and this job would call
+          # itself complete while missing repositories.
+          if ! gh api --paginate "orgs/${ORG}/repos?per_page=100&type=all" \
+               --jq '.[] | select(.fork == false) | .name' | sort > "${work}/repos.txt"; then
+            echo "::error::Could not list the repositories of '${ORG}'. Check the GitHub App installation."
+            exit 1
+          fi
+          mapfile -t repos < "${work}/repos.txt"
+
+          if [ "${#repos[@]}" -eq 0 ]; then
+            echo "::error::Listed 0 repositories for org '${ORG}'. Check the GitHub App installation."
+            exit 1
+          fi
+
+          # Fetch one repo-wide endpoint into a file.
+          #
+          # There is deliberately no "expected failure" case here. A repo with
+          # issues disabled answers 200 with an empty list, so anything that
+          # actually fails is real — most likely the App missing the Issues or
+          # Pull requests scope. Swallowing that would export 123 empty files
+          # and report success, which is worse than no backup at all.
+          fetch() {
+            if ! gh api --paginate "$1" --slurp > "$2"; then
+              echo "::error::GitHub API call failed: $1"
+              return 1
+            fi
+          }
+
+          ok=0
+          failed=0
+
+          for repo in "${repos[@]}"; do
+            base="repos/${ORG}/${repo}"
+
+            # Four repo-WIDE endpoints. Asking per pull request would be ~10k
+            # requests against a 5k/hour budget; this is a handful per repo.
+            if ! fetch "${base}/pulls?state=all&per_page=100"  "${work}/pulls.json" \
+               || ! fetch "${base}/issues?state=all&per_page=100" "${work}/issues.json" \
+               || ! fetch "${base}/issues/comments?per_page=100"  "${work}/comments.json" \
+               || ! fetch "${base}/pulls/comments?per_page=100"   "${work}/review.json"; then
+              failed=$(( failed + 1 ))
+              continue
+            fi
+
+            # Keep what a human needs to reconstruct the reasoning, drop the
+            # rest: raw GitHub JSON is mostly URL boilerplate. For `app` this
+            # turns 79 MB into 9 MB, and 2 MB once gzipped.
+            if ! jq -n \
+                 --arg repo "${repo}" \
+                 --arg exported_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                 --slurpfile p "${work}/pulls.json" \
+                 --slurpfile i "${work}/issues.json" \
+                 --slurpfile c "${work}/comments.json" \
+                 --slurpfile r "${work}/review.json" \
+                 '{
+                    repository: $repo,
+                    exported_at: $exported_at,
+                    pull_requests: [ $p[0][][]? | {
+                      number, title, body, state, draft, author: .user.login,
+                      created_at, merged_at, closed_at,
+                      base: .base.ref, head: .head.ref, merge_commit_sha,
+                      labels: [.labels[].name], url: .html_url } ],
+                    issues: [ $i[0][][]? | select(.pull_request == null) | {
+                      number, title, body, state, author: .user.login,
+                      created_at, closed_at,
+                      labels: [.labels[].name], url: .html_url } ],
+                    comments: [ $c[0][][]? | {
+                      issue: (.issue_url | split("/") | last | tonumber),
+                      author: .user.login, created_at, body, url: .html_url } ],
+                    review_comments: [ $r[0][][]? | {
+                      pull: (.pull_request_url | split("/") | last | tonumber),
+                      author: .user.login, path, line, created_at, body,
+                      url: .html_url } ]
+                  }' | gzip -9 > "${work}/${repo}.json.gz"; then
+              echo "::error::metadata export failed: ${repo}"
+              failed=$(( failed + 1 ))
+              rm -f "${work}/${repo}.json.gz"
+              continue
+            fi
+
+            if ! gcloud storage cp --quiet "${work}/${repo}.json.gz" "${dest}/${repo}.json.gz"; then
+              echo "::error::metadata upload failed: ${repo}"
+              failed=$(( failed + 1 ))
+              rm -f "${work}/${repo}.json.gz"
+              continue
+            fi
+
+            ok=$(( ok + 1 ))
+            rm -f "${work}/${repo}.json.gz"
+          done
+
+          {
+            echo "### GitHub metadata — ${BACKUP_DATE}"
+            echo ""
+            echo "| Result | Repos |"
+            echo "| --- | --- |"
+            echo "| Exported | ${ok} |"
+            echo "| Failed | ${failed} |"
+            echo ""
+            echo "Read one back:"
+            echo "\`\`\`"
+            echo "gcloud storage cat ${dest}/app.json.gz | gunzip | jq '.pull_requests[0]'"
+            echo "\`\`\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [ "${failed}" -gt 0 ]; then
+            echo "::error::${failed} repository(ies) failed to export. The git bundles are unaffected."
+            exit 1
+          fi
+
+          echo "Exported metadata for ${ok} repositories to ${dest}"
+
+  # ----------------------------------------------------------------------------
+  # Tell someone. GitHub's own notification for a scheduled workflow goes to
+  # whoever last edited the cron line — one person, chosen by accident of git
+  # history. Opening an issue and @-mentioning the owners emails all of them,
+  # needs no SMTP credentials or third-party action, and leaves a trail that is
+  # harder to ignore than an email.
+  #
+  # One open issue is reused rather than filing a new one every run, so a
+  # backup that stays broken does not bury anyone's inbox.
+  # ----------------------------------------------------------------------------
+  notify:
+    name: Report a failed backup
+    needs: [setup, backup, metadata]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Open or update the alert issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          OWNERS: "@vgmartinez @kadubarral-nt @telmolivella2"
+          TITLE: "Org backup failed"
+          BACKUP_DATE: ${{ needs.setup.outputs.backup_date }}
+        run: |
+          set -euo pipefail
+
+          body="$(cat <<EOF
+          The weekly org backup did not complete. **The code in GCS is only as new as the last snapshot that succeeded.**
+          
+          - Snapshot: \`${BACKUP_DATE}\`
+          - Failed run: ${RUN_URL}
+          
+          What to check, in order:
+          
+          1. Open the run above and read which step failed — the job logs name the repository and the API call.
+          2. GitHub App: secrets \`BACKUP_APP_ID\` and \`BACKUP_APP_PRIVATE_KEY\`. The App needs **Contents, Metadata, Issues and Pull requests**, all read-only. A missing scope is the most common cause.
+          3. GCP: secrets \`BACKUP_WIF_PROVIDER\` and \`BACKUP_WIF_SERVICE_ACCOUNT\`, and the variable \`BACKUP_GCS_BUCKET\`.
+          4. Re-run the workflow once the cause is fixed, then close this issue.
+          
+          Runbook: \`docs/backup/README.md\`
+          
+          ${OWNERS}
+          EOF
+          )"
+
+          existing="$(
+            gh issue list --repo "${REPO}" --state open --limit 100 \
+              --json number,title \
+              --jq '[.[] | select(.title == env.TITLE)][0].number // empty'
+          )"
+
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --repo "${REPO}" --body "${body}"
+            echo "Commented on existing issue #${existing}"
+          else
+            gh issue create --repo "${REPO}" --title "${TITLE}" --body "${body}"
+          fi
