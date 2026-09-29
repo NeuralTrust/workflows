@@ -56,6 +56,16 @@ on:
         required: false
         type: string
         default: 'CRITICAL,HIGH'
+      vuln_severity_source:
+        description: >
+          Trivy --vuln-severity-source: the order of data sources a finding's
+          severity is taken from (first match wins). The default ranks sources
+          by how often their rating equals the highest any source gives, so a
+          CVE one vendor rates HIGH is not reported LOW because a more lenient
+          source answered first. Use `auto` for Trivy's default.
+        required: false
+        type: string
+        default: 'amazon,bitnami,oracle-oval,alma,rocky,nvd,photon,julia,azure,ghsa,redhat,ubuntu,auto'
       block_vulnerability_findings:
         description: >
           When true, matching vulnerabilities fail the job. This is the preferred
@@ -147,6 +157,8 @@ jobs:
     name: Trivy Image Scan
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 25
+    env:
+      TRIVY_VULN_SEVERITY_SOURCE: ${{ inputs.vuln_severity_source }}
 
     steps:
       - name: Checkout code

@@ -67,6 +67,16 @@ on:
         required: false
         type: string
         default: 'CRITICAL,HIGH'
+      trivy_vuln_severity_source:
+        description: >
+          Trivy --vuln-severity-source: the order of data sources a finding's
+          severity is taken from (first match wins). The default ranks sources
+          by how often their rating equals the highest any source gives, so a
+          CVE one vendor rates HIGH is not reported LOW because a more lenient
+          source answered first. Use `auto` for Trivy's default.
+        required: false
+        type: string
+        default: 'amazon,bitnami,oracle-oval,alma,rocky,nvd,photon,julia,azure,ghsa,redhat,ubuntu,auto'
       trivy_exit_code:
         description: 'Exit code when vulnerabilities are found (1=fail, 0=warn)'
         required: false
@@ -264,6 +274,8 @@ jobs:
     name: Vulnerability Scan (Trivy)
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      TRIVY_VULN_SEVERITY_SOURCE: ${{ inputs.trivy_vuln_severity_source }}
 
     steps:
       - name: Checkout code

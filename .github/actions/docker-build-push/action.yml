@@ -119,6 +119,14 @@ inputs:
     description: Severities the pre-push scan gates on.
     required: false
     default: 'CRITICAL,HIGH'
+  scan_vuln_severity_source:
+    description: >-
+      Trivy --vuln-severity-source for the pre-push scan: the order of data
+      sources a finding's severity is taken from (first match wins). The
+      default ranks sources by how often their rating equals the highest any
+      source gives. Use `auto` for Trivy's default.
+    required: false
+    default: 'amazon,bitnami,oracle-oval,alma,rocky,nvd,photon,julia,azure,ghsa,redhat,ubuntu,auto'
   scan_ignore_unfixed:
     description: >-
       Ignore vulnerabilities with no fix available. Findings nobody can act on
@@ -354,6 +362,8 @@ runs:
     - name: Scan built image (JSON report)
       if: inputs.scan_before_push == 'true'
       uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      env:
+        TRIVY_VULN_SEVERITY_SOURCE: ${{ inputs.scan_vuln_severity_source }}
       with:
         version: 'v0.71.0'
         scan-type: 'image'
@@ -385,6 +395,8 @@ runs:
       if: inputs.scan_before_push == 'true'
       continue-on-error: true
       uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      env:
+        TRIVY_VULN_SEVERITY_SOURCE: ${{ inputs.scan_vuln_severity_source }}
       with:
         version: 'v0.71.0'
         scan-type: 'image'

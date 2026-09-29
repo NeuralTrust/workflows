@@ -104,6 +104,15 @@ on:
           k8s/**
           .github/**
           CHANGELOG.md
+      vuln_severity_source:
+        description: >
+          Trivy --vuln-severity-source for the promote scan: the order of data
+          sources a finding's severity is taken from (first match wins). The
+          default ranks sources by how often their rating equals the highest any
+          source gives. Use `auto` for Trivy's default.
+        required: false
+        type: string
+        default: 'amazon,bitnami,oracle-oval,alma,rocky,nvd,photon,julia,azure,ghsa,redhat,ubuntu,auto'
     secrets:
       WIF_PROVIDER:
         required: true
@@ -369,6 +378,8 @@ jobs:
         # malicious commits. Pin trivy itself to a release whose artifacts still
         # exist — the action's old default (v0.65.0) was deleted and now 404s.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_VULN_SEVERITY_SOURCE: ${{ inputs.vuln_severity_source }}
         with:
           version: 'v0.71.0'
           scan-type: image
