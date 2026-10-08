@@ -51,6 +51,13 @@ on:
         required: false
         type: string
         default: 'k8s/overlays/prod'
+      deploy:
+        description: >-
+          Update production overlays after publishing the images. Disable for
+          separately reviewed staged GitOps deployment of the published digests.
+        required: false
+        type: boolean
+        default: true
       commit_message_prefix:
         description: 'Prefix for the kustomization commit message'
         required: false
@@ -158,6 +165,7 @@ jobs:
   update-kustomization:
     name: Update Kustomization (${{ github.ref_name }})
     needs: build
+    if: inputs.deploy
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -235,6 +243,7 @@ jobs:
       - name: Send Slack notification
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RELEASE_DEPLOY_ENABLED: ${{ inputs.deploy }}
         run: |
           if [ -z "$SLACK_WEBHOOK_URL" ]; then
             echo "No Slack webhook configured, skipping"
@@ -248,6 +257,9 @@ jobs:
             COLOR="#36a64f"
             STATUS="Released"
             EMOJI=":white_check_mark:"
+            if [ "$RELEASE_DEPLOY_ENABLED" = "false" ]; then
+              STATUS="Images published; staged deployment pending"
+            fi
           else
             COLOR="#dc3545"
             STATUS="Failed"

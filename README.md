@@ -859,6 +859,10 @@ scanning is enabled.
 
 **`multi-image-release.yml`** — Always rebuilds. Use `multi-image-release-promote.yml` instead.
 
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `deploy` | No | `true` | Set `false` to publish the release images without changing production overlays; qualify and deploy those digests through separately reviewed regional stages |
+
 ---
 
 ## Python Package Publish
