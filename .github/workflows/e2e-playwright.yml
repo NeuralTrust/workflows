@@ -10,6 +10,12 @@
 # Default: pull stable prod test image (main → prod registry), even for dev URLs.
 # Opt-in develop channel for experimental test changes (develop → dev registry).
 #
+# Both channels authenticate as the DEV service account (DEV_WIF_*), which has
+# artifactregistry.reader on the prod nt-docker repo. E2E runs on any branch and
+# on schedules, so it must not use the prod release SA: that SA is only mintable
+# from allowlisted repos on main / v* tags. PROD_WIF_* secrets are accepted for
+# backward compatibility and ignored.
+#
 # Usage:
 #   jobs:
 #     e2e:
@@ -25,8 +31,8 @@
 #         TWINGATE_SERVICE_KEY: ${{ secrets.TWINGATE_SERVICE_KEY }}
 #         ALLURE_USER: ${{ secrets.ALLURE_USER }}
 #         ALLURE_PASS: ${{ secrets.ALLURE_PASS }}
-#         PROD_WIF_PROVIDER: ${{ secrets.PROD_WIF_PROVIDER }}
-#         PROD_WIF_SERVICE_ACCOUNT: ${{ secrets.PROD_WIF_SERVICE_ACCOUNT }}
+#         DEV_WIF_PROVIDER: ${{ secrets.DEV_WIF_PROVIDER }}
+#         DEV_WIF_SERVICE_ACCOUNT: ${{ secrets.DEV_WIF_SERVICE_ACCOUNT }}
 #         E2E_SECRETS_JSON: ${{ secrets.E2E_APP_SECRETS_JSON }}
 # ==============================================================================
 
@@ -99,7 +105,7 @@ on:
         type: string
         default: ''
       prod_gcp_project_id:
-        description: 'Prod GCP project ID for the e2e-tests prod image channel'
+        description: 'Prod GCP project ID for the e2e-tests prod image channel (default: caller org var PROD_GCP_PROJECT_ID)'
         required: false
         type: string
         default: ''
@@ -149,8 +155,10 @@ on:
       DEV_WIF_SERVICE_ACCOUNT:
         required: false
       PROD_WIF_PROVIDER:
+        description: 'Deprecated and ignored — both channels pull with DEV_WIF_* (ENG-1663)'
         required: false
       PROD_WIF_SERVICE_ACCOUNT:
+        description: 'Deprecated and ignored — both channels pull with DEV_WIF_* (ENG-1663)'
         required: false
       WIF_PROVIDER:
         description: 'Deprecated — use DEV_WIF_* / PROD_WIF_* with e2e_tests_channel'
@@ -187,24 +195,28 @@ jobs:
       REGISTRY: europe-west1-docker.pkg.dev
       REPOSITORY: nt-docker
     steps:
+      # Dev SA for both channels: it reads dev nt-docker (develop) and holds
+      # artifactregistry.reader on prod nt-docker (prod).
       - name: Authenticate to GCP (pull e2e-tests image)
         uses: google-github-actions/auth@v3
         with:
-          workload_identity_provider: ${{ inputs.e2e_tests_channel == 'develop' && (secrets.DEV_WIF_PROVIDER || secrets.WIF_PROVIDER) || (secrets.PROD_WIF_PROVIDER || secrets.WIF_PROVIDER) }}
-          service_account: ${{ inputs.e2e_tests_channel == 'develop' && (secrets.DEV_WIF_SERVICE_ACCOUNT || secrets.WIF_SERVICE_ACCOUNT) || (secrets.PROD_WIF_SERVICE_ACCOUNT || secrets.WIF_SERVICE_ACCOUNT) }}
+          workload_identity_provider: ${{ secrets.DEV_WIF_PROVIDER || secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.DEV_WIF_SERVICE_ACCOUNT || secrets.WIF_SERVICE_ACCOUNT }}
 
       - name: Resolve e2e-tests image project
         env:
-          INPUT_PROJECT_ID: ${{ inputs.e2e_tests_channel == 'develop' && inputs.dev_gcp_project_id || inputs.prod_gcp_project_id }}
-          SERVICE_ACCOUNT: ${{ inputs.e2e_tests_channel == 'develop' && (secrets.DEV_WIF_SERVICE_ACCOUNT || secrets.WIF_SERVICE_ACCOUNT) || (secrets.PROD_WIF_SERVICE_ACCOUNT || secrets.WIF_SERVICE_ACCOUNT) }}
+          CHANNEL: ${{ inputs.e2e_tests_channel }}
+          INPUT_PROJECT_ID: ${{ inputs.e2e_tests_channel == 'develop' && (inputs.dev_gcp_project_id || vars.DEV_GCP_PROJECT_ID) || (inputs.prod_gcp_project_id || vars.PROD_GCP_PROJECT_ID) }}
+          SERVICE_ACCOUNT: ${{ secrets.DEV_WIF_SERVICE_ACCOUNT || secrets.WIF_SERVICE_ACCOUNT }}
         run: |
           set -euo pipefail
           project_id="$INPUT_PROJECT_ID"
-          if [ -z "$project_id" ]; then
+          # The SA is the dev one, so its project is only a valid fallback for the develop channel.
+          if [ -z "$project_id" ] && [ "$CHANNEL" = "develop" ]; then
             project_id="$(printf '%s' "$SERVICE_ACCOUNT" | sed -n 's/^[^@]*@\([^.]*\)\.iam\.gserviceaccount\.com$/\1/p')"
           fi
           if [ -z "$project_id" ]; then
-            echo "::error::Unable to resolve E2E image project. Pass dev_gcp_project_id/prod_gcp_project_id or a standard GCP service account email."
+            echo "::error::Unable to resolve E2E image project for channel ${CHANNEL}. Pass dev_gcp_project_id/prod_gcp_project_id or set org vars DEV_GCP_PROJECT_ID/PROD_GCP_PROJECT_ID."
             exit 1
           fi
           echo "E2E_IMAGE_GCP_PROJECT=${project_id}" >> "$GITHUB_ENV"

@@ -1023,8 +1023,6 @@ jobs:
       TWINGATE_SERVICE_KEY: ${{ secrets.TWINGATE_SERVICE_KEY }}
       ALLURE_USER: ${{ secrets.ALLURE_USER }}
       ALLURE_PASS: ${{ secrets.ALLURE_PASS }}
-      PROD_WIF_PROVIDER: ${{ secrets.PROD_WIF_PROVIDER }}
-      PROD_WIF_SERVICE_ACCOUNT: ${{ secrets.PROD_WIF_SERVICE_ACCOUNT }}
       DEV_WIF_PROVIDER: ${{ secrets.DEV_WIF_PROVIDER }}
       DEV_WIF_SERVICE_ACCOUNT: ${{ secrets.DEV_WIF_SERVICE_ACCOUNT }}
       E2E_SECRETS_JSON: ${{ secrets.E2E_APP_SECRETS_JSON }}
@@ -1063,8 +1061,8 @@ with:
 | `allure_project` | No | `service` | Allure `project_id` |
 | `e2e_run_enabled` | No | `true` | Run tests (`false` = list only) |
 | `version_wait_minutes` | No | `20` | Health gate timeout in minutes |
-| `dev_gcp_project_id` | No | inferred | Dev GCP project ID for the `develop` e2e-tests image channel (falls back to parsing the dev service account email) |
-| `prod_gcp_project_id` | No | inferred | Prod GCP project ID for the `prod` e2e-tests image channel (falls back to parsing the prod service account email) |
+| `dev_gcp_project_id` | No | `vars.DEV_GCP_PROJECT_ID` | Dev GCP project ID for the `develop` e2e-tests image channel (last resort: parsed from the dev service account email) |
+| `prod_gcp_project_id` | No | `vars.PROD_GCP_PROJECT_ID` | Prod GCP project ID for the `prod` e2e-tests image channel |
 | `allure_public_url` | No | `https://allure.internal.neuraltrust.ai` | Public Allure URL shown in summaries and used by public runners |
 | `allure_internal_url` | No | `http://allure-api.allure.svc.cluster.local:5050` | Internal Allure URL used by ARC runners |
 | `e2e_vars_json` | No | `{}` | JSON map of non-secret `E2E_*` variables (login paths, team selectors, workspace names, etc.) |
@@ -1075,10 +1073,9 @@ with:
 |--------|----------|-------------|
 | `ALLURE_USER` | Yes | Allure server credentials |
 | `ALLURE_PASS` | Yes | Allure server credentials |
-| `PROD_WIF_PROVIDER` | No* | GCP WIF for prod registry (stable tests) |
-| `PROD_WIF_SERVICE_ACCOUNT` | No* | GCP service account email |
-| `DEV_WIF_PROVIDER` | No* | GCP WIF for dev registry (experimental tests) |
-| `DEV_WIF_SERVICE_ACCOUNT` | No* | GCP service account email |
+| `DEV_WIF_PROVIDER` | Yes (or `WIF_PROVIDER`) | GCP WIF used to pull the e2e-tests image for **both** channels (the dev SA reads prod `nt-docker`) |
+| `DEV_WIF_SERVICE_ACCOUNT` | Yes (or `WIF_SERVICE_ACCOUNT`) | Dev GCP service account email |
+| `PROD_WIF_PROVIDER` / `PROD_WIF_SERVICE_ACCOUNT` | No | Deprecated and ignored. The prod release SA is only mintable from allowlisted repos on `main` / `v*` tags, and E2E runs on any ref |
 | `WIF_PROVIDER` / `WIF_SERVICE_ACCOUNT` | No | Deprecated fallback when channel-specific WIF is omitted |
 | `TWINGATE_SERVICE_KEY` | No | Twingate service key (public runners) |
 | `E2E_SECRETS_JSON` | No | JSON map of `E2E_*` env vars (overrides individual secrets) |
@@ -1308,8 +1305,8 @@ chmod +x setup-pipeline.sh
 ```
 
 The script handles:
-1. GCP Workload Identity Federation (WIF) pools and OIDC providers for dev and prod
-2. GCP Service Accounts with Artifact Registry writer permissions
+1. Checking that the GCP Workload Identity Federation (WIF) pools, providers and CI service accounts exist. It does **not** create or bind them: WIF is managed in Terraform in the private `cloud-infrastructure` repo (`gcp-ci-identity/`), which limits the prod SA to allowlisted repos on `main` / `v*` tags
+2. Artifact Registry writer for the CI service accounts
 3. Cross-project read access (prod SA → dev registry) for the image promote strategy
 4. GitHub org-level variables (`DEV_GCP_PROJECT_ID`, `PROD_GCP_PROJECT_ID`)
 5. GitHub org-level secrets (WIF providers, service accounts, tokens)

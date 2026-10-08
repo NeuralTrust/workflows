@@ -5,8 +5,9 @@
 # One-time setup script for the GitHub Actions CI/CD pipeline infrastructure.
 #
 # This script configures:
-#   1. GCP Workload Identity Federation (WIF) for dev and prod
-#   2. GCP Service Accounts with Artifact Registry permissions
+#   1. Checks that GCP Workload Identity Federation (WIF) exists for dev and prod
+#      (WIF itself is managed in Terraform, not here — see Phase 0.1)
+#   2. Artifact Registry writer for the CI service accounts
 #   3. Cross-project read access (prod SA → dev registry) for image promote
 #   4. GitHub org variables and secrets
 #
@@ -121,92 +122,60 @@ DEV_PROJECT_NUMBER=$(gcloud projects describe "$DEV_GCP_PROJECT_ID" --format="va
 success "DEV project number:  $DEV_PROJECT_NUMBER"
 
 # =============================================================================
-# Phase 0.1 — GCP: Workload Identity Federation
+# Phase 0.1 — GCP: Workload Identity Federation (check only)
+# =============================================================================
+# This script no longer creates WIF pools, providers or SA impersonation
+# bindings. It used to trust every repo in the org on every ref
+# (attribute.repository_owner), which let any org repo mint the prod SA.
+#
+# WIF is managed in Terraform in the private infrastructure repo
+# (cloud-infrastructure/gcp-ci-identity), which pins each pool to specific
+# repos, refs and GitHub environments. Repo allowlists are deliberately not kept
+# here: this repo is public.
+#
+# What remains: verify the pool, provider and SA exist, and grant the SA
+# Artifact Registry writer on the Docker and Python repos.
 # =============================================================================
 
-setup_wif() {
+check_wif() {
   local PROJECT_ID="$1"
   local ENV_LABEL="$2"
+  local SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
-  header "WIF Setup — $ENV_LABEL ($PROJECT_ID)"
+  header "WIF check — $ENV_LABEL ($PROJECT_ID)"
 
-  # Step 1: Create Workload Identity Pool
-  info "Creating Workload Identity Pool '$WIF_POOL'..."
-  if gcloud iam workload-identity-pools describe "$WIF_POOL" \
+  if ! gcloud iam workload-identity-pools describe "$WIF_POOL" \
       --project="$PROJECT_ID" --location="global" &>/dev/null; then
-    warn "Pool '$WIF_POOL' already exists in $PROJECT_ID — skipping"
-  else
-    gcloud iam workload-identity-pools create "$WIF_POOL" \
-      --project="$PROJECT_ID" \
-      --location="global" \
-      --display-name="GitHub Actions"
-    success "Pool '$WIF_POOL' created in $PROJECT_ID"
+    error "Pool '$WIF_POOL' not found in $PROJECT_ID. WIF is managed in Terraform (cloud-infrastructure/gcp-ci-identity); create it there."
+    exit 1
   fi
-
-  # Step 2: Create OIDC Provider
-  info "Creating OIDC provider '$WIF_PROVIDER'..."
-  if gcloud iam workload-identity-pools providers describe "$WIF_PROVIDER" \
+  if ! gcloud iam workload-identity-pools providers describe "$WIF_PROVIDER" \
       --project="$PROJECT_ID" --location="global" \
       --workload-identity-pool="$WIF_POOL" &>/dev/null; then
-    warn "Provider '$WIF_PROVIDER' already exists in $PROJECT_ID — skipping"
-  else
-    gcloud iam workload-identity-pools providers create-oidc "$WIF_PROVIDER" \
-      --project="$PROJECT_ID" \
-      --location="global" \
-      --workload-identity-pool="$WIF_POOL" \
-      --display-name="GitHub" \
-      --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner" \
-      --attribute-condition="assertion.repository_owner == '$GH_ORG'" \
-      --issuer-uri="https://token.actions.githubusercontent.com"
-    success "Provider '$WIF_PROVIDER' created in $PROJECT_ID"
+    error "Provider '$WIF_PROVIDER' not found in $PROJECT_ID. WIF is managed in Terraform (cloud-infrastructure/gcp-ci-identity); create it there."
+    exit 1
   fi
-
-  # Step 3: Create Service Account
-  local SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
-  info "Creating service account '$SA_NAME'..."
-  if gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT_ID" &>/dev/null; then
-    warn "Service account '$SA_EMAIL' already exists — skipping"
-  else
-    gcloud iam service-accounts create "$SA_NAME" \
-      --project="$PROJECT_ID" \
-      --display-name="GitHub Actions CI/CD"
-    success "Service account '$SA_EMAIL' created"
+  if ! gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT_ID" &>/dev/null; then
+    error "Service account '$SA_EMAIL' not found. It is managed in Terraform (cloud-infrastructure/gcp-ci-identity)."
+    exit 1
   fi
+  success "Pool, provider and $SA_EMAIL exist in $PROJECT_ID"
 
-  # Step 4: Grant Artifact Registry writer (Docker + Python repos)
-  info "Granting Artifact Registry writer to $SA_EMAIL on $AR_REPO (Docker)..."
-  gcloud artifacts repositories add-iam-policy-binding "$AR_REPO" \
-    --project="$PROJECT_ID" \
-    --location="$AR_LOCATION" \
-    --member="serviceAccount:$SA_EMAIL" \
-    --role="roles/artifactregistry.writer" \
-    --quiet 2>/dev/null || true
-  success "Artifact Registry writer granted on $AR_REPO"
-
-  info "Granting Artifact Registry writer to $SA_EMAIL on $AR_PYTHON_REPO (Python)..."
-  gcloud artifacts repositories add-iam-policy-binding "$AR_PYTHON_REPO" \
-    --project="$PROJECT_ID" \
-    --location="$AR_LOCATION" \
-    --member="serviceAccount:$SA_EMAIL" \
-    --role="roles/artifactregistry.writer" \
-    --quiet 2>/dev/null || true
-  success "Artifact Registry writer granted on $AR_PYTHON_REPO"
-
-  # Step 5: Allow GitHub Actions to impersonate the SA
-  local PROJECT_NUMBER
-  PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format="value(projectNumber)")
-  info "Binding workloadIdentityUser for $GH_ORG..."
-  gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
-    --project="$PROJECT_ID" \
-    --role="roles/iam.workloadIdentityUser" \
-    --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WIF_POOL}/attribute.repository_owner/${GH_ORG}" \
-    --quiet 2>/dev/null || true
-  success "Workload Identity User binding created"
+  # Artifact Registry writer (Docker + Python repos)
+  for REPO in "$AR_REPO" "$AR_PYTHON_REPO"; do
+    info "Granting Artifact Registry writer to $SA_EMAIL on $REPO..."
+    gcloud artifacts repositories add-iam-policy-binding "$REPO" \
+      --project="$PROJECT_ID" \
+      --location="$AR_LOCATION" \
+      --member="serviceAccount:$SA_EMAIL" \
+      --role="roles/artifactregistry.writer" \
+      --quiet 2>/dev/null || true
+    success "Artifact Registry writer granted on $REPO"
+  done
 }
 
-# Run WIF setup for both environments
-setup_wif "$PROD_GCP_PROJECT_ID" "PROD"
-setup_wif "$DEV_GCP_PROJECT_ID" "DEV"
+check_wif "$PROD_GCP_PROJECT_ID" "PROD"
+check_wif "$DEV_GCP_PROJECT_ID" "DEV"
 
 # =============================================================================
 # Phase 0.2 — GCP: Cross-project read access (bidirectional)
