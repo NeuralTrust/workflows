@@ -238,6 +238,7 @@ jobs:
 | `tag_suffix` | No | — | Tag suffix |
 | `kustomize_name` | No | `image_name` | Image name in kustomization.yaml |
 | `overlay_path` | No | `k8s/overlays/prod` | Primary prod overlay. If `k8s/overlays/prod-us` exists, release jobs update it in the same commit (US regional Flux) |
+| `deploy` | No | `true` | Set `false` to publish the scanned immutable image without changing production overlays; deploy that digest through separately reviewed regional stages |
 | `config_env_file` | No | `config.env` | Config env file name in overlay |
 | `dev_branch` | No | `develop` | Dev branch name (for PR detection) |
 | `promote_ignore_paths` | No | `k8s/**`, `.github/**`, `CHANGELOG.md` | Pathspecs that cannot reach the image, for the content-equivalence gate |

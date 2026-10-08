@@ -116,6 +116,13 @@ on:
         required: false
         type: string
         default: 'k8s/overlays/prod'
+      deploy:
+        description: >-
+          Update production overlays after publishing the image. Disable for
+          separately reviewed staged GitOps deployment of the published digest.
+        required: false
+        type: boolean
+        default: true
       config_env_file:
         description: 'Name of the config env file in the overlay'
         required: false
@@ -564,6 +571,7 @@ jobs:
     needs: [release, scan, promote-copy]
     if: |
       always() &&
+      inputs.deploy &&
       needs.release.result == 'success' &&
       needs.scan.result == 'success' &&
       (needs.promote-copy.result == 'success' || needs.promote-copy.result == 'skipped')
@@ -643,6 +651,7 @@ jobs:
       - name: Send Slack notification
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RELEASE_DEPLOY_ENABLED: ${{ inputs.deploy }}
         run: |
           if [ -z "$SLACK_WEBHOOK_URL" ]; then
             echo "No Slack webhook configured, skipping"
@@ -667,6 +676,9 @@ jobs:
             else
               EMOJI=":white_check_mark:"
               METHOD="rebuilt (hotfix)"
+            fi
+            if [ "$RELEASE_DEPLOY_ENABLED" = "false" ]; then
+              STATUS="Image published; staged deployment pending"
             fi
           elif [ "$SCAN_RESULT" = "failure" ]; then
             COLOR="#dc3545"
