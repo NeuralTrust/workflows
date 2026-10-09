@@ -130,7 +130,11 @@ on:
         description: 'golangci-lint version compiled with the active Go toolchain'
         required: false
         type: string
-        default: 'v2.13.2'
+        # v2.14.0 is the first release on golang.org/x/tools v0.50.0, which reads
+        # the export data version 5 that go1.27.2 writes; older releases fail
+        # every package with "export data version 5 is greater than maximum
+        # supported version 4" (typecheck).
+        default: 'v2.14.0'
       go_experiment:
         description: 'Optional GOEXPERIMENT value used by Go lint and test jobs'
         required: false
