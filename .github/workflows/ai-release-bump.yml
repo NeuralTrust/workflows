@@ -14,7 +14,10 @@
 #
 # `bump` only COMPUTES the next version. Nothing is tagged, committed or
 # published until the optional image-scan gate has passed, so a vulnerable
-# image can never produce a release (no orphan tag, no half-done release).
+# promote source can never produce a release (no orphan tag, no half-done
+# release). The gate scans, by digest, the dev image release-promote.yml will
+# promote; when the release will rebuild there is no image yet, the scan is
+# skipped, and release-promote.yml gates the rebuilt image instead.
 # When `image_scan_enabled: false` (default) resolve-image/scan are skipped and
 # behaviour is identical to the pre-gate version of this workflow.
 #
@@ -112,9 +115,11 @@ on:
       # ======================================================================
       image_scan_enabled:
         description: >
-          Block release creation on a Trivy scan of the already-built dev image.
-          Opt-in (default false) so repos without a container image, or whose
-          image is built after the release, keep the previous behaviour.
+          Block release creation on a Trivy scan of the dev image that
+          release-promote.yml will promote, pinned by digest. Skipped when the
+          release will rebuild (hotfix / direct push), since no image exists yet;
+          release-promote.yml scans the rebuilt image. Opt-in (default false) so
+          repos without a container image keep the previous behaviour.
           Requires image_name, dev_gcp_project_id and the WIF secrets.
         required: false
         type: boolean
@@ -149,6 +154,22 @@ on:
         required: false
         type: string
         default: ''
+      dev_branch:
+        description: 'Development branch whose merges into main promote a dev image (mirrors release-promote dev_branch).'
+        required: false
+        type: string
+        default: 'develop'
+      promote_ignore_paths:
+        description: >
+          Newline-separated git pathspecs that cannot reach the built image
+          (mirrors release-promote promote_ignore_paths). Pass the same value as
+          the repo's release.yml, so the gate scans the image that will ship.
+        required: false
+        type: string
+        default: |
+          k8s/**
+          .github/**
+          CHANGELOG.md
       image_scan_severity:
         description: 'Trivy severity levels for the pre-release image scan.'
         required: false
@@ -468,16 +489,22 @@ jobs:
           echo "Push is only the automated semver file bump; auto-release will not run again until substantive commits land." >> "$GITHUB_STEP_SUMMARY"
 
   # ============================================================================
-  # Job 2: Resolve the dev image reference to scan (opt-in)
+  # Job 2: Resolve the image this release will ship (opt-in)
   # ============================================================================
-  # The image was already built by CI for this commit, so we scan it by SHA and
-  # fall back to the latest dev tag.
-  # NOTE: this is a scan target, not the released artifact. release-promote.yml
-  # resolves what ships from the nearest built ancestor of the dev commit and
-  # never uses `latest`, so on this fallback path the scan can cover a different
-  # image than the one promoted. What ships is gated in release-promote.yml.
+  # Scans exactly the image release-promote.yml will promote, pinned by digest:
+  # the same develop→main detection, then the same resolve-promote-source walk
+  # and content-equivalence check. A pushed `main` commit never has a dev image
+  # of its own (dev images are tagged with dev-branch SHAs), and `latest` is a
+  # mutable tag that points at whatever develop built last — so neither is ever
+  # scanned here.
+  #
+  # When the release will REBUILD (hotfix, direct push, main ahead of develop,
+  # no built dev image) no image for it exists yet, so this gate cannot see it
+  # and skips. release-promote.yml scans the rebuilt image before any overlay
+  # moves. Scanning a stand-in instead is what blocked merged CVE fixes: the
+  # fix was on `main`, the stand-in was not.
   resolve-image:
-    name: Resolve Dev Image
+    name: Resolve Release Image
     needs: bump
     if: |
       inputs.image_scan_enabled &&
@@ -488,7 +515,14 @@ jobs:
     timeout-minutes: 10
 
     outputs:
+      # 'true' when a promote source was resolved and must pass the scan.
+      scan: ${{ steps.resolve.outputs.scan }}
+      # Digest-pinned reference handed to Trivy.
       image_ref: ${{ steps.resolve.outputs.image_ref }}
+      # Human-readable tag reference of the same image, for notifications.
+      image_label: ${{ steps.resolve.outputs.image_label }}
+      # Why the scan was skipped (the release will rebuild).
+      skip_reason: ${{ steps.resolve.outputs.skip_reason }}
       # Set only by the lookup itself. Empty means the job died before the
       # lookup ran (auth, crane install, registry login), which is a different
       # problem from a missing image and must not be reported as one.
@@ -509,8 +543,106 @@ jobs:
             exit 1
           fi
 
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
+
+      # Mirrors the "Detect release strategy" step of release-promote.yml, run
+      # against the pushed commit instead of the release tag. If the two drift,
+      # the only cost is when a bad image is caught: release-promote.yml scans
+      # whatever it actually ships either way.
+      - name: Detect promote candidate
+        id: detect
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ github.sha }}
+          DEV_BRANCH: ${{ inputs.dev_branch }}
+        run: |
+          set -uo pipefail
+
+          # Signal A: commit is associated with a merged dev→main PR (handles
+          # squash merges, where there is no second parent). Emits the PR JSON.
+          dev_pr_head() {
+            local sha="$1" data pr
+            data=$(gh api "repos/${REPO}/commits/${sha}/pulls" 2>/dev/null || echo '[]')
+            pr=$(echo "$data" | jq -r --arg dev "$DEV_BRANCH" '
+              [.[] | objects | select(
+                .base.ref == "main" and
+                (.head.ref == $dev or .head.ref == "dev") and
+                .merged_at != null
+              )] | first // empty' 2>/dev/null || echo '')
+            { [ -n "$pr" ] && [ "$pr" != "null" ]; } || return 1
+            echo "$pr"
+          }
+
+          # Signal B: commit is a merge whose second parent lives on the dev branch.
+          dev_merge_parent() {
+            local sha="$1" pcount dev_sha
+            pcount=$(git cat-file -p "$sha" 2>/dev/null | grep -c '^parent ' || true)
+            [ "$pcount" -gt 1 ] || return 1
+            dev_sha=$(git rev-parse "${sha}^2" 2>/dev/null) || return 1
+            git branch -r --contains "$dev_sha" 2>/dev/null \
+              | grep -qE "origin/(${DEV_BRANCH}|dev)$" || return 1
+            echo "$dev_sha"
+          }
+
+          CANDIDATE="$RELEASE_SHA"
+          RESULT="rebuild"
+          DEV_SHA=""
+
+          # Step over automated commits only, as release-promote.yml does; a
+          # human commit means hotfix / direct push.
+          for _ in 1 2 3 4 5; do
+            if PR=$(dev_pr_head "$CANDIDATE"); then
+              DEV_SHA=$(echo "$PR" | jq -r '.head.sha')
+              echo "Merged PR #$(echo "$PR" | jq -r '.number') from ${DEV_BRANCH} → main at ${CANDIDATE}"
+              RESULT="promote"
+              break
+            fi
+            if DEV_SHA=$(dev_merge_parent "$CANDIDATE"); then
+              echo "Merge commit ${CANDIDATE}: second parent ${DEV_SHA} is on ${DEV_BRANCH}"
+              RESULT="promote"
+              break
+            fi
+            MSG=$(git log -1 --format=%s "$CANDIDATE" 2>/dev/null || echo '')
+            case "$MSG" in
+              "chore: bump version"*|"docs(changelog):"*)
+                PARENT=$(git rev-parse "${CANDIDATE}^" 2>/dev/null || echo '')
+                [ -n "$PARENT" ] || break
+                echo "Stepping over automated commit ${CANDIDATE} → parent ${PARENT}"
+                CANDIDATE="$PARENT"
+                ;;
+              *)
+                echo "No ${DEV_BRANCH}→main PR or merge at ${CANDIDATE} — hotfix or direct push"
+                break
+                ;;
+            esac
+          done
+
+          {
+            echo "initial=${RESULT}"
+            echo "dev_sha=${DEV_SHA}"
+            echo "candidate_sha=${CANDIDATE}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Compute dev image base
+        id: meta
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          DEV_PROJECT: ${{ inputs.dev_gcp_project_id }}
+          REPOSITORY: ${{ inputs.repository }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+        run: echo "dev_image_base=${REGISTRY}/${DEV_PROJECT}/${REPOSITORY}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+
+      # Registry access is only needed when there is a dev image to look up, so
+      # a hotfix release does not depend on GCP auth here.
       - name: Authenticate to Google Cloud
         id: auth
+        if: steps.detect.outputs.initial == 'promote'
         uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
@@ -519,9 +651,11 @@ jobs:
           create_credentials_file: false
 
       - name: Install crane
+        if: steps.detect.outputs.initial == 'promote'
         uses: NeuralTrust/workflows/.github/actions/setup-crane@main
 
       - name: Login to Artifact Registry (crane)
+        if: steps.detect.outputs.initial == 'promote'
         env:
           ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
           REGISTRY: ${{ inputs.registry }}
@@ -529,35 +663,74 @@ jobs:
           set -euo pipefail
           echo "$ACCESS_TOKEN" | crane auth login "$REGISTRY" -u oauth2accesstoken --password-stdin
 
-      - name: Resolve dev image reference
+      - name: Resolve promote source
+        id: source
+        if: steps.detect.outputs.initial == 'promote'
+        uses: NeuralTrust/workflows/.github/actions/resolve-promote-source@main
+        with:
+          dev_sha: ${{ steps.detect.outputs.dev_sha }}
+          candidate_sha: ${{ steps.detect.outputs.candidate_sha }}
+          dev_image_base: ${{ steps.meta.outputs.dev_image_base }}
+          tag_prefix: ${{ inputs.image_tag_prefix }}
+          tag_suffix: ${{ inputs.image_tag_suffix }}
+          ignore_paths: ${{ inputs.promote_ignore_paths }}
+
+      - name: Resolve release image
         id: resolve
         env:
-          REGISTRY: ${{ inputs.registry }}
-          DEV_PROJECT: ${{ inputs.dev_gcp_project_id }}
-          REPOSITORY: ${{ inputs.repository }}
-          IMAGE_NAME: ${{ inputs.image_name }}
-          P: ${{ inputs.image_tag_prefix }}
-          S: ${{ inputs.image_tag_suffix }}
-          SHA: ${{ github.sha }}
+          INITIAL: ${{ steps.detect.outputs.initial }}
+          CANDIDATE_SHA: ${{ steps.detect.outputs.candidate_sha }}
+          SOURCE_STRATEGY: ${{ steps.source.outputs.strategy }}
+          SOURCE_REF: ${{ steps.source.outputs.source_ref }}
+          SOURCE_REASON: ${{ steps.source.outputs.reason }}
+          DEV_BASE: ${{ steps.meta.outputs.dev_image_base }}
         run: |
           set -euo pipefail
-          DEV_BASE="${REGISTRY}/${DEV_PROJECT}/${REPOSITORY}/${IMAGE_NAME}"
-          SHA_REF="${DEV_BASE}:${P}${SHA}${S}"
-          LATEST_REF="${DEV_BASE}:${P}latest${S}"
 
-          if crane manifest "${SHA_REF}" > /dev/null 2>&1; then
-            REF="${SHA_REF}"
-            echo "Dev image found by commit SHA: ${REF}"
-          elif crane manifest "${LATEST_REF}" > /dev/null 2>&1; then
-            REF="${LATEST_REF}"
-            echo "::notice::Dev image not found by SHA — scanning the latest dev tag instead: ${REF}"
+          write_output() {
+            local eof
+            eof=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+            { echo "$1<<${eof}"; printf '%s\n' "$2"; echo "${eof}"; } >> "$GITHUB_OUTPUT"
+          }
+
+          if [ "$INITIAL" != "promote" ]; then
+            SKIP_REASON="no develop→main PR or merge at ${CANDIDATE_SHA} (hotfix / direct push)"
+          elif [ "$SOURCE_STRATEGY" != "promote" ]; then
+            SKIP_REASON="${SOURCE_REASON}"
           else
-            echo "::error::No dev image found at ${SHA_REF} or ${LATEST_REF}. The pre-release scan gate cannot verify this release; build the dev image first or set image_scan_enabled: false."
-            echo "failure_reason=No dev image found at ${SHA_REF} or ${LATEST_REF}; build the dev image first or set image_scan_enabled: false" >> "$GITHUB_OUTPUT"
+            SKIP_REASON=""
+          fi
+
+          if [ -n "$SKIP_REASON" ]; then
+            echo "scan=false" >> "$GITHUB_OUTPUT"
+            write_output skip_reason "$SKIP_REASON"
+            echo "::notice title=Pre-release image scan skipped::This release will rebuild, so no image for it exists yet: ${SKIP_REASON}. release-promote.yml scans the rebuilt image before it reaches the prod overlays."
+            {
+              echo "## Pre-Release Image Scan Skipped"
+              echo ""
+              echo "This release will **rebuild**, so no image for it exists yet to scan."
+              echo ""
+              echo "- **Why:** ${SKIP_REASON}"
+              echo "- **Gate:** \`release-promote.yml\` scans the rebuilt image and blocks the overlay update on HIGH/CRITICAL fixable CVEs."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Pin by digest: the tag is only how the image was found, and the
+          # digest is what release-promote.yml copies byte-for-byte to prod.
+          if ! DIGEST=$(crane digest "$SOURCE_REF" 2>/dev/null) || [ -z "$DIGEST" ]; then
+            echo "::error::Could not read the digest of ${SOURCE_REF}."
+            write_output failure_reason "Could not read the digest of the promote source ${SOURCE_REF}"
             exit 1
           fi
 
-          echo "image_ref=${REF}" >> "$GITHUB_OUTPUT"
+          IMAGE_REF="${DEV_BASE}@${DIGEST}"
+          echo "Scanning ${SOURCE_REF} as ${IMAGE_REF}"
+          {
+            echo "scan=true"
+            echo "image_ref=${IMAGE_REF}"
+            echo "image_label=${SOURCE_REF}"
+          } >> "$GITHUB_OUTPUT"
 
   # ============================================================================
   # Job 3: Blocking image vulnerability scan (opt-in)
@@ -565,6 +738,7 @@ jobs:
   scan: # zizmor: ignore[excessive-permissions]
     name: Pre-Release Image Scan
     needs: [bump, resolve-image]
+    if: needs.resolve-image.outputs.scan == 'true'
     uses: NeuralTrust/workflows/.github/workflows/image-scan.yml@main
     # No `permissions:` here on purpose. A nested reusable-workflow call can only
     # narrow the caller's grant, never widen it, and GitHub validates this at
@@ -718,6 +892,8 @@ jobs:
           PREVIOUS: ${{ needs.bump.outputs.previous_version }}
           VERSION_COMMIT_SHA: ${{ steps.commit-version.outputs.sha }}
           SCANNED_IMAGE: ${{ needs.resolve-image.outputs.image_ref }}
+          SCANNED_LABEL: ${{ needs.resolve-image.outputs.image_label }}
+          SCAN_SKIP_REASON: ${{ needs.resolve-image.outputs.skip_reason }}
         run: |
           # Use the version-commit SHA if we pushed one, otherwise the original SHA
           TARGET_SHA="${VERSION_COMMIT_SHA}"
@@ -759,7 +935,9 @@ jobs:
             echo "- **Reason:** ${REASON}"
             echo "- **Previous:** \`${PREVIOUS:-none}\`"
             if [ -n "${SCANNED_IMAGE}" ]; then
-              echo "- **Scanned image:** \`${SCANNED_IMAGE}\` (passed the blocking Trivy gate)"
+              echo "- **Scanned image:** \`${SCANNED_IMAGE}\` (\`${SCANNED_LABEL}\`, passed the blocking Trivy gate)"
+            elif [ -n "${SCAN_SKIP_REASON}" ]; then
+              echo "- **Pre-release scan:** skipped, the release will rebuild — ${SCAN_SKIP_REASON}"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -788,6 +966,7 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           VERSION: ${{ needs.bump.outputs.new_version }}
           IMAGE_REF: ${{ needs.resolve-image.outputs.image_ref }}
+          IMAGE_LABEL: ${{ needs.resolve-image.outputs.image_label }}
           BUMP_RESULT: ${{ needs.bump.result }}
           RESOLVE_RESULT: ${{ needs.resolve-image.result }}
           RESOLVE_REASON: ${{ needs.resolve-image.outputs.failure_reason }}
@@ -798,7 +977,8 @@ jobs:
         run: |
           if [ "$SCAN_RESULT" = "failure" ]; then
             REASON="Pre-release image scan found HIGH/CRITICAL fixable CVEs"
-            [ -n "$IMAGE_REF" ] && REASON="${REASON} in ${IMAGE_REF}"
+            [ -n "$IMAGE_LABEL" ] && REASON="${REASON} in ${IMAGE_LABEL}"
+            [ -n "$IMAGE_REF" ] && REASON="${REASON} (digest ${IMAGE_REF##*@})"
           elif [ "$RESOLVE_RESULT" = "failure" ]; then
             # Only the lookup sets RESOLVE_REASON. Without it the job failed
             # earlier — GCP auth, crane install or registry login — and calling
@@ -806,7 +986,7 @@ jobs:
             if [ -n "$RESOLVE_REASON" ]; then
               REASON="$RESOLVE_REASON"
             else
-              REASON="Could not resolve the dev image to scan; the job failed before the lookup ran (GCP auth or registry access). Check the run log and re-run — this is often transient"
+              REASON="Could not resolve the release image to scan; the job failed before the lookup ran (checkout, GCP auth or registry access). Check the run log and re-run — this is often transient"
             fi
           elif [ "$PUBLISH_RESULT" = "failure" ]; then
             REASON="Publish failed while creating the tag, version files, or GitHub Release"
@@ -823,6 +1003,7 @@ jobs:
             echo "- **Reason:** ${REASON}"
             if [ -n "${IMAGE_REF}" ]; then
               echo "- **Image:** \`${IMAGE_REF}\`"
+              [ -n "${IMAGE_LABEL}" ] && echo "- **Found as:** \`${IMAGE_LABEL}\`"
             fi
             echo ""
             echo "No tag, version-bump commit or GitHub Release was produced."

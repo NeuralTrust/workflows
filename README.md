@@ -419,6 +419,28 @@ jobs:
 | `update_changelog` | `true` | If true, promote `## [Unreleased]` → `## [vX.Y.Z] — YYYY-MM-DD` in the changelog file before tagging. |
 | `changelog_path` | `CHANGELOG.md` | Path of the changelog file to promote. |
 | `unreleased_heading` | `## [Unreleased]` | Heading used for the unreleased section in the changelog. |
+| `image_scan_enabled` | `false` | Block release creation on a Trivy scan of the image the release will promote. See [Pre-release image scan](#pre-release-image-scan). |
+| `image_name` | `''` | Image name in the dev registry (required with the scan). |
+| `dev_gcp_project_id` | `''` | Dev GCP project holding the image (required with the scan). |
+| `registry` / `repository` | `europe-west1-docker.pkg.dev` / `nt-docker` | Artifact Registry host and repository. |
+| `image_tag_prefix` / `image_tag_suffix` | `''` | Must match the `tag_prefix` / `tag_suffix` the repo's `release.yml` passes to `release-promote.yml`. |
+| `dev_branch` | `develop` | Must match `release.yml`'s `dev_branch`. |
+| `promote_ignore_paths` | `k8s/**`, `.github/**`, `CHANGELOG.md` | Must match `release.yml`'s `promote_ignore_paths`. |
+| `image_scan_severity` | `CRITICAL,HIGH` | Trivy severities that block. |
+| `accept_vulnerability_risk` | `false` | Log findings without blocking. |
+
+### Pre-release image scan
+
+With `image_scan_enabled: true` the release is created only after the image it will ship passes Trivy. The gate makes the same decision `release-promote.yml` will make when the release fires, and scans that image:
+
+| The pushed `main` commit is… | `release-promote.yml` will… | The gate scans |
+|---|---|---|
+| a `develop`→`main` merge whose built dev commit matches it outside `promote_ignore_paths` | promote that dev image | that image, **pinned by digest** (the same bytes `crane copy` sends to prod) |
+| a hotfix / direct push, `main` ahead of `develop`, or no dev image within 30 commits | rebuild | nothing: no image exists yet. The skip and its reason go to the run summary, and `release-promote.yml` scans the rebuilt image before any overlay moves |
+
+The gate never scans `:latest` or any other mutable tag. A `main` commit has no dev image of its own, and `:latest` points at whatever `develop` built last, so a CVE fix merged to `main` could never clear a gate keyed on it.
+
+The prefix, suffix, dev branch and ignore paths must match the repo's `release.yml`. A mismatch is safe, because `release-promote.yml` still scans what actually ships, but the gate then skips a release it could have checked.
 
 ### Outputs
 
@@ -437,7 +459,7 @@ The workflow creates a minimal GitHub Release body:
 
 It does **not** append installation instructions, container image tables, or an AI semver footer. Repos that need those (e.g. `neuraltrust-platform`) extend the release in a follow-up workflow (`publish-chart.yml` appends **Container images** and **Installation**).
 
-If release creation fails (image-scan gate, missing dev image, publish error, or bump failure), the workflow posts a Slack message with the reason. Pass `SLACK_WEBHOOK_URL` from the caller; without it the job still fails and writes the reason to the step summary.
+If release creation fails (image-scan gate, image lookup error, publish error, or bump failure), the workflow posts a Slack message with the reason. Pass `SLACK_WEBHOOK_URL` from the caller; without it the job still fails and writes the reason to the step summary.
 
 ### Loop Guard
 
@@ -1155,7 +1177,7 @@ Add a `.trivyignore` file at the repo root (same convention as `sast.yml`) to su
 
 Deploy and release workflows send Slack notifications on success or failure.
 
-**Auto-release** (`ai-release-bump.yml`) posts only on failure, with the reason the GitHub Release was not created (image-scan gate, missing dev image, publish error, or bump failure).
+**Auto-release** (`ai-release-bump.yml`) posts only on failure, with the reason the GitHub Release was not created (image-scan gate — naming the scanned digest — image lookup error, publish error, or bump failure).
 
 **Deploy notifications** (`docker-build-deploy.yml`, `multi-image-deploy.yml`) report:
 - "Deployed" — built, scanned clean, pushed, overlay updated
