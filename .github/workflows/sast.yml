@@ -160,11 +160,17 @@ on:
       #   internal error: package "context" without types was imported
       #   from "command-line-arguments"
       #
-      # 2.22.8 vendors x/tools v0.36.0 and fails that way on every Go 1.27
-      # module; 2.29.0 vendors v0.49.0 and scans clean. Reproduced both ways on
-      # go1.27.1 against a consumer repo. Same failure gosec hit for Go
-      # 1.18 (securego/gosec#797) and Go 1.20 (#921), both fixed by bumping
-      # x/tools — so the fix is always to raise gosec, never to pin Go down.
+      # or, on a patch release that changes the format:
+      #
+      #   cannot decode "context", export data version 5 is greater than
+      #   maximum supported version 4
+      #
+      # 2.29.0 reads go1.27.1 but not go1.27.2, which setup-go resolves to via
+      # check-latest. No tagged release reads go1.27.2 yet (securego/gosec#1774),
+      # so the default is an untagged master commit carrying x/tools v0.51.0;
+      # move to the next tag once it ships. Same failure gosec hit for Go 1.18 (securego/gosec#797) and Go
+      # 1.20 (#921), both fixed by bumping x/tools — so the fix is always to
+      # raise gosec, never to pin Go down.
       #
       # Newer x/tools reads older Go fine, so this is safe for callers still on
       # 1.26. It may surface findings an older gosec missed, which is the point;
@@ -173,7 +179,7 @@ on:
         description: 'Gosec version to install (e.g., 2.21.4). Must be >= the newest Go any caller targets — see the note above.'
         required: false
         type: string
-        default: '2.29.0'
+        default: '2.29.1-0.20261005092323-d2b649ec0182'
 
       # ======================================================================
       # govulncheck (Go)
