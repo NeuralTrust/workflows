@@ -112,10 +112,10 @@ on:
         description: 'GCP service account email for WIF authentication'
       BUILD_SECRETS:
         required: false
-        description: 'Newline-separated secret build args (KEY=VALUE)'
+        description: 'Newline-separated build args (KEY=VALUE) whose values are masked in the log. Not secret inside the build: each is a plain --build-arg, recorded in the image history and exported by cache_mode: max. Keys that look like credentials fail the build; pass tokens and passwords through DOCKER_SECRETS.'
       DOCKER_SECRETS:
         required: false
-        description: 'Newline-separated Docker build secrets (e.g. for mount-type secrets in Dockerfile)'
+        description: 'Newline-separated BuildKit secrets (ID=VALUE), read in the Dockerfile with RUN --mount=type=secret,id=ID. Never stored in a layer, the image history or the cache. Use this for tokens and passwords.'
     outputs:
       image_ref:
         description: 'Full image reference with commit SHA tag'

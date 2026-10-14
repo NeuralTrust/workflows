@@ -215,8 +215,8 @@ jobs:
     secrets:
       WIF_PROVIDER: ${{ secrets.PROD_WIF_PROVIDER }}
       WIF_SERVICE_ACCOUNT: ${{ secrets.PROD_WIF_SERVICE_ACCOUNT }}
-      BUILD_SECRETS: |
-        GITHUB_TOKEN=${{ secrets.GH_TOKEN }}
+      DOCKER_SECRETS: |
+        GH_TOKEN=${{ secrets.GH_TOKEN }}
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 ```
@@ -268,7 +268,8 @@ into the dev branch rather than widening `promote_ignore_paths`.
 |--------|----------|-------------|
 | `WIF_PROVIDER` | Yes | GCP Workload Identity Federation provider |
 | `WIF_SERVICE_ACCOUNT` | Yes | GCP service account email |
-| `BUILD_SECRETS` | No | Secret build args (rebuild only) |
+| `BUILD_SECRETS` | No | Build args with masked values (rebuild only). Not secret inside the build — see [Build args vs build secrets](#build-args-vs-build-secrets) |
+| `DOCKER_SECRETS` | No | BuildKit secrets for tokens and passwords (rebuild only) |
 | `GH_TOKEN` | Yes | GitHub PAT for kustomization pushes |
 | `SLACK_WEBHOOK_URL` | No | Slack webhook for notifications |
 
@@ -794,6 +795,47 @@ jobs:
 5. Updates `kustomization.yaml` (image tag) and `config.env` (`APPLICATION_VERSION`)
 6. Commits and pushes overlay updates (deploy workflows use `paths-ignore: k8s/**` so this does not retrigger builds)
 7. Sends Slack notification
+
+Before any of this, the build stops if a `BUILD_SECRETS` key looks like a
+credential (see below).
+
+### Build args vs build secrets
+
+| Secret | Reaches the build as | Use for |
+|--------|----------------------|---------|
+| `BUILD_SECRETS` | `--build-arg KEY=VALUE` | Values that must stay out of the log but are not credentials, such as a public site key read from a repository secret |
+| `DOCKER_SECRETS` | BuildKit secret, `RUN --mount=type=secret,id=KEY` | Tokens, passwords, connection strings |
+
+`BUILD_SECRETS` only masks values in the job log. Inside the build each entry is
+an ordinary build arg: BuildKit records it in the history of every stage that
+uses it, a `RUN` that writes it to a file (for example `git config ... insteadOf`)
+bakes it into that layer, and `cache_mode: max` pushes those builder layers to
+the registry cache ref. Anyone who can pull the cache can read it back.
+
+To stop that, the build fails when a `BUILD_SECRETS` key contains `TOKEN`,
+`PASSWORD`, `PASSWD`, `SECRET` or `CREDENTIAL`, or has `KEY`, `APIKEY` or `PAT`
+as a whole `_`-separated word. `NEXT_PUBLIC_*` keys are allowed, because Next.js
+publishes them to the browser anyway. Non-secret values such as a cache-busting
+run id belong in `build_args`.
+
+A private Go module fetch, done the safe way:
+
+```yaml
+    secrets:
+      DOCKER_SECRETS: |
+        GH_TOKEN=${{ secrets.GH_TOKEN }}
+```
+
+```dockerfile
+# The token is mounted for this RUN only and never written to a file.
+RUN --mount=type=secret,id=GH_TOKEN \
+    if [ -s /run/secrets/GH_TOKEN ]; then \
+      export GIT_CONFIG_COUNT=1 \
+             GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /run/secrets/GH_TOKEN)@github.com/.insteadOf" \
+             GIT_CONFIG_VALUE_0="https://github.com/"; \
+    fi && \
+    go mod download
+```
 
 ---
 

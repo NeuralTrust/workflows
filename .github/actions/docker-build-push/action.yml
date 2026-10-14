@@ -42,11 +42,22 @@ inputs:
     required: false
     default: ''
   build_secrets:
-    description: Newline-separated secret build args.
+    description: >-
+      Newline-separated build args (KEY=VALUE) whose values are masked in the
+      log. They are NOT secret inside the build: each one is a plain
+      --build-arg, recorded in the image history of every stage that uses it
+      and exported to the registry with cache_mode: max. The build fails when
+      a key looks like a credential (TOKEN, PASSWORD, SECRET, CREDENTIAL, KEY,
+      PAT); pass those through docker_secrets instead. NEXT_PUBLIC_* keys are
+      allowed, since Next.js publishes them to the browser anyway.
     required: false
     default: ''
   docker_secrets:
-    description: Newline-separated Docker build secrets.
+    description: >-
+      Newline-separated BuildKit secrets (ID=VALUE). The Dockerfile reads each
+      one with `RUN --mount=type=secret,id=ID`; the value is mounted only for
+      that RUN and never lands in a layer, the image history or the cache.
+      Use this for tokens and passwords.
     required: false
     default: ''
   access_token:
@@ -191,6 +202,57 @@ outputs:
 runs:
   using: composite
   steps:
+    # build_secrets values are masked in the log but reach the build as plain
+    # --build-arg values: BuildKit records them in the history of any stage
+    # that uses them, and cache_mode: max pushes builder stages to the
+    # registry. A token there is readable by anyone who can pull the cache.
+    # Only key names are inspected and printed, never values.
+    - name: Reject credentials in build_secrets
+      shell: bash
+      env:
+        SECRET_ARGS: ${{ inputs.build_secrets }}
+      run: |
+        set -euo pipefail
+
+        offending=()
+        while IFS= read -r line || [ -n "$line" ]; do
+          line="${line#"${line%%[![:space:]]*}"}"
+          [ -z "$line" ] && continue
+          key="${line%%=*}"
+          upper="$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')"
+
+          case "$upper" in
+            NEXT_PUBLIC_*) continue ;;
+          esac
+
+          # Substrings for words that are never benign inside a name, whole
+          # words for KEY and PAT so MONKEY or GOPATH do not match.
+          if [[ "$upper" =~ TOKEN|PASSWORD|PASSWD|SECRET|CREDENTIAL ]] \
+            || [[ "_${upper}_" =~ _(KEY|APIKEY|PAT)_ ]]; then
+            offending+=("$key")
+          fi
+        done <<< "$SECRET_ARGS"
+
+        if [ "${#offending[@]}" -eq 0 ]; then
+          exit 0
+        fi
+
+        keys="$(IFS=,; echo "${offending[*]}")"
+        echo "::error title=Credential passed as a build arg::build_secrets keys ${keys} look like credentials. build_secrets entries are plain --build-arg values: they are recorded in the image history and exported by cache_mode: max. Pass them through docker_secrets and read them with RUN --mount=type=secret,id=<KEY>."
+        {
+          echo "## Build stopped: credential passed as a build arg"
+          echo
+          echo "These \`build_secrets\` keys look like credentials: \`${keys}\`"
+          echo
+          echo "\`build_secrets\` only masks values in the log. Each entry is a plain"
+          echo "\`--build-arg\`, recorded in the image history of every stage that uses"
+          echo "it and exported to the registry with \`cache_mode: max\`."
+          echo
+          echo "Move each one to \`docker_secrets\` and read it in the Dockerfile with"
+          echo "\`RUN --mount=type=secret,id=<KEY>\` (the value is at \`/run/secrets/<KEY>\`)."
+        } >> "$GITHUB_STEP_SUMMARY"
+        exit 1
+
     - name: Compute image metadata
       id: meta
       shell: bash
