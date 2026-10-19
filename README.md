@@ -43,6 +43,28 @@ Every repo follows the same standardized pipeline:
 | `auto-release.yml` | Push to `main` | AI determines semver bump → creates GitHub Release |
 | `release.yml` | GitHub Release published | Smart release (promote or rebuild) → deploy to prod |
 
+### Deployments Page & Badge
+
+The job that writes the overlay sets a job-level `environment:`, so GitHub
+records a deployment for every overlay update and the repo's **Deployments**
+page and badge show the current dev and prod state:
+
+| Workflow | Environment |
+|----------|-------------|
+| `docker-build-deploy.yml`, `multi-image-deploy.yml` | `dev` on `develop`, `prod` on `main` |
+| `release-promote.yml`, `multi-image-release-promote.yml`, `multi-image-release.yml` | `prod` (covers every prod overlay the job writes) |
+
+- **Success means the overlay commit landed**, not that the rollout finished —
+  the GitOps controller applies it after that.
+- The environment is created in the calling repo on first use, with no
+  protection rules. If you add a branch policy to `prod`, allow both `main` and
+  the `v*` release tags, or release jobs will be rejected.
+- **Environment secrets override caller secrets** in a job that sets
+  `environment:`. Never store a secret named like one these workflows take
+  (`GH_TOKEN`, `SLACK_WEBHOOK_URL`, …) in a `dev` or `prod` environment.
+- A repo that writes its overlay in its own job (instead of calling one of the
+  workflows above) adds the same `environment:` line to that job.
+
 ### Branching & Merge Strategy
 
 | PR Target | Merge Method | Why |

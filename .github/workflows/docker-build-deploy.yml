@@ -241,6 +241,10 @@ jobs:
       && (github.ref_name == 'develop' || github.ref_name == 'main')
       && needs.build-push.outputs.scan_blocked != 'true'
     timeout-minutes: 10
+    # Records a GitHub deployment (repo Deployments page + badge) for this
+    # overlay update. "Active" means the overlay commit landed; the cluster's
+    # GitOps controller rolls it out after that.
+    environment: ${{ github.ref_name == 'main' && 'prod' || 'dev' }}
 
     permissions:
       contents: write
