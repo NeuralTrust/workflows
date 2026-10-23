@@ -421,11 +421,15 @@ runs:
 
     # JSON report first with exit-code 0, so the findings table renders even
     # when the blocking table scan below fails.
+    # TMPDIR: Trivy exports the whole image to a temp file before scanning.
+    # On ubuntu-26.04 runners /tmp is size-capped and multi-GB images fail with
+    # "disk quota exceeded"; runner.temp is on the main disk and wiped per job.
     - name: Scan built image (JSON report)
       if: inputs.scan_before_push == 'true'
       uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
       env:
         TRIVY_VULN_SEVERITY_SOURCE: ${{ inputs.scan_vuln_severity_source }}
+        TMPDIR: ${{ runner.temp }}
       with:
         version: 'v0.71.0'
         scan-type: 'image'
@@ -459,6 +463,7 @@ runs:
       uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
       env:
         TRIVY_VULN_SEVERITY_SOURCE: ${{ inputs.scan_vuln_severity_source }}
+        TMPDIR: ${{ runner.temp }}
       with:
         version: 'v0.71.0'
         scan-type: 'image'
