@@ -507,7 +507,7 @@ If you configure additional automated commits that push to `main`, prefix them s
 |----------|-------|-------------|-------------|
 | `go` | `actions/setup-go` | `golangci-lint run --timeout=10m ./...` | `go test -v -race -coverprofile=coverage.txt ./...` |
 | `python` | `actions/setup-python` | `ruff check .` | `pytest -v --cov --cov-report=xml` |
-| `node` | `actions/setup-node` | `npx eslint .` | `npm test` |
+| `node` | `actions/setup-node` (+ `pnpm/action-setup` with `node_package_manager: pnpm`) | `npx eslint .` / `pnpm exec eslint .` | `npm test` / `pnpm test` |
 | `rust` | `dtolnay/rust-toolchain` | `cargo fmt --check && cargo clippy -D warnings` | `cargo test --verbose` |
 
 Go lint installs the pinned `golangci_version` from source with the selected
@@ -592,12 +592,34 @@ jobs:
       coverage_file: coverage.xml
 ```
 
+```yaml
+# Version read from go.mod, and a pnpm workspace
+jobs:
+  go:
+    uses: NeuralTrust/workflows/.github/workflows/tests.yml@main
+    with:
+      language: go
+      language_version_file: services/go.mod   # one source of truth for the toolchain
+      working_directory: services
+  web:
+    uses: NeuralTrust/workflows/.github/workflows/tests.yml@main
+    with:
+      language: node
+      language_version: '22'
+      node_package_manager: pnpm                # pnpm version from package.json packageManager
+      lint_command: pnpm --filter @acme/web typecheck
+      test_command: pnpm --filter @acme/web build
+```
+
 ### Inputs
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `language` | Yes | — | `go`, `python`, `node`, `rust` |
-| `language_version` | Yes | — | Version string (e.g., `1.25.1`, `3.12`, `20`, `1.78`) |
+| `language_version` | One of these two | — | Version string (e.g., `1.27`, `3.12`, `22`, `1.78`). Wins when both are set |
+| `language_version_file` | One of these two | — | File to read the version from, relative to the repository root (`services/go.mod`, `.nvmrc`, `.python-version`). Go, Node and Python |
+| `node_package_manager` | No | `npm` | `npm` or `pnpm`: setup, cache, install (`npm ci` / `pnpm install --frozen-lockfile`) and the default lint and test commands |
+| `pnpm_version` | No | *(packageManager)* | pnpm version; empty reads `packageManager` from `working_directory/package.json` |
 | `test_enabled` | No | `true` | Enable test execution |
 | `test_command` | No | *(auto)* | Custom test command (overrides language default) |
 | `lint_enabled` | No | `true` | Enable linting |

@@ -45,6 +45,6 @@
     "template-injection": 19
   },
   ".github/workflows/tests.yml": {
-    "template-injection": 33
+    "template-injection": 29
   }
 }
