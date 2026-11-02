@@ -52,6 +52,23 @@
 #         golangci_extra_build_tags: integration
 #         sqlfluff_enabled: true
 #         sqlfluff_paths: internal/infra/migrations
+#
+# Usage (version read from a file, pnpm workspace):
+#   jobs:
+#     go:
+#       uses: NeuralTrust/workflows/.github/workflows/tests.yml@main
+#       with:
+#         language: go
+#         language_version_file: services/go.mod
+#         working_directory: services
+#     web:
+#       uses: NeuralTrust/workflows/.github/workflows/tests.yml@main
+#       with:
+#         language: node
+#         language_version: '22'
+#         node_package_manager: pnpm
+#         lint_command: pnpm --filter @acme/web lint
+#         test_command: pnpm --filter @acme/web test
 # ==============================================================================
 
 name: Tests
@@ -67,9 +84,28 @@ on:
         required: true
         type: string
       language_version:
-        description: 'Language version (e.g., 1.25.1, 3.12, 20, 1.78)'
-        required: true
+        description: 'Language version (e.g., 1.27, 3.12, 22, 1.78). Set this or language_version_file; this one wins when both are set.'
+        required: false
         type: string
+        default: ''
+      language_version_file:
+        description: >
+          File the language version is read from, relative to the repository root
+          (e.g. services/go.mod, .nvmrc, .python-version), so the version lives in
+          one place. Go, Node and Python only.
+        required: false
+        type: string
+        default: ''
+      node_package_manager:
+        description: 'Node package manager: npm or pnpm. Drives setup, cache, install and the default lint and test commands.'
+        required: false
+        type: string
+        default: 'npm'
+      pnpm_version:
+        description: 'pnpm version; empty reads the packageManager field of working_directory/package.json'
+        required: false
+        type: string
+        default: ''
 
       # ======================================================================
       # Testing
@@ -309,6 +345,32 @@ jobs:
           persist-credentials: false
           token: ${{ secrets.GH_TOKEN || github.token }}
 
+      - name: Validate language inputs
+        env:
+          LANGUAGE: ${{ inputs.language }}
+          LANGUAGE_VERSION: ${{ inputs.language_version }}
+          LANGUAGE_VERSION_FILE: ${{ inputs.language_version_file }}
+          NODE_PACKAGE_MANAGER: ${{ inputs.node_package_manager }}
+        run: |
+          if [ -z "$LANGUAGE_VERSION" ] && [ -z "$LANGUAGE_VERSION_FILE" ]; then
+            echo "::error::Set language_version or language_version_file."
+            exit 1
+          fi
+          if [ -z "$LANGUAGE_VERSION" ] && [ "$LANGUAGE" = "rust" ]; then
+            echo "::error::language_version_file is not supported for rust; set language_version."
+            exit 1
+          fi
+          if [ -n "$LANGUAGE_VERSION_FILE" ] && [ ! -f "$LANGUAGE_VERSION_FILE" ]; then
+            echo "::error::language_version_file '$LANGUAGE_VERSION_FILE' does not exist."
+            exit 1
+          fi
+          if [ "$LANGUAGE" = "node" ]; then
+            case "$NODE_PACKAGE_MANAGER" in
+              npm|pnpm) ;;
+              *) echo "::error::node_package_manager must be npm or pnpm, got '$NODE_PACKAGE_MANAGER'."; exit 1 ;;
+            esac
+          fi
+
       - name: Configure private repository access
         env:
           TOKEN: ${{ secrets.GH_TOKEN }}
@@ -323,6 +385,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ inputs.language_version }}
+          go-version-file: ${{ inputs.language_version_file }}
           # Callers pin the minor line (e.g. '1.27'), so resolve it to the newest
           # patch instead of reusing whatever 1.27.x the runner has cached.
           check-latest: true
@@ -400,6 +463,7 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: ${{ inputs.language_version }}
+          python-version-file: ${{ inputs.language_version_file }}
 
       - name: Install uv
         if: inputs.language == 'python'
@@ -435,22 +499,46 @@ jobs:
           fi
 
       # ---- Node ----
+      # pnpm must be on PATH before setup-node can cache its store.
+      - name: Set up pnpm
+        if: inputs.language == 'node' && inputs.node_package_manager == 'pnpm'
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm_version }}
+          package_json_file: ${{ inputs.working_directory }}/package.json
+
       - name: Set up Node
         if: inputs.language == 'node'
         uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.language_version }}
-          cache: 'npm'
+          node-version-file: ${{ inputs.language_version_file }}
+          cache: ${{ inputs.node_package_manager }}
+          cache-dependency-path: ${{ inputs.node_package_manager == 'pnpm' && format('{0}/pnpm-lock.yaml', inputs.working_directory) || '' }}
 
       - name: Install Node dependencies
         if: inputs.language == 'node'
         working-directory: ${{ inputs.working_directory }}
-        run: npm ci
+        env:
+          PACKAGE_MANAGER: ${{ inputs.node_package_manager }}
+        run: |
+          if [ "$PACKAGE_MANAGER" = "pnpm" ]; then
+            pnpm install --frozen-lockfile
+          else
+            npm ci
+          fi
 
       - name: Run Node lint (default)
         if: inputs.language == 'node' && inputs.lint_command == ''
         working-directory: ${{ inputs.working_directory }}
-        run: npx eslint .
+        env:
+          PACKAGE_MANAGER: ${{ inputs.node_package_manager }}
+        run: |
+          if [ "$PACKAGE_MANAGER" = "pnpm" ]; then
+            pnpm exec eslint .
+          else
+            npx eslint .
+          fi
 
       # ---- Rust ----
       - name: Set up Rust
@@ -489,11 +577,14 @@ jobs:
         env:
           SUMMARY_GOLANGCI_VERSION: ${{ inputs.language == 'go' && inputs.golangci_version || '—' }}
           SUMMARY_GOEXPERIMENT: ${{ inputs.go_experiment != '' && inputs.go_experiment || '—' }}
+          SUMMARY_LANGUAGE: ${{ inputs.language }}
+          SUMMARY_LANGUAGE_VERSION: ${{ inputs.language_version != '' && inputs.language_version || format('from {0}', inputs.language_version_file) }}
+          SUMMARY_NODE_PACKAGE_MANAGER: ${{ inputs.language == 'node' && format(' ({0})', inputs.node_package_manager) || '' }}
         run: |
           {
             echo "## Lint (${{ inputs.language }})"
             echo ""
-            echo "- **Language:** ${{ inputs.language }} ${{ inputs.language_version }}"
+            echo "- **Language:** ${SUMMARY_LANGUAGE} ${SUMMARY_LANGUAGE_VERSION}${SUMMARY_NODE_PACKAGE_MANAGER}"
             echo "- **Custom command:** ${{ inputs.lint_command != '' && 'Yes' || 'Default' }}"
             echo "- **golangci-lint:** ${SUMMARY_GOLANGCI_VERSION}"
             echo "- **GOEXPERIMENT:** ${SUMMARY_GOEXPERIMENT}"
@@ -521,6 +612,32 @@ jobs:
         with:
           persist-credentials: false
           token: ${{ secrets.GH_TOKEN || github.token }}
+
+      - name: Validate language inputs
+        env:
+          LANGUAGE: ${{ inputs.language }}
+          LANGUAGE_VERSION: ${{ inputs.language_version }}
+          LANGUAGE_VERSION_FILE: ${{ inputs.language_version_file }}
+          NODE_PACKAGE_MANAGER: ${{ inputs.node_package_manager }}
+        run: |
+          if [ -z "$LANGUAGE_VERSION" ] && [ -z "$LANGUAGE_VERSION_FILE" ]; then
+            echo "::error::Set language_version or language_version_file."
+            exit 1
+          fi
+          if [ -z "$LANGUAGE_VERSION" ] && [ "$LANGUAGE" = "rust" ]; then
+            echo "::error::language_version_file is not supported for rust; set language_version."
+            exit 1
+          fi
+          if [ -n "$LANGUAGE_VERSION_FILE" ] && [ ! -f "$LANGUAGE_VERSION_FILE" ]; then
+            echo "::error::language_version_file '$LANGUAGE_VERSION_FILE' does not exist."
+            exit 1
+          fi
+          if [ "$LANGUAGE" = "node" ]; then
+            case "$NODE_PACKAGE_MANAGER" in
+              npm|pnpm) ;;
+              *) echo "::error::node_package_manager must be npm or pnpm, got '$NODE_PACKAGE_MANAGER'."; exit 1 ;;
+            esac
+          fi
 
       - name: Configure private repository access
         env:
@@ -669,6 +786,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version: ${{ inputs.language_version }}
+          go-version-file: ${{ inputs.language_version_file }}
           # Callers pin the minor line (e.g. '1.27'), so resolve it to the newest
           # patch instead of reusing whatever 1.27.x the runner has cached.
           check-latest: true
@@ -710,6 +828,7 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: ${{ inputs.language_version }}
+          python-version-file: ${{ inputs.language_version_file }}
 
       - name: Install uv
         if: inputs.language == 'python'
@@ -735,17 +854,34 @@ jobs:
         run: uv sync ${{ inputs.uv_sync_args }}
 
       # ---- Node ----
+      # pnpm must be on PATH before setup-node can cache its store.
+      - name: Set up pnpm
+        if: inputs.language == 'node' && inputs.node_package_manager == 'pnpm'
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm_version }}
+          package_json_file: ${{ inputs.working_directory }}/package.json
+
       - name: Set up Node
         if: inputs.language == 'node'
         uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.language_version }}
-          cache: 'npm'
+          node-version-file: ${{ inputs.language_version_file }}
+          cache: ${{ inputs.node_package_manager }}
+          cache-dependency-path: ${{ inputs.node_package_manager == 'pnpm' && format('{0}/pnpm-lock.yaml', inputs.working_directory) || '' }}
 
       - name: Install Node dependencies
         if: inputs.language == 'node'
         working-directory: ${{ inputs.working_directory }}
-        run: npm ci
+        env:
+          PACKAGE_MANAGER: ${{ inputs.node_package_manager }}
+        run: |
+          if [ "$PACKAGE_MANAGER" = "pnpm" ]; then
+            pnpm install --frozen-lockfile
+          else
+            npm ci
+          fi
 
       # ---- Rust ----
       - name: Set up Rust
@@ -813,7 +949,14 @@ jobs:
       - name: Run Node tests (default)
         if: inputs.language == 'node' && inputs.test_command == ''
         working-directory: ${{ inputs.working_directory }}
-        run: npm test
+        env:
+          PACKAGE_MANAGER: ${{ inputs.node_package_manager }}
+        run: |
+          if [ "$PACKAGE_MANAGER" = "pnpm" ]; then
+            pnpm test
+          else
+            npm test
+          fi
 
       - name: Run Rust tests (default)
         if: inputs.language == 'rust' && inputs.test_command == ''
@@ -890,11 +1033,14 @@ jobs:
         if: always()
         env:
           SUMMARY_GOEXPERIMENT: ${{ inputs.go_experiment != '' && inputs.go_experiment || '—' }}
+          SUMMARY_LANGUAGE: ${{ inputs.language }}
+          SUMMARY_LANGUAGE_VERSION: ${{ inputs.language_version != '' && inputs.language_version || format('from {0}', inputs.language_version_file) }}
+          SUMMARY_NODE_PACKAGE_MANAGER: ${{ inputs.language == 'node' && format(' ({0})', inputs.node_package_manager) || '' }}
         run: |
           {
             echo "## Test (${{ inputs.language }})"
             echo ""
-            echo "- **Language:** ${{ inputs.language }} ${{ inputs.language_version }}"
+            echo "- **Language:** ${SUMMARY_LANGUAGE} ${SUMMARY_LANGUAGE_VERSION}${SUMMARY_NODE_PACKAGE_MANAGER}"
             echo "- **Custom command:** ${{ inputs.test_command != '' && 'Yes' || 'Default' }}"
             echo "- **GOEXPERIMENT:** ${SUMMARY_GOEXPERIMENT}"
             echo "- **Services:**"
