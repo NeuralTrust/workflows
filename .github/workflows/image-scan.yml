@@ -207,12 +207,15 @@ jobs:
             echo "mode=warn" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Install Trivy
+        uses: NeuralTrust/workflows/.github/actions/install-trivy@main
+
       # JSON report first with exit-code 0, so the findings table can be rendered
       # even when the blocking table scan below fails the job.
       - name: Run Trivy image scan (JSON report)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: 'v0.71.0'
+          skip-setup-trivy: true
           scan-type: 'image'
           image-ref: ${{ inputs.image_ref }}
           scanners: ${{ inputs.scanners }}
@@ -246,7 +249,7 @@ jobs:
         # exist — the action's old default (v0.65.0) was deleted and now 404s.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: 'v0.71.0'
+          skip-setup-trivy: true
           scan-type: 'image'
           image-ref: ${{ inputs.image_ref }}
           scanners: ${{ inputs.scanners }}
@@ -264,7 +267,7 @@ jobs:
         if: always() && inputs.upload_sarif
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: 'v0.71.0'
+          skip-setup-trivy: true
           scan-type: 'image'
           image-ref: ${{ inputs.image_ref }}
           scanners: ${{ inputs.scanners }}
