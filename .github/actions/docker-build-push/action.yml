@@ -419,6 +419,10 @@ runs:
           echo "path=" >> "$GITHUB_OUTPUT"
         fi
 
+    - name: Install Trivy
+      if: inputs.scan_before_push == 'true'
+      uses: NeuralTrust/workflows/.github/actions/install-trivy@main
+
     # JSON report first with exit-code 0, so the findings table renders even
     # when the blocking table scan below fails.
     # TMPDIR: Trivy exports the whole image to a temp file before scanning.
@@ -431,7 +435,7 @@ runs:
         TRIVY_VULN_SEVERITY_SOURCE: ${{ inputs.scan_vuln_severity_source }}
         TMPDIR: ${{ runner.temp }}
       with:
-        version: 'v0.71.0'
+        skip-setup-trivy: true
         scan-type: 'image'
         image-ref: ${{ steps.meta.outputs.image_ref }}
         scanners: ${{ inputs.scan_scanners }}
@@ -465,7 +469,7 @@ runs:
         TRIVY_VULN_SEVERITY_SOURCE: ${{ inputs.scan_vuln_severity_source }}
         TMPDIR: ${{ runner.temp }}
       with:
-        version: 'v0.71.0'
+        skip-setup-trivy: true
         scan-type: 'image'
         image-ref: ${{ steps.meta.outputs.image_ref }}
         scanners: ${{ inputs.scan_scanners }}

@@ -373,6 +373,9 @@ jobs:
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
           echo "Scan target: ${REF}"
 
+      - name: Install Trivy
+        uses: NeuralTrust/workflows/.github/actions/install-trivy@main
+
       - name: Run Trivy image scan
         # SHA-pinned to the only post-incident-safe release (Mar 2026 supply-chain
         # compromise, CVE-2026-33634): tags 0.0.1–0.34.2 were force-pushed to
@@ -382,7 +385,7 @@ jobs:
         env:
           TRIVY_VULN_SEVERITY_SOURCE: ${{ inputs.vuln_severity_source }}
         with:
-          version: 'v0.71.0'
+          skip-setup-trivy: true
           scan-type: image
           image-ref: ${{ steps.scan_target.outputs.ref }}
           scanners: vuln

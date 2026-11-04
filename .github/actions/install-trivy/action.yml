@@ -1,0 +1,41 @@
+name: Install Trivy
+description: >
+  Install a pinned Trivy release from GitHub and put it on PATH. Use before
+  aquasecurity/trivy-action with `skip-setup-trivy: true`.
+
+  trivy-action's built-in setup runs Trivy's contrib/install.sh, which downloads
+  from get.trivy.dev. That host stopped resolving on 2026-11-04
+  (aquasecurity/trivy#11537). The tarball here is verified against the
+  release's checksums file before install.
+
+inputs:
+  version:
+    description: Trivy version, without the leading "v".
+    required: false
+    default: '0.71.0'
+
+runs:
+  using: composite
+  steps:
+    - name: Install Trivy
+      shell: bash
+      env:
+        TRIVY_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        case "$RUNNER_ARCH" in
+          X64) arch=64bit ;;
+          ARM64) arch=ARM64 ;;
+          *) echo "::error::Unsupported runner architecture: $RUNNER_ARCH"; exit 1 ;;
+        esac
+        base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+        tarball="trivy_${TRIVY_VERSION}_Linux-${arch}.tar.gz"
+        tmp_dir="$(mktemp -d)"
+        trap 'rm -rf "$tmp_dir"' EXIT
+        cd "$tmp_dir"
+        curl -fsSLO "${base}/${tarball}"
+        curl -fsSLO "${base}/trivy_${TRIVY_VERSION}_checksums.txt"
+        grep " ${tarball}\$" "trivy_${TRIVY_VERSION}_checksums.txt" | sha256sum -c -
+        tar -xzf "${tarball}" trivy
+        sudo install -m 0755 trivy /usr/local/bin/trivy
+        trivy --version
