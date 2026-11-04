@@ -282,6 +282,7 @@ jobs:
     timeout-minutes: 25
     env:
       TRIVY_VULN_SEVERITY_SOURCE: ${{ inputs.trivy_vuln_severity_source }}
+      TRIVY_VERSION: '0.71.0'
 
     steps:
       - name: Checkout code
@@ -300,12 +301,29 @@ jobs:
             echo "path=" >> "$GITHUB_OUTPUT"
           fi
 
+      # Install Trivy from the GitHub release instead of trivy-action's built-in
+      # setup: its install script downloads from get.trivy.dev, which stopped
+      # resolving on 2026-11-04 (aquasecurity/trivy#11537). The tarball is
+      # verified against the release's checksums file before install.
+      - name: Install Trivy
+        run: |
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          tarball="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "${base}/${tarball}"
+          curl -fsSLO "${base}/trivy_${TRIVY_VERSION}_checksums.txt"
+          grep " ${tarball}\$" "trivy_${TRIVY_VERSION}_checksums.txt" | sha256sum -c -
+          mkdir -p trivy-bin
+          tar -xzf "${tarball}" -C trivy-bin trivy
+          echo "$RUNNER_TEMP/trivy-bin" >> "$GITHUB_PATH"
+          trivy-bin/trivy --version
+
       # JSON report first with exit-code 0, so the findings table can be rendered
       # even when the blocking table scan below fails the job.
       - name: Run Trivy scan (JSON report)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: 'v0.71.0'
+          skip-setup-trivy: true
           scan-type: ${{ inputs.scan_type }}
           scan-ref: '.'
           scanners: ${{ inputs.trivy_scanners }}
@@ -332,7 +350,7 @@ jobs:
         # exist — the action's old default (v0.65.0) was deleted and now 404s.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: 'v0.71.0'
+          skip-setup-trivy: true
           scan-type: ${{ inputs.scan_type }}
           scan-ref: '.'
           scanners: ${{ inputs.trivy_scanners }}
@@ -346,7 +364,7 @@ jobs:
         if: always()
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: 'v0.71.0'
+          skip-setup-trivy: true
           scan-type: ${{ inputs.scan_type }}
           scan-ref: '.'
           scanners: ${{ inputs.trivy_scanners }}
