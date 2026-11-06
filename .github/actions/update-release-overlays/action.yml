@@ -106,6 +106,7 @@ runs:
         GCP_PROJECT_ID: ${{ inputs.gcp_project_id }}
         REPOSITORY: ${{ inputs.repository }}
         KUSTOMIZE_VERSION: v5.6.0
+        KUSTOMIZE_SHA256: 54e4031ddc4e7fc59e408da29e7c646e8e57b8088c51b84b3df0864f47b5148f
       run: |
         set -euo pipefail
 
@@ -114,6 +115,7 @@ runs:
           trap 'rm -rf "$tmp_dir"' EXIT
           curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
             -o "${tmp_dir}/kustomize.tar.gz"
+          echo "${KUSTOMIZE_SHA256}  ${tmp_dir}/kustomize.tar.gz" | sha256sum -c -
           tar -xzf "${tmp_dir}/kustomize.tar.gz" -C "${tmp_dir}" kustomize
           chmod +x "${tmp_dir}/kustomize"
           sudo mv "${tmp_dir}/kustomize" /usr/local/bin/kustomize

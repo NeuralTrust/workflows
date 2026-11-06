@@ -24,6 +24,10 @@ inputs:
     description: Kustomize release version.
     required: false
     default: v5.6.0
+  kustomize_sha256:
+    description: SHA-256 of kustomize_<version>_linux_amd64.tar.gz. Required when kustomize_version is overridden.
+    required: false
+    default: 54e4031ddc4e7fc59e408da29e7c646e8e57b8088c51b84b3df0864f47b5148f
 
 runs:
   using: composite
@@ -32,12 +36,14 @@ runs:
       shell: bash
       env:
         KUSTOMIZE_VERSION: ${{ inputs.kustomize_version }}
+        KUSTOMIZE_SHA256: ${{ inputs.kustomize_sha256 }}
       run: |
         set -euo pipefail
         tmp_dir="$(mktemp -d)"
         trap 'rm -rf "$tmp_dir"' EXIT
         curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
           -o "${tmp_dir}/kustomize.tar.gz"
+        echo "${KUSTOMIZE_SHA256}  ${tmp_dir}/kustomize.tar.gz" | sha256sum -c -
         tar -xzf "${tmp_dir}/kustomize.tar.gz" -C "${tmp_dir}" kustomize
         chmod +x "${tmp_dir}/kustomize"
         sudo mv "${tmp_dir}/kustomize" /usr/local/bin/kustomize

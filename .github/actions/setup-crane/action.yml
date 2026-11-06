@@ -6,6 +6,10 @@ inputs:
     description: go-containerregistry release version.
     required: false
     default: v0.20.6
+  sha256:
+    description: SHA-256 of go-containerregistry_Linux_x86_64.tar.gz for that version. Required when version is overridden.
+    required: false
+    default: c1d593d01551f2c9a3df5ca0a0be4385a839bd9b86d4a76e18d7b17d16559127
 
 runs:
   using: composite
@@ -14,12 +18,14 @@ runs:
       shell: bash
       env:
         CRANE_VERSION: ${{ inputs.version }}
+        CRANE_SHA256: ${{ inputs.sha256 }}
       run: |
         set -euo pipefail
         tmp_dir="$(mktemp -d)"
         trap 'rm -rf "$tmp_dir"' EXIT
         curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
           -o "${tmp_dir}/go-containerregistry.tar.gz"
+        echo "${CRANE_SHA256}  ${tmp_dir}/go-containerregistry.tar.gz" | sha256sum -c -
         tar -xzf "${tmp_dir}/go-containerregistry.tar.gz" -C "${tmp_dir}" crane
         chmod +x "${tmp_dir}/crane"
         sudo mv "${tmp_dir}/crane" /usr/local/bin/crane
