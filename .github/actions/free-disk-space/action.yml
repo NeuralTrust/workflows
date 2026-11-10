@@ -16,3 +16,25 @@ runs:
         sudo docker image prune --all --force || true
         echo "==> Disk after cleanup:"
         df -h /
+
+    # Hosted Ubuntu runners mount a second, mostly empty disk at /mnt. Pointing
+    # Docker's data-root there moves image layers and the buildx builder's state
+    # (a Docker volume) off the root disk. Runs before any buildx builder exists.
+    # Skipped on runners without a separate /mnt disk.
+    - name: Move Docker storage to /mnt
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! mountpoint -q /mnt; then
+          echo "/mnt is not a separate disk; keeping Docker on /"
+          exit 0
+        fi
+        sudo systemctl stop docker docker.socket
+        sudo mkdir -p /mnt/docker
+        cfg=/etc/docker/daemon.json
+        [ -f "$cfg" ] || echo '{}' | sudo tee "$cfg" >/dev/null
+        sudo jq '. + {"data-root": "/mnt/docker"}' "$cfg" | sudo tee "$cfg.new" >/dev/null
+        sudo mv "$cfg.new" "$cfg"
+        sudo systemctl start docker
+        echo "==> Docker root: $(docker info --format '{{.DockerRootDir}}')"
+        df -h / /mnt
