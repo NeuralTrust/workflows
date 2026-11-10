@@ -1486,6 +1486,6 @@ gcloud artifacts repositories add-iam-policy-binding nt-docker \
 | [`kustomize-set-images`](.github/actions/kustomize-set-images/action.yml) | Update image names/tags in `kustomization.yaml` via `kustomize edit set image` (pinned binary) instead of fragile `sed`. |
 | [`update-release-overlays`](.github/actions/update-release-overlays/action.yml) | Release helper: set image tags + `APPLICATION_VERSION` on `k8s/overlays/prod` and, when present, `k8s/overlays/prod-us` in one pass. |
 | [`git-commit-push`](.github/actions/git-commit-push/action.yml) | Commit selected paths and push with `pull --rebase` + retry to avoid overlay-update races. Outputs the pushed commit SHA. |
-| [`free-disk-space`](.github/actions/free-disk-space/action.yml) | Free runner disk space for large Docker builds. |
+| [`free-disk-space`](.github/actions/free-disk-space/action.yml) | Free runner disk space for large Docker builds and move Docker storage to the runner's /mnt disk. |
 | [`setup-crane`](.github/actions/setup-crane/action.yml) | Install a pinned `crane` binary for image promotion (`crane copy`). |
 | [`setup-kreuzberg`](.github/actions/setup-kreuzberg/action.yml) | Install Kreuzberg FFI + Tesseract OCR for Go CGO builds. Used by `tests.yml` when `kreuzberg_enabled: true`. |
