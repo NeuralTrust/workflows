@@ -109,13 +109,13 @@ on:
       node_modules_cache:
         description: >
           Node only. Cache working_directory/node_modules keyed on the lockfile (plus
-          node_modules_cache_key_files), so jobs skip the install when nothing changed.
+          node_modules_cache_extra_key_files), so jobs skip the install when nothing changed.
           Not for workspaces with nested node_modules folders.
         required: false
         type: boolean
         default: false
-      node_modules_cache_key_files:
-        description: 'Extra files hashed into the node_modules cache key, one per line, relative to working_directory (e.g. prisma/schema.prisma, whose client is generated into node_modules on install)'
+      node_modules_cache_extra_key_files:
+        description: 'Files hashed into the node_modules cache key on top of the lockfile (always included), one per line, relative to working_directory: anything an install generates into node_modules from, e.g. prisma/schema.prisma'
         required: false
         type: string
         default: ''
@@ -571,7 +571,7 @@ jobs:
         with:
           working-directory: ${{ inputs.working_directory }}
           package-manager: ${{ inputs.node_package_manager }}
-          key-files: ${{ inputs.node_modules_cache_key_files }}
+          extra-key-files: ${{ inputs.node_modules_cache_extra_key_files }}
 
       - name: Run Node lint (default)
         if: inputs.language == 'node' && inputs.lint_command == ''
@@ -960,7 +960,7 @@ jobs:
         with:
           working-directory: ${{ inputs.working_directory }}
           package-manager: ${{ inputs.node_package_manager }}
-          key-files: ${{ inputs.node_modules_cache_key_files }}
+          extra-key-files: ${{ inputs.node_modules_cache_extra_key_files }}
 
       # ---- Rust ----
       - name: Set up Rust
@@ -1226,7 +1226,7 @@ jobs:
         with:
           working-directory: ${{ inputs.working_directory }}
           package-manager: ${{ inputs.node_package_manager }}
-          key-files: ${{ inputs.node_modules_cache_key_files }}
+          extra-key-files: ${{ inputs.node_modules_cache_extra_key_files }}
 
       - name: Download shard test reports
         uses: actions/download-artifact@v8
