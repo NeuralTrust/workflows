@@ -9,6 +9,12 @@
 # We exercise sast.yml because it needs no cloud credentials: it checks out this
 # repo and runs Trivy in config mode over the repo's own YAML/Dockerfiles.
 #
+# tests.yml is called with its defaults against a tiny Go module
+# (tests/fixtures/sharding): it must stay a single "Test (go)" job, as for every
+# consumer that does not opt into test sharding (Node only). Go keeps the fixture
+# to one go.mod; the Node setup's npm cache needs a lockfile at the repository
+# root. Sharded Node callers exercise the sharded path.
+#
 # NOTE on action-path resolution: a same-repo call still runs in THIS repo's
 # checkout, so it cannot reproduce the cross-repo "./.github/actions/..." failure
 # on its own — the `reusable-hygiene` job in workflows-ci.yml is the dedicated
@@ -24,11 +30,15 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/sast.yml"
+      - ".github/workflows/tests.yml"
       - ".github/workflows/consumer-smoke.yml"
+      - "tests/fixtures/sharding/**"
   pull_request:
     paths:
       - ".github/workflows/sast.yml"
+      - ".github/workflows/tests.yml"
       - ".github/workflows/consumer-smoke.yml"
+      - "tests/fixtures/sharding/**"
   workflow_dispatch:
 
 permissions:
@@ -48,3 +58,17 @@ jobs:
       scan_type: config
       trivy_scanners: config,secret
       trivy_exit_code: "1"
+
+  call-tests:
+    name: Invoke tests.yml as a consumer (default)
+    permissions:
+      contents: read
+      id-token: write  # tests.yml's jobs request it (GCP auth for private Python indexes)
+    uses: ./.github/workflows/tests.yml
+    with:
+      language: go
+      language_version: '1.27'
+      working_directory: tests/fixtures/sharding
+      lint_enabled: false
+      # Unsharded callers still get the shard variables, set to 1 of 1.
+      test_command: test "${TEST_SHARD_INDEX}/${TEST_SHARD_TOTAL}" = "1/1"

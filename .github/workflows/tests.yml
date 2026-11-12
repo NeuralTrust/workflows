@@ -106,6 +106,19 @@ on:
         required: false
         type: string
         default: ''
+      node_modules_cache:
+        description: >
+          Node only. Cache working_directory/node_modules keyed on the lockfile (plus
+          node_modules_cache_extra_key_files), so jobs skip the install when nothing changed.
+          Not for workspaces with nested node_modules folders.
+        required: false
+        type: boolean
+        default: false
+      node_modules_cache_extra_key_files:
+        description: 'Files hashed into the node_modules cache key on top of the lockfile (always included), one per line, relative to working_directory: anything an install generates into node_modules from, e.g. prisma/schema.prisma'
+        required: false
+        type: string
+        default: ''
 
       # ======================================================================
       # Testing
@@ -135,6 +148,30 @@ on:
         required: false
         type: string
         default: '--frozen --all-extras --all-groups'
+
+      # ======================================================================
+      # Test sharding (opt-in)
+      # ======================================================================
+      test_shards:
+        description: >
+          ⚠️ Node only!! Split the test job into this many parallel jobs (1-8). 1 keeps
+          a single Test job. Above 1, each shard gets TEST_SHARD_INDEX and
+          TEST_SHARD_TOTAL, and a "Test reports" job merges the shard reports. The
+          defaults run Vitest; another runner sets test_command, test_report_path
+          and test_merge_command.
+        required: false
+        type: number
+        default: 1
+      test_report_path:
+        description: '⚠️ Node, sharded runs only: folder each shard writes its report to, relative to working_directory'
+        required: false
+        type: string
+        default: '.vitest-reports'
+      test_merge_command:
+        description: '⚠️ Node, sharded runs only: command that merges the shard reports in test_report_path; empty runs `vitest --merge-reports` (npx or pnpm exec)'
+        required: false
+        type: string
+        default: ''
 
       # ======================================================================
       # Linting
@@ -513,11 +550,15 @@ jobs:
         with:
           node-version: ${{ inputs.language_version }}
           node-version-file: ${{ inputs.language_version_file }}
-          cache: ${{ inputs.node_package_manager }}
+          # A node_modules cache hit never needs the package manager's store cache.
+          # package-manager-cache stops setup-node from turning it back on from
+          # package.json's packageManager field (true is setup-node's default).
+          cache: ${{ !inputs.node_modules_cache && inputs.node_package_manager || '' }}
+          package-manager-cache: ${{ !inputs.node_modules_cache }}
           cache-dependency-path: ${{ inputs.node_package_manager == 'pnpm' && format('{0}/pnpm-lock.yaml', inputs.working_directory) || '' }}
 
       - name: Install Node dependencies
-        if: inputs.language == 'node'
+        if: inputs.language == 'node' && !inputs.node_modules_cache
         working-directory: ${{ inputs.working_directory }}
         env:
           PACKAGE_MANAGER: ${{ inputs.node_package_manager }}
@@ -527,6 +568,14 @@ jobs:
           else
             npm ci
           fi
+
+      - name: Install Node dependencies (cached node_modules)
+        if: inputs.language == 'node' && inputs.node_modules_cache
+        uses: NeuralTrust/workflows/.github/actions/setup-node-deps@main
+        with:
+          working-directory: ${{ inputs.working_directory }}
+          package-manager: ${{ inputs.node_package_manager }}
+          extra-key-files: ${{ inputs.node_modules_cache_extra_key_files }}
 
       - name: Run Node lint (default)
         if: inputs.language == 'node' && inputs.lint_command == ''
@@ -595,13 +644,23 @@ jobs:
   # ============================================================================
   # Test
   # ============================================================================
+  # With the default test_shards: 1 the matrix has one entry and the job keeps its
+  # plain "Test (<language>)" name. The name references matrix.shard in both
+  # branches so GitHub never appends the matrix value to it.
   test:
-    name: Test (${{ inputs.language }})
+    name: ${{ inputs.test_shards > 1 && format('Test ({0}) {1}/{2}', inputs.language, matrix.shard, inputs.test_shards) || format('Test ({0})', inputs.language) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     if: inputs.test_enabled
+    strategy:
+      fail-fast: false
+      matrix:
+        # Expressions have no ranges or arithmetic, so look the shard list up.
+        shard: ${{ fromJSON('{"1":[1],"2":[1,2],"3":[1,2,3],"4":[1,2,3,4],"5":[1,2,3,4,5],"6":[1,2,3,4,5,6],"7":[1,2,3,4,5,6,7],"8":[1,2,3,4,5,6,7,8]}')[format('{0}', inputs.test_shards)] }}
     env:
       GOEXPERIMENT: ${{ inputs.go_experiment }}
+      TEST_SHARD_INDEX: ${{ matrix.shard }}
+      TEST_SHARD_TOTAL: ${{ inputs.test_shards }}
     permissions:
       contents: read
       id-token: write
@@ -646,6 +705,29 @@ jobs:
           if [ -n "$TOKEN" ]; then
             git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"
           fi
+
+      - name: Validate shard inputs
+        if: inputs.test_shards > 1
+        env:
+          COVERAGE_ENABLED: ${{ inputs.coverage_enabled }}
+          LANGUAGE: ${{ inputs.language }}
+          TEST_REPORT_PATH: ${{ inputs.test_report_path }}
+        run: |
+          if [ "$LANGUAGE" != "node" ]; then
+            echo "::error::test_shards > 1 is only supported for language: node, got '$LANGUAGE'."
+            exit 1
+          fi
+          # Every shard would upload the same coverage artifact name (rejected
+          # by upload-artifact), and each file would only hold one shard's part.
+          if [ "$COVERAGE_ENABLED" = "true" ]; then
+            echo "::error::coverage_enabled is not supported with test_shards > 1: coverage is not merged across shards."
+            exit 1
+          fi
+          if [ -z "$TEST_REPORT_PATH" ]; then
+            echo "::error::test_shards > 1 needs test_report_path, the folder each shard writes its report to."
+            exit 1
+          fi
+          echo "Running shard ${TEST_SHARD_INDEX}/${TEST_SHARD_TOTAL}"
 
       # ================================================================
       # Start service containers
@@ -868,11 +950,15 @@ jobs:
         with:
           node-version: ${{ inputs.language_version }}
           node-version-file: ${{ inputs.language_version_file }}
-          cache: ${{ inputs.node_package_manager }}
+          # A node_modules cache hit never needs the package manager's store cache.
+          # package-manager-cache stops setup-node from turning it back on from
+          # package.json's packageManager field (true is setup-node's default).
+          cache: ${{ !inputs.node_modules_cache && inputs.node_package_manager || '' }}
+          package-manager-cache: ${{ !inputs.node_modules_cache }}
           cache-dependency-path: ${{ inputs.node_package_manager == 'pnpm' && format('{0}/pnpm-lock.yaml', inputs.working_directory) || '' }}
 
       - name: Install Node dependencies
-        if: inputs.language == 'node'
+        if: inputs.language == 'node' && !inputs.node_modules_cache
         working-directory: ${{ inputs.working_directory }}
         env:
           PACKAGE_MANAGER: ${{ inputs.node_package_manager }}
@@ -882,6 +968,14 @@ jobs:
           else
             npm ci
           fi
+
+      - name: Install Node dependencies (cached node_modules)
+        if: inputs.language == 'node' && inputs.node_modules_cache
+        uses: NeuralTrust/workflows/.github/actions/setup-node-deps@main
+        with:
+          working-directory: ${{ inputs.working_directory }}
+          package-manager: ${{ inputs.node_package_manager }}
+          extra-key-files: ${{ inputs.node_modules_cache_extra_key_files }}
 
       # ---- Rust ----
       - name: Set up Rust
@@ -947,7 +1041,7 @@ jobs:
         run: uv run pytest -v --cov --cov-report=xml:coverage.xml
 
       - name: Run Node tests (default)
-        if: inputs.language == 'node' && inputs.test_command == ''
+        if: inputs.language == 'node' && inputs.test_command == '' && inputs.test_shards <= 1
         working-directory: ${{ inputs.working_directory }}
         env:
           PACKAGE_MANAGER: ${{ inputs.node_package_manager }}
@@ -957,6 +1051,26 @@ jobs:
           else
             npm test
           fi
+
+      # Default for sharded Node runs: this shard's part of the Vitest suite, with a
+      # blob report for the "Test reports" job. Annotations come from the merge, so
+      # the shards list their reporters and skip Vitest's github-actions default.
+      - name: Run Node tests (default, sharded Vitest)
+        if: inputs.language == 'node' && inputs.test_command == '' && inputs.test_shards > 1
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          PACKAGE_MANAGER: ${{ inputs.node_package_manager }}
+          TEST_REPORT_PATH: ${{ inputs.test_report_path }}
+        run: |
+          if [ "$PACKAGE_MANAGER" = "pnpm" ]; then
+            runner=(pnpm exec vitest)
+          else
+            runner=(npx --no-install vitest)
+          fi
+          "${runner[@]}" run \
+            --shard="${TEST_SHARD_INDEX}/${TEST_SHARD_TOTAL}" \
+            --reporter=default --reporter=blob \
+            --outputFile.blob="${TEST_REPORT_PATH}/blob-${TEST_SHARD_INDEX}-${TEST_SHARD_TOTAL}.json"
 
       - name: Run Rust tests (default)
         if: inputs.language == 'rust' && inputs.test_command == ''
@@ -1021,6 +1135,18 @@ jobs:
           path: ${{ inputs.working_directory }}/${{ inputs.coverage_file }}
           retention-days: 7
 
+      # Also after failing tests: the merge job needs every shard's report to
+      # show all failures in one place.
+      - name: Upload shard test report
+        if: ${{ !cancelled() && inputs.test_shards > 1 && inputs.language == 'node' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-report-${{ inputs.language }}-${{ matrix.shard }}
+          path: ${{ inputs.working_directory }}/${{ inputs.test_report_path }}
+          include-hidden-files: true # report folders are often hidden (.vitest-reports)
+          if-no-files-found: warn
+          retention-days: 7
+
       # ================================================================
       # Cleanup
       # ================================================================
@@ -1049,4 +1175,146 @@ jobs:
             echo "  - Redis: ${{ inputs.redis_enabled && format('{0} (v{1})', '✓', inputs.redis_version) || '—' }}"
             echo "  - Kafka: ${{ inputs.kafka_enabled && format('{0} (v{1})', '✓', inputs.kafka_version) || '—' }}"
             echo "- **Coverage:** ${{ inputs.coverage_enabled && '✓' || '—' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
+  # Test reports (sharded runs only)
+  # ============================================================================
+  # Node only. Collects every shard's report and runs test_merge_command on them,
+  # so a sharded run still has one place that shows all results. Fails when any
+  # shard failed or did not report, so a crashed shard can never look green.
+  test-report:
+    name: Test reports (${{ inputs.language }})
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: ${{ !cancelled() && inputs.test_enabled && inputs.test_shards > 1 && inputs.language == 'node' }}
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          token: ${{ secrets.GH_TOKEN || github.token }}
+
+      - name: Configure private repository access
+        env:
+          TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            git config --global url."https://${TOKEN}@github.com/".insteadOf "https://github.com/"
+          fi
+
+      # Merge commands such as `vitest --merge-reports` need the project's deps.
+      - name: Set up pnpm
+        if: inputs.node_package_manager == 'pnpm'
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm_version }}
+          package_json_file: ${{ inputs.working_directory }}/package.json
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.language_version }}
+          node-version-file: ${{ inputs.language_version_file }}
+          # A node_modules cache hit never needs the package manager's store cache.
+          # package-manager-cache stops setup-node from turning it back on from
+          # package.json's packageManager field (true is setup-node's default).
+          cache: ${{ !inputs.node_modules_cache && inputs.node_package_manager || '' }}
+          package-manager-cache: ${{ !inputs.node_modules_cache }}
+          cache-dependency-path: ${{ inputs.node_package_manager == 'pnpm' && format('{0}/pnpm-lock.yaml', inputs.working_directory) || '' }}
+
+      - name: Install Node dependencies
+        if: ${{ !inputs.node_modules_cache }}
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          PACKAGE_MANAGER: ${{ inputs.node_package_manager }}
+        run: |
+          if [ "$PACKAGE_MANAGER" = "pnpm" ]; then
+            pnpm install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: Install Node dependencies (cached node_modules)
+        if: inputs.node_modules_cache
+        uses: NeuralTrust/workflows/.github/actions/setup-node-deps@main
+        with:
+          working-directory: ${{ inputs.working_directory }}
+          package-manager: ${{ inputs.node_package_manager }}
+          extra-key-files: ${{ inputs.node_modules_cache_extra_key_files }}
+
+      - name: Download shard test reports
+        uses: actions/download-artifact@v8
+        with:
+          pattern: test-report-${{ inputs.language }}-*
+          path: ${{ runner.temp }}/test-reports
+
+      # One artifact folder per shard, each non-empty. Their contents are then
+      # merged into test_report_path, where test_merge_command expects them.
+      - name: Check every shard reported
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          DOWNLOAD_DIR: ${{ runner.temp }}/test-reports
+          LANGUAGE: ${{ inputs.language }}
+          TEST_REPORT_PATH: ${{ inputs.test_report_path }}
+          TEST_SHARDS: ${{ inputs.test_shards }}
+        run: |
+          set -euo pipefail
+          missing=0
+          mkdir -p "$TEST_REPORT_PATH"
+          for i in $(seq 1 "$TEST_SHARDS"); do
+            dir="${DOWNLOAD_DIR}/test-report-${LANGUAGE}-${i}"
+            if [ ! -d "$dir" ] || [ -z "$(ls -A "$dir")" ]; then
+              echo "::error::Shard ${i}/${TEST_SHARDS} did not upload a test report."
+              missing=1
+              continue
+            fi
+            cp -R "$dir"/. "$TEST_REPORT_PATH"/
+          done
+          echo "Report files:"
+          find "$TEST_REPORT_PATH" -type f | sort
+          exit "$missing"
+
+      # Default: Vitest prints one summary for all shards, writes the GitHub
+      # annotations once, and exits non-zero when any test failed.
+      - name: Merge test reports
+        if: ${{ !cancelled() }}
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          PACKAGE_MANAGER: ${{ inputs.node_package_manager }}
+          TEST_MERGE_COMMAND: ${{ inputs.test_merge_command }}
+          TEST_REPORT_PATH: ${{ inputs.test_report_path }}
+        run: |
+          if [ -n "$TEST_MERGE_COMMAND" ]; then
+            eval "$TEST_MERGE_COMMAND"
+          elif [ "$PACKAGE_MANAGER" = "pnpm" ]; then
+            pnpm exec vitest --merge-reports="$TEST_REPORT_PATH"
+          else
+            npx --no-install vitest --merge-reports="$TEST_REPORT_PATH"
+          fi
+
+      - name: Fail if a shard failed
+        if: ${{ !cancelled() && needs.test.result != 'success' }}
+        env:
+          SHARDS_RESULT: ${{ needs.test.result }}
+        run: |
+          echo "::error::At least one test shard did not succeed (result: ${SHARDS_RESULT})."
+          exit 1
+
+      - name: Summary
+        if: always()
+        env:
+          SHARDS_RESULT: ${{ needs.test.result }}
+          SUMMARY_LANGUAGE: ${{ inputs.language }}
+          TEST_SHARDS: ${{ inputs.test_shards }}
+        run: |
+          {
+            echo "## Test reports (${SUMMARY_LANGUAGE})"
+            echo ""
+            echo "- **Shards:** ${TEST_SHARDS}"
+            echo "- **Shard jobs:** ${SHARDS_RESULT}"
           } >> "$GITHUB_STEP_SUMMARY"

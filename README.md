@@ -611,6 +611,19 @@ jobs:
       test_command: pnpm --filter @acme/web build
 ```
 
+```yaml
+# Vitest split over 4 parallel jobs, with one merged report
+jobs:
+  tests:
+    uses: NeuralTrust/workflows/.github/workflows/tests.yml@main
+    with:
+      language: node
+      language_version: '24'
+      test_shards: 4
+      node_modules_cache: true                    # optional: skip npm ci when nothing changed
+      node_modules_cache_extra_key_files: prisma/schema.prisma
+```
+
 ### Inputs
 
 | Input | Required | Default | Description |
@@ -620,8 +633,13 @@ jobs:
 | `language_version_file` | One of these two | — | File to read the version from, relative to the repository root (`services/go.mod`, `.nvmrc`, `.python-version`). Go, Node and Python |
 | `node_package_manager` | No | `npm` | `npm` or `pnpm`: setup, cache, install (`npm ci` / `pnpm install --frozen-lockfile`) and the default lint and test commands |
 | `pnpm_version` | No | *(packageManager)* | pnpm version; empty reads `packageManager` from `working_directory/package.json` |
+| `node_modules_cache` | No | `false` | Node only: cache `node_modules` keyed on the lockfile, so jobs skip the install when nothing changed. See [node_modules cache](#node_modules-cache) |
+| `node_modules_cache_extra_key_files` | No | — | Files hashed into that key on top of the lockfile (always included), one per line, relative to `working_directory` (e.g. `prisma/schema.prisma`) |
 | `test_enabled` | No | `true` | Enable test execution |
 | `test_command` | No | *(auto)* | Custom test command (overrides language default) |
+| `test_shards` | No | `1` | Node only: split the tests over this many parallel jobs (1–8). See [Test sharding](#test-sharding) |
+| `test_report_path` | No | `.vitest-reports` | Node, sharded only: folder each shard writes its report to, relative to `working_directory` |
+| `test_merge_command` | No | *(Vitest)* | Node, sharded only: merges the shard reports in `test_report_path`. Empty runs `vitest --merge-reports` |
 | `lint_enabled` | No | `true` | Enable linting |
 | `lint_command` | No | *(auto)* | Custom lint command (overrides language default) |
 | `ty_enabled` | No | `false` | Run Astral `ty check` during default Python linting (preview type checker) |
@@ -665,6 +683,31 @@ The workflow runs two parallel jobs:
 
 1. **Lint** — Language-specific linting (skipped if `lint_enabled: false`)
 2. **Test** — Service startup + setup_commands + test execution (skipped if `test_enabled: false`)
+
+### Test sharding
+
+Node only. With `test_shards` above 1, the Test job runs as that many parallel jobs, named `Test (<language>) 1/N` … `N/N`. With the default of 1 nothing changes: one `Test (<language>)` job.
+
+- **Defaults run Vitest.** Each shard runs `vitest run --shard=<i>/<N>` with a blob report in `test_report_path` (`.vitest-reports`), and the merge runs `vitest --merge-reports`, through `npx --no-install` or `pnpm exec` (a repo without Vitest installed fails instead of downloading it). A Vitest repo only sets `test_shards`; add `.vitest-reports/` to its `.gitignore`.
+- The sharded default runs `vitest run` directly, **not** the repo's `test` script: flags in that script (`--project`, `--config`) and `pretest` hooks don't apply. If you need them, set `test_command` to your script plus `--shard="$TEST_SHARD_INDEX/$TEST_SHARD_TOTAL" --reporter=default --reporter=blob`.
+- **Other runners** set `test_command` (using `TEST_SHARD_INDEX` 1…N and `TEST_SHARD_TOTAL` N), `test_report_path` and `test_merge_command`.
+- Each shard uploads its report, even when tests fail.
+- A **Test reports (node)** job then installs dependencies, downloads every shard's report and merges them: one summary, with failure annotations shown once. It fails when any shard failed or did not upload a report, so its result is the result of the whole test run.
+- `coverage_enabled` can't be combined with `test_shards` above 1: coverage is not merged across shards, so the run fails early with a clear message.
+- Shard reports are uploaded as `test-report-<language>-<shard>`. Calling `tests.yml` twice with sharding in the same workflow run makes those names collide; the upload then fails loudly, so reports never get mixed.
+- Unsharded callers see one extra **skipped** check, `Test reports (<language>)`.
+
+### node_modules cache
+
+Node only, opt-in with `node_modules_cache: true`. The Lint, Test (every shard) and Test reports jobs install through the [`setup-node-deps`](.github/actions/setup-node-deps/action.yml) composite action:
+
+- It restores `working_directory/node_modules` from the Actions cache when the key matches exactly. The key covers OS, runner image, CPU architecture, Node major, package manager, working directory, and a hash of the lockfile, `package.json`, `.npmrc` and `pnpm-workspace.yaml` (when present) plus `node_modules_cache_extra_key_files`. There are no partial matches, so a restore is always what a fresh install of the same files would produce.
+- On a miss it runs `npm ci` / `pnpm install --frozen-lockfile` and saves the result. Parallel jobs that miss together race to save; the first one wins.
+- Add to `node_modules_cache_extra_key_files` anything an install script reads to generate code into `node_modules`, such as `prisma/schema.prisma` for the Prisma client.
+- On a hit no install runs, so root `postinstall` / `prepare` output written **outside** `node_modules` is not recreated. One example is a Prisma generator with a custom `output` (Prisma 7's `prisma-client` generator requires one): run that generate step yourself after the install.
+- With the cache on, `setup-node`'s own package-manager cache (`~/.npm`, the pnpm store) is turned off: a hit never needs it, and keeping both roughly doubles cache storage per lockfile.
+- PR runs can restore caches saved on their own branch, their base branch and the default branch. To make a PR's first run hit, save the cache on the base branch too, e.g. with a small workflow that runs the same action on pushes that change the lockfile.
+- Not for workspaces that install nested `node_modules` folders: only the top-level folder is cached.
 
 ---
 
