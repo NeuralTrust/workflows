@@ -620,6 +620,8 @@ jobs:
       language: node
       language_version: '24'
       test_shards: 4
+      node_modules_cache: true                    # optional: skip npm ci when nothing changed
+      node_modules_cache_key_files: prisma/schema.prisma
 ```
 
 ### Inputs
@@ -631,6 +633,8 @@ jobs:
 | `language_version_file` | One of these two | — | File to read the version from, relative to the repository root (`services/go.mod`, `.nvmrc`, `.python-version`). Go, Node and Python |
 | `node_package_manager` | No | `npm` | `npm` or `pnpm`: setup, cache, install (`npm ci` / `pnpm install --frozen-lockfile`) and the default lint and test commands |
 | `pnpm_version` | No | *(packageManager)* | pnpm version; empty reads `packageManager` from `working_directory/package.json` |
+| `node_modules_cache` | No | `false` | Node only: cache `node_modules` keyed on the lockfile, so jobs skip the install when nothing changed. See [node_modules cache](#node_modules-cache) |
+| `node_modules_cache_key_files` | No | — | Extra files hashed into that key, one per line, relative to `working_directory` (e.g. `prisma/schema.prisma`) |
 | `test_enabled` | No | `true` | Enable test execution |
 | `test_command` | No | *(auto)* | Custom test command (overrides language default) |
 | `test_shards` | No | `1` | Node only: split the tests over this many parallel jobs (1–8). See [Test sharding](#test-sharding) |
@@ -689,6 +693,16 @@ Node only. With `test_shards` above 1, the Test job runs as that many parallel j
 - Each shard uploads its report, even when tests fail.
 - A **Test reports (node)** job then installs dependencies, downloads every shard's report and merges them: one summary, with failure annotations shown once. It fails when any shard failed or did not upload a report, so its result is the result of the whole test run.
 - Unsharded callers see one extra **skipped** check, `Test reports (<language>)`.
+
+### node_modules cache
+
+Node only, opt-in with `node_modules_cache: true`. The Lint, Test (every shard) and Test reports jobs install through the [`setup-node-deps`](.github/actions/setup-node-deps/action.yml) composite action:
+
+- It restores `working_directory/node_modules` from the Actions cache when the key matches exactly. The key covers OS, CPU architecture, Node major, package manager, working directory, and a hash of the lockfile plus `node_modules_cache_key_files`. There are no partial matches, so a restore is always what a fresh install of the same files would produce.
+- On a miss it runs `npm ci` / `pnpm install --frozen-lockfile` and saves the result. Parallel jobs that miss together race to save; the first one wins.
+- Add to `node_modules_cache_key_files` anything an install script reads to generate code into `node_modules`, such as `prisma/schema.prisma` for the Prisma client.
+- PR runs can restore caches saved on their own branch, their base branch and the default branch. To make a PR's first run hit, save the cache on the base branch too, e.g. with a small workflow that runs the same action on pushes that change the lockfile.
+- Not for workspaces that install nested `node_modules` folders: only the top-level folder is cached.
 
 ---
 

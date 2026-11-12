@@ -106,6 +106,19 @@ on:
         required: false
         type: string
         default: ''
+      node_modules_cache:
+        description: >
+          Node only. Cache working_directory/node_modules keyed on the lockfile (plus
+          node_modules_cache_key_files), so jobs skip the install when nothing changed.
+          Not for workspaces with nested node_modules folders.
+        required: false
+        type: boolean
+        default: false
+      node_modules_cache_key_files:
+        description: 'Extra files hashed into the node_modules cache key, one per line, relative to working_directory (e.g. prisma/schema.prisma, whose client is generated into node_modules on install)'
+        required: false
+        type: string
+        default: ''
 
       # ======================================================================
       # Testing
@@ -541,7 +554,7 @@ jobs:
           cache-dependency-path: ${{ inputs.node_package_manager == 'pnpm' && format('{0}/pnpm-lock.yaml', inputs.working_directory) || '' }}
 
       - name: Install Node dependencies
-        if: inputs.language == 'node'
+        if: inputs.language == 'node' && !inputs.node_modules_cache
         working-directory: ${{ inputs.working_directory }}
         env:
           PACKAGE_MANAGER: ${{ inputs.node_package_manager }}
@@ -551,6 +564,14 @@ jobs:
           else
             npm ci
           fi
+
+      - name: Install Node dependencies (cached node_modules)
+        if: inputs.language == 'node' && inputs.node_modules_cache
+        uses: NeuralTrust/workflows/.github/actions/setup-node-deps@eduardfarre/eng-3166-test-shards
+        with:
+          working-directory: ${{ inputs.working_directory }}
+          package-manager: ${{ inputs.node_package_manager }}
+          key-files: ${{ inputs.node_modules_cache_key_files }}
 
       - name: Run Node lint (default)
         if: inputs.language == 'node' && inputs.lint_command == ''
@@ -922,7 +943,7 @@ jobs:
           cache-dependency-path: ${{ inputs.node_package_manager == 'pnpm' && format('{0}/pnpm-lock.yaml', inputs.working_directory) || '' }}
 
       - name: Install Node dependencies
-        if: inputs.language == 'node'
+        if: inputs.language == 'node' && !inputs.node_modules_cache
         working-directory: ${{ inputs.working_directory }}
         env:
           PACKAGE_MANAGER: ${{ inputs.node_package_manager }}
@@ -932,6 +953,14 @@ jobs:
           else
             npm ci
           fi
+
+      - name: Install Node dependencies (cached node_modules)
+        if: inputs.language == 'node' && inputs.node_modules_cache
+        uses: NeuralTrust/workflows/.github/actions/setup-node-deps@eduardfarre/eng-3166-test-shards
+        with:
+          working-directory: ${{ inputs.working_directory }}
+          package-manager: ${{ inputs.node_package_manager }}
+          key-files: ${{ inputs.node_modules_cache_key_files }}
 
       # ---- Rust ----
       - name: Set up Rust
@@ -1180,6 +1209,7 @@ jobs:
           cache-dependency-path: ${{ inputs.node_package_manager == 'pnpm' && format('{0}/pnpm-lock.yaml', inputs.working_directory) || '' }}
 
       - name: Install Node dependencies
+        if: ${{ !inputs.node_modules_cache }}
         working-directory: ${{ inputs.working_directory }}
         env:
           PACKAGE_MANAGER: ${{ inputs.node_package_manager }}
@@ -1189,6 +1219,14 @@ jobs:
           else
             npm ci
           fi
+
+      - name: Install Node dependencies (cached node_modules)
+        if: inputs.node_modules_cache
+        uses: NeuralTrust/workflows/.github/actions/setup-node-deps@eduardfarre/eng-3166-test-shards
+        with:
+          working-directory: ${{ inputs.working_directory }}
+          package-manager: ${{ inputs.node_package_manager }}
+          key-files: ${{ inputs.node_modules_cache_key_files }}
 
       - name: Download shard test reports
         uses: actions/download-artifact@v8
