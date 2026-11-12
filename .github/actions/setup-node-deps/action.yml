@@ -1,0 +1,132 @@
+# ==============================================================================
+# Composite Action: Install Node dependencies with a node_modules cache
+# ==============================================================================
+# Restores working-directory/node_modules from the Actions cache when nothing
+# that shapes it has changed, and only runs `npm ci` / `pnpm install` on a miss
+# (then saves the result for the next jobs and runs).
+#
+# The cache key is exact (no restore-keys): OS, runner image, CPU architecture,
+# Node major, package manager, working directory and a hash of the lockfile,
+# package.json, .npmrc and pnpm-workspace.yaml (those present) plus any
+# `extra-key-files`. A restore therefore always holds what a fresh install of
+# the same files would produce.
+#
+# On a hit no install runs, so root `postinstall` / `prepare` output written
+# outside node_modules is not recreated. List in `extra-key-files`
+# anything an install script reads to generate code into node_modules, e.g.
+# prisma/schema.prisma for the Prisma client that @prisma/client's postinstall
+# writes to node_modules/.prisma.
+#
+# Caches only working-directory/node_modules: not suited to workspaces that
+# install nested node_modules folders.
+#
+# Requires Node (and pnpm, for pnpm) to be set up first.
+#
+# Usage:
+#   - name: Install Node dependencies
+#     uses: NeuralTrust/workflows/.github/actions/setup-node-deps@main
+#     with:
+#       working-directory: .
+#       package-manager: npm
+#       extra-key-files: prisma/schema.prisma
+# ==============================================================================
+
+name: 'Install Node dependencies (cached node_modules)'
+description: 'Restore node_modules from cache keyed on the lockfile; install and save only on a miss'
+
+inputs:
+  working-directory:
+    description: 'Directory holding package.json and the lockfile'
+    required: false
+    default: '.'
+  package-manager:
+    description: 'npm or pnpm'
+    required: false
+    default: 'npm'
+  extra-key-files:
+    description: 'Files hashed into the cache key on top of the lockfile, package.json, .npmrc and pnpm-workspace.yaml (always included when present), one per line, relative to working-directory'
+    required: false
+    default: ''
+
+outputs:
+  cache-hit:
+    description: "'true' when node_modules came from the cache"
+    value: ${{ steps.restore.outputs.cache-hit }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Compute node_modules cache key
+      id: key
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        PACKAGE_MANAGER: ${{ inputs.package-manager }}
+        EXTRA_KEY_FILES: ${{ inputs.extra-key-files }}
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        case "$PACKAGE_MANAGER" in
+          npm) lockfile=package-lock.json ;;
+          pnpm) lockfile=pnpm-lock.yaml ;;
+          *) echo "::error::package-manager must be npm or pnpm, got '$PACKAGE_MANAGER'."; exit 1 ;;
+        esac
+        files=("$lockfile")
+        # Project files that change what an install produces without changing
+        # the lockfile: root scripts (package.json) and install settings
+        # (.npmrc; pnpm-workspace.yaml holds pnpm's settings). Only when present.
+        for file in package.json .npmrc pnpm-workspace.yaml; do
+          [ -f "$file" ] && files+=("$file")
+        done
+        while IFS= read -r file; do
+          [ -n "$file" ] && files+=("$file")
+        done <<< "$EXTRA_KEY_FILES"
+        for file in "${files[@]}"; do
+          if [ ! -f "$file" ]; then
+            echo "::error::Cache key file '$file' not found in '$WORKING_DIRECTORY'."
+            exit 1
+          fi
+        done
+        # Hash names and contents, so renaming a key file also changes the key.
+        files_hash=$(sha256sum "${files[@]}" | sha256sum | cut -c1-32)
+        dir_hash=$(printf '%s' "$WORKING_DIRECTORY" | sha256sum | cut -c1-8)
+        node_major=$(node -p 'process.versions.node.split(".")[0]')
+        # The runner image (e.g. ubuntu24): native binaries in node_modules are
+        # picked for the image's libc/OpenSSL, so a new ubuntu-latest image must
+        # not restore them. Self-hosted runners have no ImageOS; use os-release.
+        image_os="${ImageOS:-}"
+        if [ -z "$image_os" ] && [ -r /etc/os-release ]; then
+          # shellcheck source=/dev/null
+          image_os=$(. /etc/os-release && printf '%s%s' "${ID:-}" "${VERSION_ID:-}")
+        fi
+        image_os="${image_os:-unknown}"
+        echo "key=node-modules-v2-${RUNNER_OS}-${image_os}-${RUNNER_ARCH}-node${node_major}-${PACKAGE_MANAGER}-${dir_hash}-${files_hash}" >> "$GITHUB_OUTPUT"
+
+    - name: Restore node_modules
+      id: restore
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ inputs.working-directory }}/node_modules
+        key: ${{ steps.key.outputs.key }}
+
+    - name: Install Node dependencies
+      if: steps.restore.outputs.cache-hit != 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        PACKAGE_MANAGER: ${{ inputs.package-manager }}
+      run: |
+        if [ "$PACKAGE_MANAGER" = "pnpm" ]; then
+          pnpm install --frozen-lockfile
+        else
+          npm ci
+        fi
+
+    # Parallel jobs that all missed race to save the same key: the first one
+    # wins and the others only log a warning.
+    - name: Save node_modules
+      if: steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ inputs.working-directory }}/node_modules
+        key: ${{ steps.key.outputs.key }}
