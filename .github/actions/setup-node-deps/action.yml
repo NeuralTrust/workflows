@@ -5,10 +5,14 @@
 # that shapes it has changed, and only runs `npm ci` / `pnpm install` on a miss
 # (then saves the result for the next jobs and runs).
 #
-# The cache key is exact (no restore-keys): OS, CPU architecture, Node major,
-# package manager, working directory and a hash of the lockfile (always
-# included) plus any `extra-key-files`. A restore therefore always holds what
-# a fresh install of the same files would produce. List in `extra-key-files`
+# The cache key is exact (no restore-keys): OS, runner image, CPU architecture,
+# Node major, package manager, working directory and a hash of the lockfile,
+# package.json, .npmrc and pnpm-workspace.yaml (those present) plus any
+# `extra-key-files`. A restore therefore always holds what a fresh install of
+# the same files would produce.
+#
+# On a hit no install runs, so root `postinstall` / `prepare` output written
+# outside node_modules is not recreated. List in `extra-key-files`
 # anything an install script reads to generate code into node_modules, e.g.
 # prisma/schema.prisma for the Prisma client that @prisma/client's postinstall
 # writes to node_modules/.prisma.
@@ -40,7 +44,7 @@ inputs:
     required: false
     default: 'npm'
   extra-key-files:
-    description: 'Files hashed into the cache key on top of the lockfile (which is always included), one per line, relative to working-directory'
+    description: 'Files hashed into the cache key on top of the lockfile, package.json, .npmrc and pnpm-workspace.yaml (always included when present), one per line, relative to working-directory'
     required: false
     default: ''
 
@@ -68,6 +72,12 @@ runs:
           *) echo "::error::package-manager must be npm or pnpm, got '$PACKAGE_MANAGER'."; exit 1 ;;
         esac
         files=("$lockfile")
+        # Project files that change what an install produces without changing
+        # the lockfile: root scripts (package.json) and install settings
+        # (.npmrc; pnpm-workspace.yaml holds pnpm's settings). Only when present.
+        for file in package.json .npmrc pnpm-workspace.yaml; do
+          [ -f "$file" ] && files+=("$file")
+        done
         while IFS= read -r file; do
           [ -n "$file" ] && files+=("$file")
         done <<< "$EXTRA_KEY_FILES"
@@ -81,7 +91,16 @@ runs:
         files_hash=$(sha256sum "${files[@]}" | sha256sum | cut -c1-32)
         dir_hash=$(printf '%s' "$WORKING_DIRECTORY" | sha256sum | cut -c1-8)
         node_major=$(node -p 'process.versions.node.split(".")[0]')
-        echo "key=node-modules-v1-${RUNNER_OS}-${RUNNER_ARCH}-node${node_major}-${PACKAGE_MANAGER}-${dir_hash}-${files_hash}" >> "$GITHUB_OUTPUT"
+        # The runner image (e.g. ubuntu24): native binaries in node_modules are
+        # picked for the image's libc/OpenSSL, so a new ubuntu-latest image must
+        # not restore them. Self-hosted runners have no ImageOS; use os-release.
+        image_os="${ImageOS:-}"
+        if [ -z "$image_os" ] && [ -r /etc/os-release ]; then
+          # shellcheck source=/dev/null
+          image_os=$(. /etc/os-release && printf '%s%s' "${ID:-}" "${VERSION_ID:-}")
+        fi
+        image_os="${image_os:-unknown}"
+        echo "key=node-modules-v2-${RUNNER_OS}-${image_os}-${RUNNER_ARCH}-node${node_major}-${PACKAGE_MANAGER}-${dir_hash}-${files_hash}" >> "$GITHUB_OUTPUT"
 
     - name: Restore node_modules
       id: restore
