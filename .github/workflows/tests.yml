@@ -567,7 +567,7 @@ jobs:
 
       - name: Install Node dependencies (cached node_modules)
         if: inputs.language == 'node' && inputs.node_modules_cache
-        uses: NeuralTrust/workflows/.github/actions/setup-node-deps@eduardfarre/eng-3166-test-shards
+        uses: NeuralTrust/workflows/.github/actions/setup-node-deps@main
         with:
           working-directory: ${{ inputs.working_directory }}
           package-manager: ${{ inputs.node_package_manager }}
@@ -956,7 +956,7 @@ jobs:
 
       - name: Install Node dependencies (cached node_modules)
         if: inputs.language == 'node' && inputs.node_modules_cache
-        uses: NeuralTrust/workflows/.github/actions/setup-node-deps@eduardfarre/eng-3166-test-shards
+        uses: NeuralTrust/workflows/.github/actions/setup-node-deps@main
         with:
           working-directory: ${{ inputs.working_directory }}
           package-manager: ${{ inputs.node_package_manager }}
@@ -1222,7 +1222,7 @@ jobs:
 
       - name: Install Node dependencies (cached node_modules)
         if: inputs.node_modules_cache
-        uses: NeuralTrust/workflows/.github/actions/setup-node-deps@eduardfarre/eng-3166-test-shards
+        uses: NeuralTrust/workflows/.github/actions/setup-node-deps@main
         with:
           working-directory: ${{ inputs.working_directory }}
           package-manager: ${{ inputs.node_package_manager }}
