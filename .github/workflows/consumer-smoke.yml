@@ -13,7 +13,7 @@
 # (tests/fixtures/sharding): it must stay a single "Test (go)" job, as for every
 # consumer that does not opt into test sharding (Node only). Go keeps the fixture
 # to one go.mod; the Node setup's npm cache needs a lockfile at the repository
-# root. The app's CI exercises the sharded Node path.
+# root. Sharded Node callers exercise the sharded path.
 #
 # NOTE on action-path resolution: a same-repo call still runs in THIS repo's
 # checkout, so it cannot reproduce the cross-repo "./.github/actions/..." failure

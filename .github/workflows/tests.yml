@@ -550,7 +550,11 @@ jobs:
         with:
           node-version: ${{ inputs.language_version }}
           node-version-file: ${{ inputs.language_version_file }}
-          cache: ${{ inputs.node_package_manager }}
+          # A node_modules cache hit never needs the package manager's store cache.
+          # package-manager-cache stops setup-node from turning it back on from
+          # package.json's packageManager field (true is setup-node's default).
+          cache: ${{ !inputs.node_modules_cache && inputs.node_package_manager || '' }}
+          package-manager-cache: ${{ !inputs.node_modules_cache }}
           cache-dependency-path: ${{ inputs.node_package_manager == 'pnpm' && format('{0}/pnpm-lock.yaml', inputs.working_directory) || '' }}
 
       - name: Install Node dependencies
@@ -705,11 +709,18 @@ jobs:
       - name: Validate shard inputs
         if: inputs.test_shards > 1
         env:
+          COVERAGE_ENABLED: ${{ inputs.coverage_enabled }}
           LANGUAGE: ${{ inputs.language }}
           TEST_REPORT_PATH: ${{ inputs.test_report_path }}
         run: |
           if [ "$LANGUAGE" != "node" ]; then
             echo "::error::test_shards > 1 is only supported for language: node, got '$LANGUAGE'."
+            exit 1
+          fi
+          # Every shard would upload the same coverage artifact name (rejected
+          # by upload-artifact), and each file would only hold one shard's part.
+          if [ "$COVERAGE_ENABLED" = "true" ]; then
+            echo "::error::coverage_enabled is not supported with test_shards > 1: coverage is not merged across shards."
             exit 1
           fi
           if [ -z "$TEST_REPORT_PATH" ]; then
@@ -939,7 +950,11 @@ jobs:
         with:
           node-version: ${{ inputs.language_version }}
           node-version-file: ${{ inputs.language_version_file }}
-          cache: ${{ inputs.node_package_manager }}
+          # A node_modules cache hit never needs the package manager's store cache.
+          # package-manager-cache stops setup-node from turning it back on from
+          # package.json's packageManager field (true is setup-node's default).
+          cache: ${{ !inputs.node_modules_cache && inputs.node_package_manager || '' }}
+          package-manager-cache: ${{ !inputs.node_modules_cache }}
           cache-dependency-path: ${{ inputs.node_package_manager == 'pnpm' && format('{0}/pnpm-lock.yaml', inputs.working_directory) || '' }}
 
       - name: Install Node dependencies
@@ -1050,7 +1065,7 @@ jobs:
           if [ "$PACKAGE_MANAGER" = "pnpm" ]; then
             runner=(pnpm exec vitest)
           else
-            runner=(npx vitest)
+            runner=(npx --no-install vitest)
           fi
           "${runner[@]}" run \
             --shard="${TEST_SHARD_INDEX}/${TEST_SHARD_TOTAL}" \
@@ -1205,7 +1220,11 @@ jobs:
         with:
           node-version: ${{ inputs.language_version }}
           node-version-file: ${{ inputs.language_version_file }}
-          cache: ${{ inputs.node_package_manager }}
+          # A node_modules cache hit never needs the package manager's store cache.
+          # package-manager-cache stops setup-node from turning it back on from
+          # package.json's packageManager field (true is setup-node's default).
+          cache: ${{ !inputs.node_modules_cache && inputs.node_package_manager || '' }}
+          package-manager-cache: ${{ !inputs.node_modules_cache }}
           cache-dependency-path: ${{ inputs.node_package_manager == 'pnpm' && format('{0}/pnpm-lock.yaml', inputs.working_directory) || '' }}
 
       - name: Install Node dependencies
@@ -1275,7 +1294,7 @@ jobs:
           elif [ "$PACKAGE_MANAGER" = "pnpm" ]; then
             pnpm exec vitest --merge-reports="$TEST_REPORT_PATH"
           else
-            npx vitest --merge-reports="$TEST_REPORT_PATH"
+            npx --no-install vitest --merge-reports="$TEST_REPORT_PATH"
           fi
 
       - name: Fail if a shard failed
