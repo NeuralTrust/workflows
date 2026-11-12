@@ -611,6 +611,17 @@ jobs:
       test_command: pnpm --filter @acme/web build
 ```
 
+```yaml
+# Vitest split over 4 parallel jobs, with one merged report
+jobs:
+  tests:
+    uses: NeuralTrust/workflows/.github/workflows/tests.yml@main
+    with:
+      language: node
+      language_version: '24'
+      test_shards: 4
+```
+
 ### Inputs
 
 | Input | Required | Default | Description |
@@ -622,6 +633,9 @@ jobs:
 | `pnpm_version` | No | *(packageManager)* | pnpm version; empty reads `packageManager` from `working_directory/package.json` |
 | `test_enabled` | No | `true` | Enable test execution |
 | `test_command` | No | *(auto)* | Custom test command (overrides language default) |
+| `test_shards` | No | `1` | Node only: split the tests over this many parallel jobs (1–8). See [Test sharding](#test-sharding) |
+| `test_report_path` | No | `.vitest-reports` | Node, sharded only: folder each shard writes its report to, relative to `working_directory` |
+| `test_merge_command` | No | *(Vitest)* | Node, sharded only: merges the shard reports in `test_report_path`. Empty runs `vitest --merge-reports` |
 | `lint_enabled` | No | `true` | Enable linting |
 | `lint_command` | No | *(auto)* | Custom lint command (overrides language default) |
 | `ty_enabled` | No | `false` | Run Astral `ty check` during default Python linting (preview type checker) |
@@ -665,6 +679,16 @@ The workflow runs two parallel jobs:
 
 1. **Lint** — Language-specific linting (skipped if `lint_enabled: false`)
 2. **Test** — Service startup + setup_commands + test execution (skipped if `test_enabled: false`)
+
+### Test sharding
+
+Node only. With `test_shards` above 1, the Test job runs as that many parallel jobs, named `Test (<language>) 1/N` … `N/N`. With the default of 1 nothing changes: one `Test (<language>)` job.
+
+- **Defaults run Vitest.** Each shard runs `vitest run --shard=<i>/<N>` with a blob report in `test_report_path` (`.vitest-reports`), and the merge runs `vitest --merge-reports`, through `npx` or `pnpm exec`. A Vitest repo only sets `test_shards`; add `.vitest-reports/` to its `.gitignore`.
+- **Other runners** set `test_command` (using `TEST_SHARD_INDEX` 1…N and `TEST_SHARD_TOTAL` N), `test_report_path` and `test_merge_command`.
+- Each shard uploads its report, even when tests fail.
+- A **Test reports (node)** job then installs dependencies, downloads every shard's report and merges them: one summary, with failure annotations shown once. It fails when any shard failed or did not upload a report, so its result is the result of the whole test run.
+- Unsharded callers see one extra **skipped** check, `Test reports (<language>)`.
 
 ---
 
