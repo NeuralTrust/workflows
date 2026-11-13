@@ -213,6 +213,19 @@ on:
         required: false
         type: string
         default: ''
+      go_race_cache:
+        description: >
+          Go tests only. Restore and save the Go build cache (race and cover builds
+          included) across runs, and run tests with -count=1 so a restored cache never
+          replays cached test results. Saved only on pushes to the default branch.
+        required: false
+        type: boolean
+        default: false
+      go_race_cache_key:
+        description: 'Extra text appended to the Go race cache key, to keep separate caches per caller job'
+        required: false
+        type: string
+        default: ''
       sqlfluff_enabled:
         description: 'Run sqlfluff on SQL migration paths after the default lint steps'
         required: false
@@ -874,6 +887,21 @@ jobs:
           check-latest: true
           cache: true
 
+      - name: Restore Go race build cache
+        if: inputs.language == 'go' && inputs.go_race_cache
+        id: go-race-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-race-${{ runner.os }}-${{ inputs.language_version || inputs.language_version_file }}-${{ inputs.go_race_cache_key }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-race-${{ runner.os }}-${{ inputs.language_version || inputs.language_version_file }}-${{ inputs.go_race_cache_key }}-${{ hashFiles('**/go.sum') }}-
+            go-race-${{ runner.os }}-${{ inputs.language_version || inputs.language_version_file }}-${{ inputs.go_race_cache_key }}-
+
+      - name: Never replay cached Go test results
+        if: inputs.language == 'go' && inputs.go_race_cache
+        run: echo "GOFLAGS=${GOFLAGS:+$GOFLAGS }-count=1" >> "$GITHUB_ENV"
+
       - name: Configure private Go modules
         if: inputs.language == 'go' && inputs.go_private_modules
         env:
@@ -1082,6 +1110,13 @@ jobs:
         if: inputs.test_command != ''
         working-directory: ${{ inputs.working_directory }}
         run: ${{ inputs.test_command }}
+
+      - name: Save Go race build cache
+        if: success() && inputs.language == 'go' && inputs.go_race_cache && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/go-build
+          key: ${{ steps.go-race-cache.outputs.cache-primary-key }}
 
       # ================================================================
       # Coverage
