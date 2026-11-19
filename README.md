@@ -256,6 +256,7 @@ jobs:
 | `context` | No | `.` | Build context (rebuild only) |
 | `build_target` | No | — | Multi-stage target (rebuild only) |
 | `build_args` | No | — | Build args (rebuild only) |
+| `cache_mode` | No | `inline` | Buildx cache export mode (rebuild only). `max` also caches earlier stages, such as dependency installs, in the prod registry so the next rebuild reuses them |
 | `tag_prefix` | No | — | Tag prefix (e.g., `gpu-`) |
 | `tag_suffix` | No | — | Tag suffix |
 | `kustomize_name` | No | `image_name` | Image name in kustomization.yaml |

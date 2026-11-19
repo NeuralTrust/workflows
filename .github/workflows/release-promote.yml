@@ -92,6 +92,16 @@ on:
         required: false
         type: string
         default: ''
+      cache_mode:
+        description: >-
+          Buildx cache export mode for the rebuild, passed to docker-build-push.
+          "inline" (default) caches only the final image's layers, so earlier
+          stages (e.g. dependency installs) rebuild on every release. "max"
+          exports every stage to the prod registry cache ref, so unchanged
+          stages are reused by the next rebuild. Not used by a promote.
+        required: false
+        type: string
+        default: 'inline'
       # ---- Tag inputs ----
       tag_prefix:
         description: 'Prefix for image tags (e.g., "gpu-")'
@@ -445,6 +455,7 @@ jobs:
           tag_prefix: ${{ inputs.tag_prefix }}
           tag_suffix: ${{ inputs.tag_suffix }}
           extra_tags: ${{ github.sha }}
+          cache_mode: ${{ inputs.cache_mode }}
 
       - name: Rebuild summary
         if: steps.strategy.outputs.final == 'rebuild'
