@@ -28,8 +28,8 @@
 #         expected_version: ${{ github.sha }}
 #         e2e_tests_channel: prod
 #         image_tag: latest
+#       # Cloudflare Zero Trust team name: the org or repo variable CLOUDFLARE_WARP_TEAM.
 #       secrets:
-#         CLOUDFLARE_WARP_TEAM: ${{ secrets.CLOUDFLARE_WARP_TEAM }}
 #         CLOUDFLARE_WARP_CLIENT_ID: ${{ secrets.CLOUDFLARE_WARP_CLIENT_ID }}
 #         CLOUDFLARE_WARP_CLIENT_SECRET: ${{ secrets.CLOUDFLARE_WARP_CLIENT_SECRET }}
 #         TWINGATE_SERVICE_KEY: ${{ secrets.TWINGATE_SERVICE_KEY }}   # fallback without WARP
@@ -130,7 +130,7 @@ on:
         default: '{}'
     secrets:
       CLOUDFLARE_WARP_TEAM:
-        description: 'Cloudflare Zero Trust team name the runner enrolls in'
+        description: 'Deprecated: set the variable CLOUDFLARE_WARP_TEAM instead. The team name is not secret, and as a secret it is masked wherever it appears, hostnames and report links included'
         required: false
       CLOUDFLARE_WARP_CLIENT_ID:
         description: 'Service token client ID for headless WARP'
@@ -255,7 +255,7 @@ jobs:
         id: private_access
         if: env.IS_ARC_RUNNER != 'true' && inputs.twingate_enabled == true
         env:
-          HAS_WARP: ${{ secrets.CLOUDFLARE_WARP_TEAM != '' && secrets.CLOUDFLARE_WARP_CLIENT_ID != '' && secrets.CLOUDFLARE_WARP_CLIENT_SECRET != '' }}
+          HAS_WARP: ${{ (vars.CLOUDFLARE_WARP_TEAM != '' || secrets.CLOUDFLARE_WARP_TEAM != '') && secrets.CLOUDFLARE_WARP_CLIENT_ID != '' && secrets.CLOUDFLARE_WARP_CLIENT_SECRET != '' }}
           HAS_TWINGATE: ${{ secrets.TWINGATE_SERVICE_KEY != '' }}
         run: |
           if [ "${HAS_WARP}" = "true" ]; then path=warp
@@ -272,7 +272,7 @@ jobs:
       - name: Connect to Cloudflare WARP
         if: steps.private_access.outputs.path == 'warp'
         env:
-          WARP_TEAM: ${{ secrets.CLOUDFLARE_WARP_TEAM }}
+          WARP_TEAM: ${{ vars.CLOUDFLARE_WARP_TEAM || secrets.CLOUDFLARE_WARP_TEAM }}
           WARP_CLIENT_ID: ${{ secrets.CLOUDFLARE_WARP_CLIENT_ID }}
           WARP_CLIENT_SECRET: ${{ secrets.CLOUDFLARE_WARP_CLIENT_SECRET }}
         run: |
