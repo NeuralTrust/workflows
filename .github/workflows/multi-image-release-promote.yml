@@ -34,7 +34,7 @@ on:
   workflow_call:
     inputs:
       images:
-        description: 'JSON array of image configs: [{"name":"X","target":"Y","tag_prefix":"","tag_suffix":"","build_args":"","dockerfile":"Dockerfile","context":"."}]'
+        description: 'JSON array of image configs: [{"name":"X","target":"Y","tag_prefix":"","tag_suffix":"","build_args":"","dockerfile":"Dockerfile","context":".","cache_mode":""}]'
         required: true
         type: string
       kustomize_images:
@@ -86,6 +86,17 @@ on:
         required: false
         type: string
         default: 'ubuntu-latest'
+      cache_mode:
+        description: >-
+          Buildx cache export mode for rebuilds, passed to docker-build-push.
+          "inline" (default) caches only the final image's layers. "max"
+          exports every stage to the prod registry cache ref, so unchanged
+          stages are reused by the next rebuild, and a promote then leaves that
+          cache ref alone instead of copying the dev image over it.
+          Per-image override: set cache_mode on an object in the images JSON.
+        required: false
+        type: string
+        default: 'inline'
       dev_branch:
         description: 'Name of the development branch (for PR detection)'
         required: false
@@ -352,6 +363,7 @@ jobs:
           tag_prefix: ${{ matrix.image.tag_prefix }}
           tag_suffix: ${{ matrix.image.tag_suffix }}
           extra_tags: ${{ github.sha }}
+          cache_mode: ${{ matrix.image.cache_mode || inputs.cache_mode }}
 
       - name: Rebuild summary
         if: steps.strategy.outputs.final == 'rebuild'
@@ -404,6 +416,7 @@ jobs:
           TAG_PREFIX: ${{ matrix.image.tag_prefix }}
           TAG_SUFFIX: ${{ matrix.image.tag_suffix }}
           SHA: ${{ github.sha }}
+          CACHE_MODE: ${{ matrix.image.cache_mode || inputs.cache_mode }}
         run: |
           echo "============================================"
           echo "  PROMOTE: dev → prod (post-scan)"
@@ -415,7 +428,15 @@ jobs:
           crane copy "${SOURCE}" "${PROD_BASE}:${RELEASE_TAG}"
           crane copy "${SOURCE}" "${PROD_BASE}:${TAG_PREFIX}${SHA}${TAG_SUFFIX}"
           crane copy "${SOURCE}" "${PROD_BASE}:${TAG_PREFIX}latest${TAG_SUFFIX}"
-          crane copy "${SOURCE}" "${PROD_BASE}:${TAG_PREFIX}cache${TAG_SUFFIX}"
+          # With cache_mode: max, a rebuild stores its BuildKit cache index
+          # under :cache. Copying the dev image there would replace it, and the
+          # next rebuild (typically a hotfix right after a promote) would start
+          # cold. With inline, the image itself is the cache, so keep the copy.
+          if [ "${CACHE_MODE}" != "max" ]; then
+            crane copy "${SOURCE}" "${PROD_BASE}:${TAG_PREFIX}cache${TAG_SUFFIX}"
+          else
+            echo "cache_mode: max - keeping the rebuild cache at ${PROD_BASE}:${TAG_PREFIX}cache${TAG_SUFFIX}"
+          fi
 
           {
             echo "## Image Promoted"

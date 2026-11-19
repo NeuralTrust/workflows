@@ -98,7 +98,8 @@ on:
           "inline" (default) caches only the final image's layers, so earlier
           stages (e.g. dependency installs) rebuild on every release. "max"
           exports every stage to the prod registry cache ref, so unchanged
-          stages are reused by the next rebuild. Not used by a promote.
+          stages are reused by the next rebuild. With "max", a promote leaves
+          that cache ref alone instead of copying the dev image over it.
         required: false
         type: string
         default: 'inline'
@@ -541,6 +542,8 @@ jobs:
             crane auth login ${{ inputs.registry }} -u oauth2accesstoken --password-stdin
 
       - name: Promote image (dev → prod)
+        env:
+          CACHE_MODE: ${{ inputs.cache_mode }}
         run: |
           SOURCE="${{ needs.release.outputs.source_ref }}"
           PROD_BASE="${{ inputs.registry }}/${{ inputs.gcp_project_id }}/${{ inputs.repository }}/${{ inputs.image_name }}"
@@ -559,7 +562,15 @@ jobs:
           crane copy "${SOURCE}" "${PROD_BASE}:${RELEASE_TAG}"
           crane copy "${SOURCE}" "${PROD_BASE}:${P}${SHA}${S}"
           crane copy "${SOURCE}" "${PROD_BASE}:${P}latest${S}"
-          crane copy "${SOURCE}" "${PROD_BASE}:${P}cache${S}"
+          # With cache_mode: max, a rebuild stores its BuildKit cache index
+          # under :cache. Copying the dev image there would replace it, and the
+          # next rebuild (typically a hotfix right after a promote) would start
+          # cold. With inline, the image itself is the cache, so keep the copy.
+          if [ "${CACHE_MODE}" != "max" ]; then
+            crane copy "${SOURCE}" "${PROD_BASE}:${P}cache${S}"
+          else
+            echo "cache_mode: max - keeping the rebuild cache at ${PROD_BASE}:${P}cache${S}"
+          fi
 
           {
             echo "## Image Promoted"
