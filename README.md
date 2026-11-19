@@ -652,6 +652,8 @@ jobs:
 | `go_private_modules` | No | `false` | Enable private Go module access for `github.com/NeuralTrust/*` |
 | `golangci_version` | No | `v2.14.0` | golangci-lint version built with the selected Go toolchain |
 | `go_experiment` | No | — | Optional `GOEXPERIMENT` value for Go lint and test jobs |
+| `go_race_cache` | No | `false` | Go only: carry the build cache (race and cover builds included) and the module cache across Test runs. See [Go race build cache](#go-race-build-cache) |
+| `go_race_cache_key` | No | — | Extra text hashed into that key, for two caller jobs with the same test command, working directory and `go_experiment` |
 | `kreuzberg_enabled` | No | `false` | Install Kreuzberg FFI + Tesseract OCR before tests (Go CGO builds) |
 | `kreuzberg_version` | No | `v4.1.0` | Kreuzberg FFI release version (only when `kreuzberg_enabled: true`) |
 
@@ -709,6 +711,25 @@ Node only, opt-in with `node_modules_cache: true`. The Lint, Test (every shard) 
 - With the cache on, `setup-node`'s own package-manager cache (`~/.npm`, the pnpm store) is turned off: a hit never needs it, and keeping both roughly doubles cache storage per lockfile.
 - PR runs can restore caches saved on their own branch, their base branch and the default branch. To make a PR's first run hit, save the cache on the base branch too, e.g. with a small workflow that runs the same action on pushes that change the lockfile.
 - Not for workspaces that install nested `node_modules` folders: only the top-level folder is cached.
+
+### Go race build cache
+
+Go only, opt-in with `go_race_cache: true`. `setup-go`'s own cache is written once per `go.sum` and never refreshed, so `-race` and `-cover` packages are recompiled on every run. With this option the Test job carries `GOCACHE` and `GOMODCACHE` itself:
+
+- **Saved by `push`, `schedule` and `workflow_dispatch` runs that pass. `pull_request` runs only restore.** A PR run can read caches from its own branch, its base branch and the default branch, so the cache has to be saved on the branch PRs target. Most callers run `tests.yml` on `pull_request` only. Add a push trigger for the dev branch to the calling workflow, or nothing is ever saved:
+
+  ```yaml
+  on:
+    pull_request:
+      branches: [main, develop]
+    push:
+      branches: [develop]
+  ```
+
+- The key holds the OS, CPU architecture, the resolved Go version (`go env GOVERSION`, so a `check-latest` patch release starts a fresh cache), a hash of `test_command`, `working_directory`, `go_experiment` and `go_race_cache_key`, the `go.sum` hash and the commit. A restore takes the newest cache with the same `go.sum`, then the newest with any `go.sum`.
+- Tests run with `-count=1` (appended to `GOFLAGS`), so a restored cache never replays a test result from the branch that saved it.
+- `setup-go`'s cache is turned off in the Test job, since it holds a stale second copy of the same build cache. The Lint job keeps it.
+- Every save is a new entry, often 1–2 GB, against the repo's 10 GB Actions cache. Old entries are evicted least-recently-used first, and nothing reads them once a newer one exists. Saving on every push to a busy branch can still push out other caches; a nightly `schedule` trigger costs less.
 
 ---
 

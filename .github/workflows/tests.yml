@@ -213,6 +213,22 @@ on:
         required: false
         type: string
         default: ''
+      go_race_cache:
+        description: >
+          Go tests only. Carry the Go build cache (race and cover builds included) and
+          the module cache across runs in the Test job, replacing setup-go's cache
+          there, and run tests with -count=1 so a restored cache never replays cached
+          test results. Saved by push, schedule and workflow_dispatch runs that pass;
+          pull_request runs only restore. Call tests.yml on pushes to the dev branch
+          so PRs into it start warm.
+        required: false
+        type: boolean
+        default: false
+      go_race_cache_key:
+        description: 'Extra text hashed into the Go race cache key. The test command, working directory and GOEXPERIMENT are already in it; use this only when two caller jobs share all three'
+        required: false
+        type: string
+        default: ''
       sqlfluff_enabled:
         description: 'Run sqlfluff on SQL migration paths after the default lint steps'
         required: false
@@ -872,7 +888,49 @@ jobs:
           # Callers pin the minor line (e.g. '1.27'), so resolve it to the newest
           # patch instead of reusing whatever 1.27.x the runner has cached.
           check-latest: true
-          cache: true
+          # setup-go's cache is written once per go.sum and never refreshed, and it
+          # holds the build cache too, so with go_race_cache it would only store a
+          # second, stale copy of what the race cache below carries.
+          cache: ${{ !inputs.go_race_cache }}
+
+      # The key names the resolved toolchain, not the requested '1.27': with
+      # check-latest a new patch release invalidates every build action, and a
+      # key that did not change would keep restoring a cache nothing reads. The
+      # variant hash separates caller jobs that compile different things.
+      - name: Compute Go race cache key
+        if: inputs.language == 'go' && inputs.go_race_cache
+        id: go-race-key
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          TEST_COMMAND: ${{ inputs.test_command }}
+          WORKING_DIRECTORY: ${{ inputs.working_directory }}
+          GO_EXPERIMENT: ${{ inputs.go_experiment }}
+          EXTRA_KEY: ${{ inputs.go_race_cache_key }}
+        run: |
+          set -euo pipefail
+          variant="$(printf '%s\n' "$TEST_COMMAND" "$WORKING_DIRECTORY" "$GO_EXPERIMENT" "$EXTRA_KEY" | sha256sum | cut -c1-12)"
+          {
+            echo "prefix=go-race-${RUNNER_OS}-${RUNNER_ARCH}-$(go env GOVERSION)-${variant}"
+            echo "gocache=$(go env GOCACHE)"
+            echo "gomodcache=$(go env GOMODCACHE)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore Go race build cache
+        if: inputs.language == 'go' && inputs.go_race_cache
+        id: go-race-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ steps.go-race-key.outputs.gocache }}
+            ${{ steps.go-race-key.outputs.gomodcache }}
+          key: ${{ steps.go-race-key.outputs.prefix }}-${{ hashFiles('**/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ steps.go-race-key.outputs.prefix }}-${{ hashFiles('**/go.sum') }}-
+            ${{ steps.go-race-key.outputs.prefix }}-
+
+      - name: Never replay cached Go test results
+        if: inputs.language == 'go' && inputs.go_race_cache
+        run: echo "GOFLAGS=${GOFLAGS:+$GOFLAGS }-count=1" >> "$GITHUB_ENV"
 
       - name: Configure private Go modules
         if: inputs.language == 'go' && inputs.go_private_modules
@@ -1082,6 +1140,24 @@ jobs:
         if: inputs.test_command != ''
         working-directory: ${{ inputs.working_directory }}
         run: ${{ inputs.test_command }}
+
+      # A PR run can restore caches from its own ref, its base branch and the
+      # default branch. Callers run tests.yml on pull_request, so a save limited to
+      # pushes to the default branch never ran. Saving on pushes, schedules and
+      # manual runs lets a caller warm its dev branch for every PR into it. PR runs
+      # never save: that cache would be visible to the one PR only, at 1-2 GB each
+      # of the repo's 10 GB Actions cache.
+      - name: Save Go race build cache
+        if: >-
+          success() && inputs.language == 'go' && inputs.go_race_cache
+          && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name)
+          && steps.go-race-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ steps.go-race-key.outputs.gocache }}
+            ${{ steps.go-race-key.outputs.gomodcache }}
+          key: ${{ steps.go-race-cache.outputs.cache-primary-key }}
 
       # ================================================================
       # Coverage
