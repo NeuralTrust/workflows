@@ -4,8 +4,9 @@
 # Runs Playwright tests from the e2e-tests Docker image against a deployed
 # service, then publishes results to allure-docker-service.
 #
-# Default runner: ubuntu-latest (public/Twingate URL).
-# Opt-in in-cluster: runner: arc-runner-medium (hits k8s svc URLs, no Twingate).
+# Default runner: ubuntu-latest, which reaches private URLs over Cloudflare WARP
+# (CLOUDFLARE_WARP_* secrets) or, without them, Twingate (TWINGATE_SERVICE_KEY).
+# Opt-in in-cluster: runner: arc-runner-medium (hits k8s svc URLs, no private access client).
 #
 # Default: pull stable prod test image (main → prod registry), even for dev URLs.
 # Opt-in develop channel for experimental test changes (develop → dev registry).
@@ -28,7 +29,10 @@
 #         e2e_tests_channel: prod
 #         image_tag: latest
 #       secrets:
-#         TWINGATE_SERVICE_KEY: ${{ secrets.TWINGATE_SERVICE_KEY }}
+#         CLOUDFLARE_WARP_TEAM: ${{ secrets.CLOUDFLARE_WARP_TEAM }}
+#         CLOUDFLARE_WARP_CLIENT_ID: ${{ secrets.CLOUDFLARE_WARP_CLIENT_ID }}
+#         CLOUDFLARE_WARP_CLIENT_SECRET: ${{ secrets.CLOUDFLARE_WARP_CLIENT_SECRET }}
+#         TWINGATE_SERVICE_KEY: ${{ secrets.TWINGATE_SERVICE_KEY }}   # fallback without WARP
 #         ALLURE_USER: ${{ secrets.ALLURE_USER }}
 #         ALLURE_PASS: ${{ secrets.ALLURE_PASS }}
 #         DEV_WIF_PROVIDER: ${{ secrets.DEV_WIF_PROVIDER }}
@@ -75,7 +79,7 @@ on:
         type: string
         default: 'ubuntu-latest'
       twingate_enabled:
-        description: 'Connect Twingate before tests (ignored on arc runners)'
+        description: 'Connect the private access client before tests: Cloudflare WARP when its secrets are passed, Twingate otherwise (ignored on arc runners)'
         required: false
         type: boolean
         default: true
@@ -125,7 +129,17 @@ on:
         type: string
         default: '{}'
     secrets:
+      CLOUDFLARE_WARP_TEAM:
+        description: 'Cloudflare Zero Trust team name the runner enrolls in'
+        required: false
+      CLOUDFLARE_WARP_CLIENT_ID:
+        description: 'Service token client ID for headless WARP'
+        required: false
+      CLOUDFLARE_WARP_CLIENT_SECRET:
+        description: 'Service token client secret for headless WARP'
+        required: false
       TWINGATE_SERVICE_KEY:
+        description: 'Fallback when the CLOUDFLARE_WARP_* secrets are not passed'
         required: false
       ALLURE_USER:
         required: true
@@ -235,8 +249,64 @@ jobs:
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "Expected deploy version: ${SHA}"
 
-      - name: Connect to Twingate
+      # Which private access client, if any: secrets cannot be read in a
+      # step's if, so the choice is an output.
+      - name: Choose private access
+        id: private_access
         if: env.IS_ARC_RUNNER != 'true' && inputs.twingate_enabled == true
+        env:
+          HAS_WARP: ${{ secrets.CLOUDFLARE_WARP_TEAM != '' && secrets.CLOUDFLARE_WARP_CLIENT_ID != '' && secrets.CLOUDFLARE_WARP_CLIENT_SECRET != '' }}
+          HAS_TWINGATE: ${{ secrets.TWINGATE_SERVICE_KEY != '' }}
+        run: |
+          if [ "${HAS_WARP}" = "true" ]; then path=warp
+          elif [ "${HAS_TWINGATE}" = "true" ]; then path=twingate
+          else path=none; echo "::warning::No CLOUDFLARE_WARP_* or TWINGATE_SERVICE_KEY secrets: private URLs will not resolve."
+          fi
+          echo "path=${path}" >> "$GITHUB_OUTPUT"
+          echo "Private access: ${path}"
+
+      # Headless WARP enrolled with a Cloudflare service token, installed from
+      # Cloudflare's signed apt repository (no third-party action gets the
+      # secret). The test and upload containers run with --network host and the
+      # host's /etc/resolv.conf, so they resolve through WARP like the runner.
+      - name: Connect to Cloudflare WARP
+        if: steps.private_access.outputs.path == 'warp'
+        env:
+          WARP_TEAM: ${{ secrets.CLOUDFLARE_WARP_TEAM }}
+          WARP_CLIENT_ID: ${{ secrets.CLOUDFLARE_WARP_CLIENT_ID }}
+          WARP_CLIENT_SECRET: ${{ secrets.CLOUDFLARE_WARP_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
+            | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" \
+            | sudo tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cloudflare-warp >/dev/null
+          sudo install -d -m 0755 /var/lib/cloudflare-warp
+          umask 077
+          cat > "${RUNNER_TEMP}/mdm.xml" <<MDM
+          <dict>
+            <key>organization</key><string>${WARP_TEAM}</string>
+            <key>auth_client_id</key><string>${WARP_CLIENT_ID}</string>
+            <key>auth_client_secret</key><string>${WARP_CLIENT_SECRET}</string>
+            <key>service_mode</key><string>warp</string>
+            <key>auto_connect</key><integer>1</integer>
+            <key>onboarding</key><false/>
+          </dict>
+          MDM
+          sudo install -m 0600 "${RUNNER_TEMP}/mdm.xml" /var/lib/cloudflare-warp/mdm.xml
+          rm -f "${RUNNER_TEMP}/mdm.xml"
+          sudo systemctl restart warp-svc
+          for _ in $(seq 1 36); do
+            if warp-cli --accept-tos status 2>/dev/null | grep -q "Connected"; then break; fi
+            sleep 5
+          done
+          warp-cli --accept-tos status
+          warp-cli --accept-tos status | grep -q "Connected" || { echo "::error::WARP did not connect."; exit 1; }
+
+      - name: Connect to Twingate
+        if: steps.private_access.outputs.path == 'twingate'
         uses: twingate/github-action@v1
         with:
           service-key: ${{ secrets.TWINGATE_SERVICE_KEY }}
@@ -287,8 +357,8 @@ jobs:
           esac
 
       - name: Verify Allure server reachable
-        # Pre-flight check for the Allure host on the runner (where Twingate is
-        # active). Fails fast with a clear message before we pull the image and
+        # Pre-flight check for the Allure host on the runner (where WARP or
+        # Twingate is active). Fails fast with a clear message before we pull the image and
         # run tests, so we don't burn ~25 min only to lose results at upload.
         if: env.IS_ARC_RUNNER != 'true'
         run: |
@@ -298,8 +368,8 @@ jobs:
           echo "Resolving ${ALLURE_HOST}..."
           if ! getent hosts "${ALLURE_HOST}" >/dev/null; then
             echo "::error::Could not resolve ${ALLURE_HOST} on the runner."
-            echo "::error::This usually means the Twingate service account is missing access to the Allure resource."
-            echo "::error::Confirm the resource '${ALLURE_HOST}' is in the Twingate Service used by TWINGATE_SERVICE_KEY."
+            echo "::error::This usually means the private access client (WARP or Twingate) is not connected, or its service identity has no access to the Allure host."
+            echo "::error::Check that the CLOUDFLARE_WARP_* (or TWINGATE_SERVICE_KEY) secrets are passed and grant access to '${ALLURE_HOST}'."
             exit 1
           fi
           code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 30 "${ALLURE_BASE}/allure-docker-service/version" || echo "000")
@@ -307,7 +377,7 @@ jobs:
             200|301|302|401|403) echo "Allure reachable (HTTP ${code})" ;;
             *)
               echo "::warning::Allure pre-flight returned HTTP ${code} for ${ALLURE_BASE}/allure-docker-service/version."
-              echo "::warning::If the upload step also fails with a TLS handshake error, the e2e-tests Twingate service likely doesn't have access to ${ALLURE_HOST}."
+              echo "::warning::If the upload step also fails with a TLS handshake error, the private access client's service identity likely doesn't have access to ${ALLURE_HOST}."
               ;;
           esac
 
@@ -359,7 +429,7 @@ jobs:
 
           # /etc/resolv.conf is mounted so the container uses the host's
           # systemd-resolved (reachable on 127.0.0.53 thanks to --network host),
-          # which picks up Twingate's split-DNS entries. Without this, Docker
+          # which picks up the private access client's DNS (WARP or Twingate). Without this, Docker
           # injects 8.8.8.8 and purely internal hostnames (e.g. *.internal.*)
           # don't resolve.
           docker run --rm \
@@ -386,7 +456,7 @@ jobs:
           ALLURE_PASS: ${{ secrets.ALLURE_PASS }}
         run: |
           # /etc/resolv.conf mount: same rationale as the test step — required
-          # to resolve allure.internal.* via Twingate's split-DNS.
+          # to resolve allure.internal.* through the private access client's DNS.
           docker run --rm \
             --network host \
             -v /etc/resolv.conf:/etc/resolv.conf:ro \
