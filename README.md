@@ -105,6 +105,7 @@ page and badge show the current dev and prod state:
 | [`image-scan.yml`](#docker-image-scanning) | Trivy container image scan (warn on dev, block on prod release) |
 | [`seo-check.yml`](#seo-static-audit) | Static Next.js SEO audit (metadata, sitemap/robots presence); job summary |
 | [`seo-live-url.yml`](#seo-live-url) | Live site: homepage / `robots.txt` / sitemap content audit + Lighthouse SEO |
+| [`ai-review.yml`](.github/workflows/ai-review.yml) | AI PR review: blocking confidentiality check (Haiku 5.5) + advisory quality review (Sonnet 5.5). Rules live in a private repository; usage in the file header |
 | [`ai-release-bump.yml`](#ai-release-bump) | AI-powered semver classification + GitHub Release creation (also promotes `## [Unreleased]` in CHANGELOG) |
 
 ### Post-Deploy
