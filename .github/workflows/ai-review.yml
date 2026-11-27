@@ -48,7 +48,8 @@
 #     ai-review:
 #       uses: NeuralTrust/workflows/.github/workflows/ai-review.yml@main
 #       with:
-#         plugin_ref: review-v0.1.0
+#         plugin_ref: review-v0.1.2
+#         plugin_sha: <commit the tag points to>
 #         mode: warn
 #       secrets:
 #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -69,6 +70,10 @@ on:
         description: "Tag of the review plugin in NeuralTrust/agents-hub (review-vX.Y.Z)"
         type: string
         required: true
+      plugin_sha:
+        description: "Commit that plugin_ref must point to. Tags can be moved; when set, a mismatch fails the run"
+        type: string
+        default: ""
       mode:
         description: "enforce: findings fail the check. warn: findings are warnings (pilot)"
         type: string
@@ -143,6 +148,7 @@ jobs:
           PR_DRAFT: ${{ github.event.pull_request.draft }}
           MODE: ${{ inputs.mode }}
           PLUGIN_REF: ${{ inputs.plugin_ref }}
+          PLUGIN_SHA: ${{ inputs.plugin_sha }}
           QUALITY_ENABLED: ${{ inputs.quality_enabled }}
         run: |
           python3 - <<'PYEOF'
@@ -194,6 +200,8 @@ jobs:
                   return False, True, f"invalid mode {env('MODE')!r}; use warn or enforce"
               if not re.fullmatch(r"review-v\d+\.\d+\.\d+", env("PLUGIN_REF", "")):
                   return False, True, "plugin_ref must be a review-vX.Y.Z tag"
+              if env("PLUGIN_SHA") and not re.fullmatch(r"[0-9a-f]{40}", env("PLUGIN_SHA")):
+                  return False, True, "plugin_sha must be a full 40-character commit SHA"
               if env("EVENT_NAME") == "pull_request_target":
                   return False, True, "pull_request_target is not supported; use pull_request"
               if env("EVENT_NAME") != "pull_request":
@@ -321,6 +329,7 @@ jobs:
         env:
           HUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.AGENTS_HUB_TOKEN }}
           PLUGIN_REF: ${{ inputs.plugin_ref }}
+          PLUGIN_SHA: ${{ inputs.plugin_sha }}
         run: |
           set -euo pipefail
           dest="$RUNNER_TEMP/agents-hub"
@@ -331,6 +340,11 @@ jobs:
             https://github.com/NeuralTrust/agents-hub.git "$dest"
           if ! git -C "$dest" tag --points-at HEAD | grep -qx "$PLUGIN_REF"; then
             echo "::error::$PLUGIN_REF is not a tag of NeuralTrust/agents-hub"
+            exit 1
+          fi
+          actual=$(git -C "$dest" rev-parse HEAD)
+          if [ -n "$PLUGIN_SHA" ] && [ "$actual" != "$PLUGIN_SHA" ]; then
+            echo "::error::$PLUGIN_REF points to $actual, not the pinned plugin_sha $PLUGIN_SHA. The tag was moved; failing closed."
             exit 1
           fi
           echo "review plugin at $PLUGIN_REF ($(git -C "$dest" rev-parse --short HEAD))"
@@ -451,6 +465,7 @@ jobs:
         env:
           HUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.AGENTS_HUB_TOKEN }}
           PLUGIN_REF: ${{ inputs.plugin_ref }}
+          PLUGIN_SHA: ${{ inputs.plugin_sha }}
         run: |
           set -euo pipefail
           dest="$RUNNER_TEMP/agents-hub"
@@ -460,6 +475,11 @@ jobs:
             clone --quiet --depth 1 --branch "$PLUGIN_REF" \
             https://github.com/NeuralTrust/agents-hub.git "$dest"
           git -C "$dest" tag --points-at HEAD | grep -qx "$PLUGIN_REF"
+          actual=$(git -C "$dest" rev-parse HEAD)
+          if [ -n "$PLUGIN_SHA" ] && [ "$actual" != "$PLUGIN_SHA" ]; then
+            echo "::error::$PLUGIN_REF points to $actual, not the pinned plugin_sha $PLUGIN_SHA. The tag was moved; failing closed."
+            exit 1
+          fi
 
       - name: Checkout pull request
         uses: actions/checkout@v7
@@ -595,6 +615,7 @@ jobs:
         env:
           HUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.AGENTS_HUB_TOKEN }}
           PLUGIN_REF: ${{ inputs.plugin_ref }}
+          PLUGIN_SHA: ${{ inputs.plugin_sha }}
         run: |
           set -euo pipefail
           dest="$RUNNER_TEMP/agents-hub"
@@ -604,6 +625,11 @@ jobs:
             clone --quiet --depth 1 --branch "$PLUGIN_REF" \
             https://github.com/NeuralTrust/agents-hub.git "$dest"
           git -C "$dest" tag --points-at HEAD | grep -qx "$PLUGIN_REF"
+          actual=$(git -C "$dest" rev-parse HEAD)
+          if [ -n "$PLUGIN_SHA" ] && [ "$actual" != "$PLUGIN_SHA" ]; then
+            echo "::error::$PLUGIN_REF points to $actual, not the pinned plugin_sha $PLUGIN_SHA. The tag was moved; failing closed."
+            exit 1
+          fi
 
       - name: Publish quality review
         env:
