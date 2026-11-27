@@ -690,7 +690,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write
       issues: read
     steps:
       - name: Quality gate
@@ -714,6 +714,17 @@ jobs:
             echo "::warning::$1 (mode: warn, not blocking)"
             exit 0
           }
+          # The bot's change request would keep blocking the merge after the
+          # gate turns green, and label events never reach the publish job.
+          dismiss_change_requests() {
+            gh api --paginate "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
+              --jq '.[] | select(.user.login == "github-actions[bot]" and .state == "CHANGES_REQUESTED") | .id' \
+              | while read -r review; do
+                  gh api -X PUT "repos/${REPOSITORY}/pulls/${PR_NUMBER}/reviews/${review}/dismissals" \
+                    -f message="$1" -f event=DISMISS > /dev/null \
+                    || echo "::warning::could not dismiss review ${review}"
+                done
+          }
           if [ "$DECIDE_RESULT" != "success" ]; then
             echo "::error::decide job ended with '$DECIDE_RESULT'; no review ran. Failing closed."
             exit 1
@@ -728,6 +739,7 @@ jobs:
           fi
           if [ "$OVERRIDE" = "true" ]; then
             echo "::warning::ai-review/override applied by edukmx: quality gate bypassed"
+            dismiss_change_requests "Blockers bypassed by the ai-review/override label."
             exit 0
           fi
           if [ "$REVIEWED" = "true" ] && [ "$REVIEW_SKIPPED" != "true" ] && [ "$REVIEW_OK" != "true" ]; then
@@ -747,4 +759,5 @@ jobs:
           if [ "$count" -gt 0 ]; then
             fail "$count open blocker(s) from the AI quality review. See the ai-review / quality summary comment; fix them or ask edukmx for the ai-review/override label."
           fi
+          dismiss_change_requests "No open blockers left in the AI quality review."
           echo "No open blockers."
