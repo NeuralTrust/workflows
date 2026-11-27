@@ -11,8 +11,10 @@
 #     `branch_name_since` (older pull requests predate the rule).
 #
 # Pre-push hooks (unit tests, gosec) are not run here: the tests and SAST
-# workflows already cover them. golangci-lint is skipped by default for the
-# same reason, and because its hook only lints changes newer than HEAD.
+# workflows already cover them. Every golangci-lint hook except the formatters
+# is skipped for the same reason, and because they only lint changes newer
+# than HEAD. `go mod tidy` downloads the private NeuralTrust modules, so its
+# hooks run only when the caller passes GO_PRIVATE_TOKEN.
 #
 # The NeuralTrust hooks live in a private repository. A GitHub App with
 # contents:read on it provides the token; the job fails when the secrets are
@@ -39,6 +41,7 @@
 #       secrets:
 #         HOOKS_APP_ID: ${{ secrets.AGENTS_HUB_APP_ID }}
 #         HOOKS_APP_PRIVATE_KEY: ${{ secrets.AGENTS_HUB_APP_PRIVATE_KEY }}
+#         GO_PRIVATE_TOKEN: ${{ secrets.GH_TOKEN }}
 #
 # Open-source repository with a vendored copy:
 #
@@ -61,10 +64,10 @@ on:
         type: string
         default: go.mod
       skip:
-        description: "Comma-separated hook ids to skip (pre-commit SKIP)"
+        description: "Comma-separated hook ids to skip (pre-commit SKIP), on top of the golangci-lint hooks and, without GO_PRIVATE_TOKEN, the go-mod-tidy hooks"
         required: false
         type: string
-        default: golangci-lint
+        default: ""
       branch_name_since:
         description: "Check the head branch name and the commit messages on pull requests opened on or after this date (YYYY-MM-DD); empty checks the commit messages of every pull request and no branch names"
         required: false
@@ -86,6 +89,9 @@ on:
         required: false
       HOOKS_APP_PRIVATE_KEY:
         description: "Private key of that GitHub App"
+        required: false
+      GO_PRIVATE_TOKEN:
+        description: "Token with read access to the private NeuralTrust Go modules; without it the go-mod-tidy hooks are skipped"
         required: false
 
 # No workflow-level `concurrency:` here — a reusable workflow cannot key a group
@@ -177,14 +183,51 @@ jobs:
         if: steps.decide.outputs.run == 'true'
         run: python -m pip install --quiet "pre-commit>=3.5,<5"
 
+      - name: Grant Go read access to the private modules
+        id: go-private
+        if: steps.decide.outputs.run == 'true'
+        env:
+          TOKEN: ${{ secrets.GO_PRIVATE_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TOKEN" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GO_PRIVATE_TOKEN not set: the go-mod-tidy hooks are skipped"
+            exit 0
+          fi
+          echo "::add-mask::$TOKEN"
+          git config --global "url.https://x-access-token:${TOKEN}@github.com/${OWNER}/.insteadOf" "https://github.com/${OWNER}/"
+          {
+            echo "GOPRIVATE=github.com/${OWNER}/*"
+            echo "GONOSUMDB=github.com/${OWNER}/*"
+          } >> "$GITHUB_ENV"
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
       - name: Run pre-commit on the pull request diff
         if: steps.decide.outputs.run == 'true'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          SKIP: ${{ inputs.skip }}
+          EXTRA_SKIP: ${{ inputs.skip }}
+          GO_PRIVATE: ${{ steps.go-private.outputs.enabled }}
         run: |
           set -euo pipefail
+          # Hook ids skipped in CI: golangci-lint (not its formatters) always,
+          # go-mod-tidy without access to the private modules.
+          SKIP=$(GO_PRIVATE="$GO_PRIVATE" EXTRA_SKIP="$EXTRA_SKIP" python - <<'PY'
+          import os, yaml
+          with open(".pre-commit-config.yaml") as f:
+              ids = [h["id"] for r in yaml.safe_load(f)["repos"] for h in r["hooks"]]
+          skip = [i for i in ids if i.startswith("golangci-lint") and "fmt" not in i]
+          if os.environ["GO_PRIVATE"] != "true":
+              skip += [i for i in ids if i.startswith("go-mod-tidy")]
+          skip += [i for i in os.environ["EXTRA_SKIP"].split(",") if i]
+          print(",".join(dict.fromkeys(skip)))
+          PY
+          )
+          export SKIP
+          echo "skipped hooks: ${SKIP:-none}"
           base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
           pre-commit run --show-diff-on-failure --color always --from-ref "$base" --to-ref "$HEAD_SHA"
 
