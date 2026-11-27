@@ -113,6 +113,12 @@ on:
         description: 'Newline-separated build args (KEY=VALUE) whose values are masked in the log. Not secret inside the build: each is a plain --build-arg, recorded in the image history and exported by cache_mode: max. Keys that look like credentials fail the build; pass tokens and passwords through DOCKER_SECRETS.'
       GH_TOKEN:
         required: true
+      DEPLOY_APP_ID:
+        required: false
+        description: 'GitHub App id used to push the develop overlay update. With DEPLOY_APP_PRIVATE_KEY, the develop push runs as the app instead of GH_TOKEN; main keeps GH_TOKEN.'
+      DEPLOY_APP_PRIVATE_KEY:
+        required: false
+        description: 'Private key for DEPLOY_APP_ID.'
       SLACK_WEBHOOK_URL:
         required: false
         description: 'Slack Incoming Webhook URL for deploy notifications'
@@ -213,12 +219,42 @@ jobs:
     permissions:
       contents: write
 
+    env:
+      HAS_PUSH_APP: ${{ secrets.DEPLOY_APP_ID != '' && secrets.DEPLOY_APP_PRIVATE_KEY != '' }}
+
     steps:
+      # develop requires a PR for everyone except its bypass list, so the overlay
+      # push runs as the app on develop. main keeps GH_TOKEN because the org
+      # main-rule bypass does not include the app.
+      - name: Create develop push token
+        id: push-token
+        if: github.ref_name == 'develop' && env.HAS_PUSH_APP == 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Report push identity
+        if: steps.push-token.outcome != 'skipped'
+        env:
+          OUTCOME: ${{ steps.push-token.outcome }}
+          APP_SLUG: ${{ steps.push-token.outputs.app-slug }}
+        run: |
+          if [ "$OUTCOME" = "success" ]; then
+            echo "Pushing the overlay update as ${APP_SLUG}[bot]."
+          else
+            echo "::warning::Could not mint the app token for ${GITHUB_REPOSITORY}; falling back to GH_TOKEN. Check that the app has Contents: write and is installed on this repo."
+          fi
+
       - name: Checkout code
         uses: actions/checkout@v7
         with:
           persist-credentials: true
-          token: ${{ secrets.GH_TOKEN }}
+          token: ${{ steps.push-token.outputs.token || secrets.GH_TOKEN }}
           ref: ${{ github.ref_name }}
           fetch-depth: 0
 
